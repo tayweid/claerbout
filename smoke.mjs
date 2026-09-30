@@ -66,8 +66,27 @@ const app = await electron.launch({
   // Electron's download.
   timeout: 300_000,
 });
+// What a failure on a CI runner needs to say, since its log is not always
+// readable: the windows, the page, its console, and the app's own log.
+const consoleLines = [];
+const logPath = process.platform === 'darwin'
+  ? path.join(os.homedir(), 'Library', 'Logs', `${NAME}.log`)
+  : path.join(work, 'config', `${NAME}.log`);
 const fail = async (message) => {
-  console.error(`smoke (${mode}): ${message}`);
+  const details = [`windows: ${app.windows().map((window) => window.url()).join(', ') || 'none'}`];
+  if (page) {
+    details.push(`title: ${await page.title().catch(() => '?')}`);
+    details.push(`page text: ${(await page.evaluate(() => document.body?.innerText ?? '').catch(() => '?')).slice(0, 400).replace(/\s+/g, ' ')}`);
+  }
+  if (consoleLines.length) details.push(`console: ${consoleLines.slice(-8).join(' | ')}`);
+  try {
+    details.push(`${path.basename(logPath)}: ${fs.readFileSync(logPath, 'utf8').trim().split('\n').slice(-8).join(' | ')}`);
+  } catch {
+    details.push(`${path.basename(logPath)}: not written`);
+  }
+  const report = `smoke (${NAME}, ${mode}): ${message}\n  ${details.join('\n  ')}`;
+  console.error(report);
+  if (process.env.GITHUB_ACTIONS) console.log(`::error::${report.replace(/\n/g, '%0A')}`);
   await app.close().catch(() => {});
   process.exit(1);
 };
@@ -79,7 +98,11 @@ while (!page && Date.now() < deadline) {
   page = app.windows().find((window) => !window.url().includes('setup.html') && window.url() !== 'about:blank') ?? null;
   if (!page) await new Promise((resolve) => setTimeout(resolve, 500));
 }
-if (!page) await fail(`no document window (${app.windows().map((window) => window.url())})`);
+if (!page) await fail('no document window');
+page.on('console', (message) => {
+  if (message.type() === 'error' || message.type() === 'warning') consoleLines.push(`${message.type()}: ${message.text()}`);
+});
+page.on('pageerror', (error) => consoleLines.push(`pageerror: ${error.message}`));
 if (smoke.ready) {
   const want = smoke.readyText?.[mode] ?? smoke.readyText ?? null;
   await page
