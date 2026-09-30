@@ -84,14 +84,15 @@ if (installScriptTo) {
 
 // MARK: - What to build, and where
 
-// The page: a site build named with --web, else the config's `web` folder
-// (relative to the config), else the package's own web/ folder.
+// The page: a site build named with --web (a command-line path, so relative
+// to the working directory), else the config's `web` folder (relative to
+// the config), else the package's own web/ folder.
 const devPython = path.resolve(configDir, config.devPython ?? '.');
 const packageDir = config.package ? path.join(devPython, config.package) : null;
-const web = path.resolve(
-  configDir,
-  option('web', null) ?? config.web ?? (packageDir ? path.join(packageDir, 'web') : ''),
-);
+const webOption = option('web', null);
+const web = typeof webOption === 'string'
+  ? path.resolve(webOption)
+  : path.resolve(configDir, config.web ?? (packageDir ? path.join(packageDir, 'web') : ''));
 if (!existsSync(path.join(web, 'index.html'))) fail(`no page at ${web}`);
 // Top-level entries of the site that are not part of the page (the
 // install line and the app download live beside it).
