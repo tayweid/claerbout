@@ -93,7 +93,16 @@ const webOption = option('web', null);
 const web = typeof webOption === 'string'
   ? path.resolve(webOption)
   : path.resolve(configDir, config.web ?? (packageDir ? path.join(packageDir, 'web') : ''));
-if (!existsSync(path.join(web, 'index.html'))) fail(`no page at ${web}`);
+// What the page folder must hold follows the Pythons offered: the page
+// itself where it is served from the bundle ("browser"), the setup page
+// where uv's first launch shows it ("uv"). An app whose engine serves
+// its pages (ManimLive, uv alone) carries only the setup page; one with
+// no Python (Plass, browser alone) carries only the page.
+const pythonsOffered = Array.isArray(config.pythons) && config.pythons.length > 0 ? config.pythons : ['uv', 'browser'];
+if (pythonsOffered.includes('browser') && !existsSync(path.join(web, 'index.html'))) fail(`no page at ${web}`);
+if (pythonsOffered.includes('uv') && !existsSync(path.join(web, config.setupPage ?? 'setup.html'))) {
+  fail(`no setup page at ${web}`);
+}
 // Top-level entries of the site that are not part of the page (the
 // install line and the app download live beside it).
 const webExclude = Array.isArray(config.webExclude) ? config.webExclude : ['install', 'app'];
