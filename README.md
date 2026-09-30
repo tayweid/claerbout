@@ -26,12 +26,16 @@ install line does the same before moving the app into place.
 ## Using it from an app
 
 ```
-npm install github:tayweid/claerbout#v0.1.0
+npm install https://github.com/tayweid/claerbout/archive/refs/tags/v0.1.0.tar.gz
 ```
 
 Pin a tag: Electron's version is pinned here, and a sibling clone needs an
 exact match, so every app moves to a new Electron together (one tag, one
-pull request per app, the same day).
+pull request per app, the same day). Depend on the tag's tarball, not on
+`github:tayweid/claerbout#v0.1.0`: npm records that form as git over SSH in
+the lockfile, which a CI runner without a key cannot fetch, and rewrites
+it back to SSH on every `npm install` even when the lockfile says HTTPS.
+The tarball needs no git and carries an integrity hash.
 
 Scripts an app typically has:
 
