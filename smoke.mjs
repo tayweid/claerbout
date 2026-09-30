@@ -14,7 +14,7 @@
 // ~/.local/bin if the machine has none), as a first launch would.
 
 import { _electron as electron } from '@playwright/test';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -51,27 +51,68 @@ fs.mkdirSync(path.dirname(doc));
 fs.writeFileSync(doc, smoke.text ?? '');
 const port = String(5400 + Math.floor(Math.random() * 400));
 
+const env = {
+  ...process.env,
+  ...(bundle ? {} : { CLAERBOUT_APP: path.resolve(configPath) }),
+  [`${PREFIX}_CONFIG_DIR`]: path.join(work, 'config'),
+  [`${PREFIX}_CHOOSE`]: mode,
+  [`${PREFIX}_PORT`]: port,
+};
+const executable = bundle ? path.join(bundle, 'Contents', 'MacOS', NAME) : null;
+
+/** When the process dies before Playwright hears from it, run it plainly
+ *  for a moment and report what it did: its status or signal, its output,
+ *  and the signatures of what it executes (a process killed at exec on
+ *  Apple silicon is an invalid signature). */
+function launchFailed(error) {
+  const lines = [`launch failed: ${error.message.split('\n')[0]}`];
+  if (executable) {
+    const run = spawnSync(executable, [], { env, timeout: 8000, encoding: 'utf8' });
+    lines.push(`ran ${executable}: status ${run.status}, signal ${run.signal}${run.error ? `, error ${run.error.message}` : ''}`);
+    const output = `${run.stdout ?? ''}${run.stderr ?? ''}`.trim();
+    if (output) lines.push(`output: ${output.split('\n').slice(0, 12).join(' | ')}`);
+    const contents = path.join(bundle, 'Contents');
+    for (const target of [
+      bundle,
+      executable,
+      path.join(contents, 'MacOS', `${NAME} Electron`),
+      path.join(contents, 'Frameworks', 'Electron Framework.framework'),
+    ]) {
+      const check = spawnSync('codesign', ['--verify', '--strict', '--verbose=2', target], { encoding: 'utf8' });
+      lines.push(`codesign ${path.relative(bundle, target) || 'bundle'}: ${check.status === 0 ? 'valid' : (check.stderr || '').trim().split('\n').slice(-2).join(' | ')}`);
+    }
+    try {
+      lines.push(`${NAME}.log: ${fs.readFileSync(logPath, 'utf8').trim().split('\n').slice(-6).join(' | ')}`);
+    } catch {
+      lines.push(`${NAME}.log: not written`);
+    }
+  }
+  const report = `smoke (${NAME}, ${mode}): ${lines.join('\n  ')}`;
+  console.error(report);
+  if (process.env.GITHUB_ACTIONS) console.log(`::error::${report.replace(/\n/g, '%0A')}`);
+  process.exit(1);
+}
+
+const logPath = process.platform === 'darwin'
+  ? path.join(os.homedir(), 'Library', 'Logs', `${NAME}.log`)
+  : path.join(work, 'config', `${NAME}.log`);
+// Playwright reports a process that dies at launch as an uncaught error
+// in its own machinery, not as a rejection of launch(), so it is caught
+// at the process.
+process.on('uncaughtException', launchFailed);
+process.on('unhandledRejection', (reason) => launchFailed(reason instanceof Error ? reason : new Error(String(reason))));
 const app = await electron.launch({
-  ...(bundle
-    ? { executablePath: path.join(bundle, 'Contents', 'MacOS', NAME), args: [doc] }
-    : { args: [here, doc] }),
-  env: {
-    ...process.env,
-    ...(bundle ? {} : { CLAERBOUT_APP: path.resolve(configPath) }),
-    [`${PREFIX}_CONFIG_DIR`]: path.join(work, 'config'),
-    [`${PREFIX}_CHOOSE`]: mode,
-    [`${PREFIX}_PORT`]: port,
-  },
+  ...(bundle ? { executablePath: executable, args: [doc] } : { args: [here, doc] }),
+  env,
   // A slim app completes itself before Electron starts: allow for
   // Electron's download.
   timeout: 300_000,
 });
+process.removeAllListeners('uncaughtException');
+process.removeAllListeners('unhandledRejection');
 // What a failure on a CI runner needs to say, since its log is not always
 // readable: the windows, the page, its console, and the app's own log.
 const consoleLines = [];
-const logPath = process.platform === 'darwin'
-  ? path.join(os.homedir(), 'Library', 'Logs', `${NAME}.log`)
-  : path.join(work, 'config', `${NAME}.log`);
 const fail = async (message) => {
   const details = [`windows: ${app.windows().map((window) => window.url()).join(', ') || 'none'}`];
   if (page) {
