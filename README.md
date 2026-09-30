@@ -1,0 +1,110 @@
+# Claerbout
+
+One Electron shell for a suite of document apps — Knuth, Plass, ManimLive —
+built once per app from a config. Each app gets its own name, icon, Dock
+entry, menus, file types and install line; the shell is the same code. The
+design record is in Knuth's `docs/APP.md` ("Electron, one shell for
+Claerbout") and `docs/SHELL_STABILITY.md`; Plass's port is in its
+`docs/CLAERBOUT-SHELL.md`.
+
+The shell owns what a native app must: a window per document, the native
+open and save dialogs, a first-launch choice of Python and its setup (uv,
+or the page running by itself), the engine process's lifetime, files by
+absolute path on the page's behalf, and Chromium's permission questions.
+Everything else is the app's own page, served from the bundle under
+`<scheme>://app/` or by the app's engine over loopback.
+
+An app ships **without Electron's framework** (286 of Electron's 288 MB),
+so its download is a few megabytes. The bundle's executable is a small
+compiled launcher: with the framework present it becomes Electron; without,
+it completes the app first (`complete.sh`), cloning the framework from
+another installed Claerbout app on the same Electron version — an APFS
+clone, no space used — or downloading Electron's release from GitHub and
+checking it against the published sums and the hash the app records. The
+install line does the same before moving the app into place.
+
+## Using it from an app
+
+```
+npm install github:tayweid/claerbout#v0.1.0
+```
+
+Pin a tag: Electron's version is pinned here, and a sibling clone needs an
+exact match, so every app moves to a new Electron together (one tag, one
+pull request per app, the same day).
+
+Scripts an app typically has:
+
+```json
+"app":        "CLAERBOUT_APP=app/knuth.json electron node_modules/claerbout",
+"app:build":  "node node_modules/claerbout/package.mjs --config app/knuth.json",
+"app:smoke":  "node node_modules/claerbout/smoke.mjs --config app/knuth.json browser",
+"app:install-script": "node node_modules/claerbout/package.mjs --config app/knuth.json --install-script public/install"
+```
+
+- `electron node_modules/claerbout` runs the shell from the checkout on the
+  config named in `CLAERBOUT_APP`; the page loads from the engine, from
+  the config's `web` folder, or from the package's `web/`.
+- `package.mjs --config … ` builds the app with `@electron/packager` and
+  installs it into Applications; `--install path.app` elsewhere; `--zip
+  out/ --arch arm64,x64` writes the deploy's download zips
+  (`<Name>-<arch>.zip`, and `<Name>.app.zip` for a page's download
+  button); `--web dist` takes the page from a site build. Needs macOS with
+  Apple's command-line tools (`swiftc`, `sips`, `iconutil`, `codesign`).
+- `--install-script <file>` renders `install.template` for the app: the
+  `curl … | bash` line users run. Commit the output (Knuth's
+  `public/install`) so the site serves it.
+- `smoke.mjs --config … [browser|uv] [App.app]` launches the app (the
+  checkout's, or a built bundle, complete or not) on a document in a
+  throwaway config folder and checks what the config's `smoke` section
+  says; see below.
+
+## The config
+
+One JSON file per app (`app/knuth.json`, `app/plass.json`). The build
+copies it into the bundle as `app.json`.
+
+| key | meaning |
+| --- | --- |
+| `name` | The app's name: `Knuth` → `Knuth.app`, the menu, the log. |
+| `id` | Bundle identifier. |
+| `envPrefix` | Prefix of the environment variables the shell reads for development: `<PREFIX>_CONFIG_DIR`, `_PORT`, `_UV`, `_UV_ARCHIVE`, `_CHOOSE`. |
+| `scheme` | The bundled page's scheme: `knuth://app/`. |
+| `pythons` | The Pythons offered, in the setup page's order: `"uv"` (the engine on a Python uv installs), `"browser"` (the page from the bundle: Python in the tab, or none). Default `["uv", "browser"]`. One entry means no choice and no setup question. |
+| `package` | A Python package holding the engine and, in its `web/`, the page. Set `devPython` to the folder that holds it (relative to the config) for development. |
+| `web` | For an app with no package: the page's folder, relative to the config. In the bundle it is `Resources/web`. |
+| `webExclude` | Top-level entries of the page's folder left out of the bundle. Default `["install", "app"]`. |
+| `engine` | With `"uv"` offered: `args` (after the Python: `["-m", "knuth", "serve"]`; the shell adds `--port` and `--parent`), `marker` (a file in the package that proves the engine is there), `probe` (text the engine's `/` must contain), `python` (the version uv installs), `requirements` (what uv installs beside the package). |
+| `port` | The engine's preferred port; the next free one if taken. |
+| `setupPage` | The first-launch page, inside the page's folder (`setup.html`). It speaks the protocol itself: `choose` in, `setup` events out. |
+| `defaultDocument` | The Save As… panel's suggested name. |
+| `openBy` | `"path"` (default): a document opens as `?open=<absolute path>`. `"drop"`: additionally, once the page sends `ready`, the document is dropped on it, so a page that keeps files by handle (File System Access API) gets a real handle. |
+| `permissions` | Chromium permissions granted to the app's own pages beyond the defaults (`fileSystem`, `fullscreen`, `clipboard-sanitized-write`): Electron's names, `"clipboard-read"`, `"media"`, `"notifications"`. Everything else is refused. |
+| `window` | `width`, `height`, `minWidth`, `minHeight` of a new window; the last size is remembered. |
+| `icon` | A PNG, 512 px or larger, relative to the config. |
+| `copyright` | For the bundle's Info.plist. |
+| `documentTypes` | Finder's Open With: `name`, `role`, `rank` (`Alternate` unless you mean to take the type), and `contentTypes` (UTIs) or `extensions`. |
+| `site` | The URL the install line downloads from (`https://knuth.tayweid.io`); the zips live at `<site>/app/`. |
+| `elsewhere` | A sentence the install line adds when run off macOS. |
+| `smoke` | What `smoke.mjs` checks: `document` (name), `text` (contents), `ready` (a selector) and `readyText` (its text, or per mode `{uv, browser}`), `run` (a selector to click), `written` (a file expected beside the document), and `json` (keys it must hold) or `contains` (text it must hold). |
+
+## The protocol
+
+The preload exposes `window.claerbout.request(message) → Promise` and
+`window.claerbout.on(event, listener) → unsubscribe`. Requests are answered
+only from the origin the shell loaded into that window.
+
+Requests: `open` and `saveAs {name}` (the native panels; `{path}` or
+`{path: null}`), `read {path}`, `write {path, text}`, `stat {path}`,
+`rename {path, name}`, `remove {path}` (files by absolute path, replies
+shaped like Knuth's engine's), `choose {python}` (the setup page's
+answer), `status {state}` and `error {message}` (logged), `ready` (the
+page is listening for a dropped document; see `openBy`).
+
+Events: `setup {kind: 'progress' | 'failed', text}` on the setup page.
+
+## Testing here
+
+`npm test` runs the smoke test on `test/fixture`, a page with no Python
+that reads its document through the shell and writes a copy beside it.
+`npm run fixture:build` packages it. Both need macOS.

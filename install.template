@@ -1,0 +1,87 @@
+#!/bin/bash
+# Install or update @NAME@.app:
+#
+#   curl -fsSL @SITE@/install | bash
+#
+# Generated from the Claerbout shell's install.template by package.mjs
+# (--install-script); edit the template, not this file. Every deploy
+# builds the app on a Mac and publishes it beside the site as
+# app/@NAME@-<arch>.zip, so this always installs the site's current
+# version, and running it again updates. Needs nothing but macOS 13.
+#
+# The zip is the app without Electron's framework (Chromium, 286 MB). The
+# app's own complete.sh puts it in: cloned from an installed Claerbout app
+# on the same Electron version — @NAME@ itself when updating, another
+# Claerbout app otherwise — which on APFS costs no disk space; with none,
+# Electron's release is downloaded from GitHub and checked against its
+# published SHA-256 sums. The same zip from a page's download button
+# completes itself on first launch.
+#
+# Overrides, for testing: @PREFIX@_SITE (a URL or a local folder holding
+# app/@NAME@-<arch>.zip), @PREFIX@_APP (the .app to write), @PREFIX@_SIBLINGS
+# (folders to look in for a sibling, instead of the Applications folders;
+# empty means none), ELECTRON_MIRROR (where Electron's releases are).
+set -euo pipefail
+
+site="${@PREFIX@_SITE:-@SITE@}"
+
+die() { printf '@NAME@ install: %s\n' "$*" >&2; exit 1; }
+[ "$(uname -s)" = "Darwin" ] || die "@NAME@.app is for macOS.@ELSEWHERE@"
+case "$(uname -m)" in
+    arm64) arch=arm64 ;;
+    x86_64) arch=x64 ;;
+    *) die "no @NAME@.app for this processor ($(uname -m))." ;;
+esac
+
+if [ -n "${@PREFIX@_APP:-}" ]; then
+    app="$@PREFIX@_APP"
+elif [ -w /Applications ]; then
+    app="/Applications/@NAME@.app"
+else
+    mkdir -p "$HOME/Applications"
+    app="$HOME/Applications/@NAME@.app"
+fi
+mkdir -p "$(dirname "$app")"
+# Replacing the bundle of a running app pulls it out from under the windows
+# it opens next. (macOS may report a path under /private without that
+# prefix.)
+if pgrep -f "^(/private)?${app#/private}/Contents/MacOS/" >/dev/null 2>&1; then
+    die "@NAME@ is open. Quit it (@NAME@ menu → Quit @NAME@), then run this again."
+fi
+
+# The new app is put together beside the old one, so a sibling is judged on
+# the right volume, and replaces it only once complete.
+incoming="$app.incoming"
+work="$(mktemp -d)"
+trap 'rm -rf "$work" "$incoming"' EXIT
+
+echo "@NAME@: downloading…"
+fetch() { # fetch <url-or-path> <file>
+    case "$1" in
+        http*) curl -fsSL -o "$2" "$1" ;;
+        *) cp "$1" "$2" ;;
+    esac
+}
+fetch "$site/app/@NAME@-$arch.zip" "$work/@NAME@.zip" \
+    || die "could not download @NAME@ — check the connection and run this again."
+ditto -x -k "$work/@NAME@.zip" "$work"
+rm -rf "$incoming"
+mv "$work/@NAME@.app" "$incoming"
+new="$incoming"
+[ -x "$new/Contents/Resources/complete.sh" ] || die "the download was incomplete — run this again."
+# Apple silicon runs only signed code; Electron's x64 release, and so this
+# app on an Intel Mac, is unsigned. The seal is the app as it ships.
+if [ "$arch" = arm64 ]; then
+    codesign --verify --strict "$new" 2>/dev/null || die "the download does not verify — run this again."
+fi
+
+# The app completes itself with the script it carries: Electron cloned from
+# the app this replaces or another Claerbout app, else downloaded once.
+if [ -n "${@PREFIX@_SIBLINGS+set}" ]; then export CLAERBOUT_SIBLINGS="$@PREFIX@_SIBLINGS"; fi
+echo "@NAME@: getting Electron (shared with another Claerbout app if one has it, else about 130 MB, once)…"
+"$new/Contents/Resources/complete.sh" "$new" /dev/null "$app" \
+    || die "could not get Electron — check the connection and run this again."
+
+rm -rf "$app"
+mv "$new" "$app" || die "could not move @NAME@ into place — run this again."
+echo "@NAME@: installed $app — open it from $(dirname "$app")."

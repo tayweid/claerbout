@@ -1,0 +1,26 @@
+{
+  "name": "Fixture",
+  "id": "io.tayweid.claerbout.fixture",
+  "envPrefix": "FIXTURE",
+  "pythons": ["browser"],
+  "scheme": "fixture",
+  "web": "web",
+  "site": "https://example.invalid",
+  "setupPage": "setup.html",
+  "defaultDocument": "Note.txt",
+  "window": { "width": 640, "height": 480, "minWidth": 320, "minHeight": 240 },
+  "icon": "icon.png",
+  "copyright": "© 2026 Taylor J Weidman. MIT License.",
+  "documentTypes": [
+    { "name": "Text file", "role": "Editor", "rank": "Alternate", "contentTypes": ["public.plain-text"], "extensions": ["txt"] }
+  ],
+  "smoke": {
+    "document": "note.txt",
+    "text": "hello from the fixture\n",
+    "ready": "#status",
+    "readyText": { "browser": "ready" },
+    "run": "#save",
+    "written": "note.txt.copy",
+    "contains": "hello from the fixture"
+  }
+}

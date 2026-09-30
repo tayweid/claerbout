@@ -1,0 +1,32 @@
+{
+  "name": "claerbout",
+  "version": "0.1.0",
+  "description": "The Claerbout shell: one Electron shell, built once per app (Knuth, Plass, ManimLive) from a config, shipping without Electron's framework and completing itself.",
+  "license": "MIT",
+  "repository": "github:tayweid/claerbout",
+  "type": "commonjs",
+  "main": "main.js",
+  "files": [
+    "main.js",
+    "preload.js",
+    "complete.sh",
+    "launcher.swift",
+    "package.mjs",
+    "smoke.mjs",
+    "install.template",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node smoke.mjs --config test/fixture/app.json browser",
+    "fixture": "CLAERBOUT_APP=test/fixture/app.json electron .",
+    "fixture:build": "node package.mjs --config test/fixture/app.json --install /tmp/Fixture.app"
+  },
+  "dependencies": {
+    "@electron/packager": "^20.3.0",
+    "@playwright/test": "^1.62.1",
+    "electron": "44.5.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

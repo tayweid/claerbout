@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Fixture</title>
+    <style>
+      body { font: 14px system-ui; margin: 24px; }
+      pre { border: 1px solid #ccc; padding: 8px; min-height: 4em; }
+    </style>
+  </head>
+  <body>
+    <p>A page with no Python: the shell's window, its files by path, its dialogs.</p>
+    <p>Status: <b id="status">starting</b></p>
+    <pre id="text"></pre>
+    <button id="save" type="button">Save a copy beside it</button>
+    <button id="open" type="button">Open…</button>
+    <script src="./index.js"></script>
+  </body>
+</html>
