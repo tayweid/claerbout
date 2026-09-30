@@ -53,7 +53,7 @@ fi
 # the right volume, and replaces it only once complete.
 incoming="$app.incoming"
 work="$(mktemp -d)"
-trap 'rm -rf "$work" "$incoming"' EXIT
+trap 'status=$?; rm -rf "$work" "$incoming"; exit $status' EXIT
 
 echo "@NAME@: downloading…"
 fetch() { # fetch <url-or-path> <file>

@@ -39,7 +39,7 @@ volume() { stat -f %d "$1" 2>/dev/null; }
 
 version="$(plist "$app" ClaerboutElectronVersion)"
 expected="$(plist "$app" ClaerboutFrameworkSHA256)"
-[ -n "$version" ] && [ -n "$expected" ] || die "$app does not say which Electron it needs."
+[ -n "${version}" ] && [ -n "$expected" ] || die "$app does not say which Electron it needs."
 case "$(uname -m)" in
     arm64) arch=arm64 ;;
     *) arch=x64 ;;
@@ -70,7 +70,7 @@ fi
 for candidate in ${candidates[@]+"${candidates[@]}"}; do
     fw="$candidate/Contents/Frameworks/$framework"
     [ -d "$fw" ] || continue
-    [ "$(plist "$candidate" ClaerboutElectronVersion)" = "$version" ] || continue
+    [ "$(plist "$candidate" ClaerboutElectronVersion)" = "${version}" ] || continue
     [ "$(volume "$candidate")" = "$here" ] || continue
     [ "$(binary_hash "$fw")" = "$expected" ] || continue
     say 100 "Sharing Electron with $(basename "$candidate" .app)…"
@@ -78,26 +78,28 @@ for candidate in ${candidates[@]+"${candidates[@]}"}; do
     # until one side changes. Falls back to an ordinary copy by itself.
     cp -Rc "$fw" "$incoming" || die "could not copy Electron from $(basename "$candidate")."
     place
-    echo "shared Electron $version with $candidate"
+    echo "shared Electron ${version} with $candidate"
     exit 0
 done
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
-release="electron-v$version-darwin-$arch.zip"
-url="$mirror/v$version/$release"
+# The trap keeps the exit status: in bash 3.2 a trap's own last command
+# could otherwise turn a failure into 0.
+trap 'status=$?; rm -rf "$work"; exit $status' EXIT
+release="electron-v${version}-darwin-$arch.zip"
+url="$mirror/v${version}/$release"
 fetch() { # fetch <url-or-path> <file>
     case "$1" in
         http*) curl -fsSL -o "$2" "$1" ;;
         *) cp "$1" "$2" ;;
     esac
 }
-fetch "$mirror/v$version/SHASUMS256.txt" "$work/SHASUMS256.txt" \
+fetch "$mirror/v${version}/SHASUMS256.txt" "$work/SHASUMS256.txt" \
     || die "could not download Electron's checksums — check the connection."
 sum="$(grep " \*\{0,1\}$release\$" "$work/SHASUMS256.txt" | cut -d' ' -f1)"
 [ -n "$sum" ] || die "Electron's checksums do not list $release."
 
-say 0 "Downloading Electron $version…"
+say 0 "Downloading Electron ${version}…"
 case "$url" in
     http*)
         size="$(curl -fsSLI "$url" | tr -d '\r' | awk 'tolower($1) == "content-length:" { n = $2 } END { print n + 0 }')"
@@ -106,7 +108,7 @@ case "$url" in
         while kill -0 "$download" 2>/dev/null; do
             if [ "$size" -gt 0 ] && [ -f "$work/$release" ]; then
                 have="$(stat -f %z "$work/$release")"
-                say "$((have * 100 / size))" "Downloading Electron $version ($((have / 1048576)) of $((size / 1048576)) MB)…"
+                say "$((have * 100 / size))" "Downloading Electron ${version} ($((have / 1048576)) of $((size / 1048576)) MB)…"
             fi
             sleep 0.3
         done
@@ -124,4 +126,4 @@ ditto -x -k "$work/$release" "$work/electron"
 ditto "$work/electron/Electron.app/Contents/Frameworks/$framework" "$incoming"
 place
 say 100 "Starting…"
-echo "downloaded Electron $version into $app"
+echo "downloaded Electron ${version} into $app"
