@@ -78,7 +78,7 @@ copies it into the bundle as `app.json`.
 | `package` | A Python package holding the engine and, in its `web/`, the page. Set `devPython` to the folder that holds it (relative to the config) for development. |
 | `web` | For an app with no package: the page's folder, relative to the config. In the bundle it is `Resources/web`. |
 | `webExclude` | Top-level entries of the page's folder left out of the bundle. Default `["install", "app"]`. |
-| `engine` | With `"uv"` offered: `args` (after the Python: `["-m", "knuth", "serve"]`; the shell adds `--port` and `--parent`), `marker` (a file in the package that proves the engine is there), `probe` (text the engine's `/` must contain), `python` (the version uv installs), `requirements` (what uv installs beside the package: PEP 508 strings, markers allowed), `startTimeout` (milliseconds the shell waits for the engine's first answer; default 25000. ManimLive's first start after an install took 14 s on an M-series Mac, reading fresh site-packages). |
+| `engine` | With `"uv"` offered: `args` (after the Python: `["-m", "knuth", "serve"]`; the shell adds `--port` and `--parent`), `marker` (a file in the package that proves the engine is there), `probe` (text the engine's `/` must contain), `python` (the version uv installs), `requirements` (what uv installs beside the package: PEP 508 strings, markers allowed), `requirementsFile` (a requirements file, relative to the config, installed with `-r` beside `requirements`: the place for an exact export of the app's lockfile, `uv export --no-dev --no-emit-project --no-hashes -o app/engine-requirements.txt`, so every install resolves identically; the build copies it into the bundle), `startTimeout` (milliseconds the shell waits for the engine's first answer; default 25000. ManimLive's first start after an install took 14 s on an M-series Mac, reading fresh site-packages). |
 | `port` | The engine's preferred port; the next free one if taken. |
 | `setupPage` | The first-launch page, inside the page's folder (`setup.html`; a subpath such as `static/setup.html` works). It speaks the protocol itself: `choose` in, `setup` events out. |
 | `defaultDocument` | The Save As… panel's suggested name. |
@@ -113,6 +113,12 @@ copies it into the bundle as `app.json`.
   and offers to uninstall it. Returning an app to its first launch means
   removing both: the Application Support folder and that environment. A
   test sets `CLAERBOUT_UV_DIR` to a throwaway folder, as `smoke.mjs` does.
+- The environment follows the app: the shell stamps what it installed
+  (`claerbout-requirements.sha256` in the environment) and, when an update
+  of the app changes `requirements` or the requirements file, runs the
+  install again on the next launch, behind the setup page's progress
+  screen. The engine's own code is never installed: it is the package in
+  the bundle, on `PYTHONPATH`, and changes with the app.
 - It runs with `PYTHONPATH` set to the bundle's `python/` folder, and
   `PYTHONDONTWRITEBYTECODE=1`: the bundle is not the engine's to write.
 

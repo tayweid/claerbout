@@ -21,6 +21,7 @@
 
 const { app, BrowserWindow, Menu, dialog, ipcMain, net, protocol, session, shell } = require('electron');
 const { execFile, spawn } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
@@ -181,9 +182,36 @@ class SetupError extends Error {}
 /** uv, then a Python, then what the engine needs. Each step is skipped
  *  when its result is already in place, so a second run — or a run after
  *  an interrupted first — picks up where things stand. */
+/** What the engine needs installed beside the bundled package: the
+ *  config's `requirements` list, and the lines of `requirementsFile` (an
+ *  exact export of the app's lockfile, say), which the build copies in
+ *  beside the config. The stamp of what was installed is kept in the
+ *  environment, so an app update that changes the list installs again;
+ *  uv takes a second when nothing is missing. */
+function requirementsFile() {
+  if (!config.engine?.requirementsFile) return null;
+  return app.isPackaged
+    ? path.join(__dirname, 'requirements.txt')
+    : path.resolve(path.dirname(configPath), config.engine.requirementsFile);
+}
+
+function requirementsSpec() {
+  const listed = Array.isArray(config.engine?.requirements) ? config.engine.requirements : [];
+  const file = requirementsFile();
+  const fromFile = file ? fs.readFileSync(file, 'utf8') : '';
+  return { listed, file, stamp: createHash('sha256').update(JSON.stringify(listed)).update(fromFile).digest('hex') };
+}
+
+const requirementsStamp = path.join(engineDir, 'claerbout-requirements.sha256');
+
 const Installer = {
   get isInstalled() {
-    return findUV() !== null && isExecutable(enginePython);
+    if (findUV() === null || !isExecutable(enginePython)) return false;
+    try {
+      return fs.readFileSync(requirementsStamp, 'utf8').trim() === requirementsSpec().stamp;
+    } catch {
+      return false;
+    }
   },
 
   async install(progress) {
@@ -204,13 +232,15 @@ const Installer = {
       if (status !== 0) throw new SetupError(`Python could not be installed.\n${lastLines(output, 3)}`);
     }
     progress('Preparing the engine…');
+    const spec = requirementsSpec();
     const { status, output } = await run(
       uv,
-      ['pip', 'install', '--python', enginePython, ...config.engine.requirements],
+      ['pip', 'install', '--python', enginePython, ...(spec.file ? ['-r', spec.file] : []), ...spec.listed],
       { timeout: 600_000, env: uvEnvironment() },
     );
     log(`uv pip install: exit ${status}\n${lastLines(output)}`);
     if (status !== 0) throw new SetupError(`The engine could not be prepared.\n${lastLines(output, 3)}`);
+    fs.writeFileSync(requirementsStamp, spec.stamp);
   },
 };
 

@@ -137,6 +137,13 @@ const appDir = path.join(stage, 'app');
 mkdirSync(appDir, { recursive: true });
 for (const file of ['main.js', 'preload.js']) cpSync(path.join(here, file), path.join(appDir, file));
 cpSync(configPath, path.join(appDir, 'app.json'));
+// The engine's requirements file (an exact export of the app's lockfile,
+// say) rides beside the config; main.js reads it there when packaged.
+if (config.engine?.requirementsFile) {
+  const requirements = path.resolve(configDir, config.engine.requirementsFile);
+  if (!existsSync(requirements)) fail(`no requirements file at ${requirements}`);
+  cpSync(requirements, path.join(appDir, 'requirements.txt'));
+}
 writeFileSync(
   path.join(appDir, 'package.json'),
   JSON.stringify({ name: config.package ?? config.name.toLowerCase(), productName: config.name, version, main: 'main.js' }, null, 2),
