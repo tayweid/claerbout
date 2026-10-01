@@ -55,6 +55,8 @@ const env = {
   ...process.env,
   ...(bundle ? {} : { CLAERBOUT_APP: path.resolve(configPath) }),
   [`${PREFIX}_CONFIG_DIR`]: path.join(work, 'config'),
+  // The engine's environment goes beside uv's Pythons; a throwaway one here.
+  CLAERBOUT_UV_DIR: path.join(work, 'uv-claerbout'),
   [`${PREFIX}_CHOOSE`]: mode,
   [`${PREFIX}_PORT`]: port,
 };

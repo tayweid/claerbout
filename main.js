@@ -40,8 +40,8 @@ const isMac = process.platform === 'darwin';
 const isWindows = process.platform === 'win32';
 const home = os.homedir();
 
-// Everything the app installs or remembers lives in one folder, which is
-// also the engine's own preference store. <PREFIX>_CONFIG_DIR, _PORT,
+// What the app remembers lives in one folder, which is also the engine's
+// own preference store; the engine's Python lives with uv's tools (below). <PREFIX>_CONFIG_DIR, _PORT,
 // _UV, _UV_ARCHIVE and _CHOOSE are for development; a Finder launch has
 // none of them.
 const stateDir = env('CONFIG_DIR') || path.join(app.getPath('appData'), NAME);
@@ -59,7 +59,22 @@ const exe = isWindows ? '.exe' : '';
 /** Where uv's own installer puts uv, and where the app puts it when the
  *  machine has none: then it is an ordinary uv, usable from a terminal. */
 const standardUV = path.join(home, '.local', 'bin', `uv${exe}`);
-const engineDir = path.join(stateDir, 'engine');
+/** uv's data directory, as uv computes it: %APPDATA%\uv on Windows, else
+ *  $XDG_DATA_HOME/uv with ~/.local/share as the default. Its python/ and
+ *  tools/ are uv's own; claerbout/ beside them is the suite's. Computed
+ *  rather than asked of uv, which may not be installed yet. */
+const uvDataDir = isWindows
+  ? path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'uv')
+  : path.join(process.env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'uv');
+/** The engine's environment lives with uv's other Pythons, named by the
+ *  app's package, so uv owns every Python on the machine and the app's
+ *  own folder holds only its state (Taylor, 2026-09-30). Not in uv's
+ *  tools/ folder: `uv tool list` calls an environment without a receipt
+ *  malformed and offers to uninstall it. It is made with `uv venv` and
+ *  filled with `uv pip install`, since the package comes from the bundle
+ *  on PYTHONPATH, not from an index. CLAERBOUT_UV_DIR overrides, for a
+ *  test's throwaway folder. */
+const engineDir = path.join(process.env.CLAERBOUT_UV_DIR || path.join(uvDataDir, 'claerbout'), config.package || NAME.toLowerCase());
 const enginePython = isWindows
   ? path.join(engineDir, 'Scripts', 'python.exe')
   : path.join(engineDir, 'bin', 'python');
@@ -321,7 +336,7 @@ const engine = {
     child.once('exit', (code, signal) => log(`engine exited with ${signal ?? `status ${code}`}`));
     this.child = child;
     log(`started engine on port ${this.port}: ${enginePython} ${args.join(' ')} (pid ${child.pid})`);
-    const deadline = Date.now() + 25_000;
+    const deadline = Date.now() + (Number(config.engine.startTimeout) || 25_000);
     while (Date.now() < deadline) {
       if (failure) throw new SetupError(`The engine could not be started: ${failure.message}`);
       if (await this.isUp()) return;
@@ -332,7 +347,7 @@ const engine = {
       }
       await sleep(200);
     }
-    throw new SetupError('The engine did not answer within 25 seconds.');
+    throw new SetupError(`The engine did not answer within ${Math.round((Number(config.engine.startTimeout) || 25_000) / 1000)} seconds.`);
   },
 
   async stop() {
