@@ -15,14 +15,18 @@
 // that cannot run, and a failure every tick said once; and from the third:
 // a document path in another letter case or in its firmlink form is judged
 // as the folder it opens, and the .gitignore line is anchored, so a folder
-// named untracked deeper down stays the user's.
+// named untracked deeper down stays the user's; and from the history view's
+// third pass: untracked/ stays out of a fill while .gitignore lacks the line,
+// but a file named untracked made later is recorded; the manifest is made in
+// the state folder; and what a shell that died left there goes.
 // Everything lives under os.tmpdir(); the user's git configuration is kept
 // out (GIT_CONFIG_GLOBAL points at an empty file), so the fallback
 // identity is what a bare machine gets.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
@@ -1057,6 +1061,74 @@ test('the .gitignore line is anchored: a folder named untracked deeper down stay
   assert.equal((await project.commit('timer')).committed, true);
   assert.ok(!tree(dir).some((entry) => entry.startsWith('untracked/')));
   assert.deepEqual(JSON.parse(sh(dir, 'show', `${BRANCH}:.claerbout/untracked.json`)).files.map((entry) => entry.path), ['untracked/data.bin']);
+});
+
+test('while the manifest is kept, a fill leaves the top untracked/ out even when .gitignore lacks the line, and drops it from the kept index', async () => {
+  const dir = folder('no-line');
+  fs.mkdirSync(path.join(dir, 'tests', 'untracked'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'tests', 'untracked', 'fixture.txt'), 'deeper down\n');
+  fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 1\n');
+  const project = await projectAt(dir);
+  await project.prepare();
+  fs.writeFileSync(path.join(dir, 'untracked', 'big.bin'), 'big\n');
+  assert.equal((await project.commit('timer')).committed, true);
+  // Another tool (or another shell's rewind) writes .gitignore without the
+  // line, and an earlier build's fill had put untracked/ into the kept index.
+  fs.writeFileSync(path.join(dir, '.gitignore'), 'build/\n');
+  execFileSync(binary, ['update-index', '--add', 'untracked/big.bin'], { cwd: dir, env: { ...process.env, GIT_INDEX_FILE: project.index } });
+  fs.writeFileSync(path.join(dir, 'untracked', 'more.bin'), 'more\n');
+  fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 2\n');
+  assert.equal((await project.commit('timer')).committed, true);
+  const recorded = tree(dir);
+  assert.ok(!recorded.some((entry) => entry.startsWith('untracked/')), `untracked/ stayed out (${recorded.join(', ')})`);
+  assert.ok(recorded.includes('tests/untracked/fixture.txt'), 'a folder named untracked deeper down is recorded');
+  assert.deepEqual(JSON.parse(sh(dir, 'show', `${BRANCH}:.claerbout/untracked.json`)).files.map((entry) => entry.path), ['untracked/big.bin', 'untracked/more.bin'], 'and the manifest pins it');
+});
+
+test('a file named untracked, made after this launch kept the manifest, is recorded at once: the pathspec leaves out the folder only', async () => {
+  const dir = folder('untracked-later');
+  fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 1\n');
+  const project = await projectAt(dir);
+  fs.writeFileSync(path.join(dir, 'untracked.txt'), 'near the name\n');
+  assert.equal((await project.commit('timer')).committed, true);
+  assert.equal(project.manifest, true);
+  // The user puts a file where the folder was, mid-session.
+  fs.rmSync(path.join(dir, 'untracked'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'untracked'), "the project's own file\n");
+  assert.equal((await project.commit('timer')).committed, true);
+  assert.ok(tree(dir).includes('untracked'), `the file is recorded (${tree(dir).join(', ')})`);
+  assert.ok(tree(dir).includes('untracked.txt'));
+});
+
+test('the manifest is made in the state folder and renamed into place; what a shell that died left there goes, and a running one\'s stays', async () => {
+  const dir = folder('state-folder');
+  fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 1\n');
+  const project = await projectAt(dir);
+  const dead = spawnSync(process.execPath, ['-e', '']).pid;
+  fs.mkdirSync(path.join(project.stateDir, `ignore-${dead}-AbCdEf`), { recursive: true });
+  const left = [`staged-${dead}-0a1b2c3d`, `rewind-${dead}-1700000000000.index`, `rewind-${dead}-1700000000000.index.lock`];
+  for (const name of left) fs.writeFileSync(path.join(project.stateDir, name), 'left\n');
+  const running = `staged-${process.ppid}-0a1b2c3d`;
+  fs.writeFileSync(path.join(project.stateDir, running), 'a running shell\'s\n');
+  fs.mkdirSync(path.join(dir, 'untracked'));
+  fs.writeFileSync(path.join(dir, 'untracked', 'data.bin'), 'data');
+  const renames = [];
+  const rename = fsp.rename;
+  fsp.rename = async (from, to) => {
+    renames.push({ from, to, beside: fs.readdirSync(path.join(dir, '.claerbout')) });
+    return rename(from, to);
+  };
+  try {
+    assert.equal((await project.commit('timer')).committed, true);
+  } finally {
+    fsp.rename = rename;
+  }
+  const manifest = renames.find((entry) => entry.to.endsWith(path.join('.claerbout', 'untracked.json')));
+  assert.ok(manifest, 'the manifest was written');
+  assert.equal(path.dirname(manifest.from), project.stateDir);
+  assert.deepEqual(manifest.beside, [], 'nothing beside it in the working tree as it lands');
+  assert.deepEqual(fs.readdirSync(project.stateDir).filter((name) => /^(staged|rewind|ignore)-/.test(name)), [running]);
+  assert.ok(!tree(dir).some((entry) => /claerbout-|staged-/.test(entry)), tree(dir).join(', '));
 });
 
 /** Whether the volume the tests run on ignores letter case (a Mac's, as a rule). */

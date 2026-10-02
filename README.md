@@ -211,7 +211,8 @@ document each window holds; a page only says when something happened.
   `update-ref --no-deref` as a compare-and-swap. Every git it runs has
   `core.splitIndex`, `core.fsmonitor` and the add advice off, so nothing
   is written into the user's `.git` but objects and the record's branch
-  (and its reflog), and `core.sparseCheckout` off, so a sparse checkout is
+  (and its reflog), and, while a rewind writes the working tree, its lock
+  (below), and `core.sparseCheckout` off, so a sparse checkout is
   recorded (git add refuses the manifest outside the cone otherwise); a
   partial clone never fetches (`GIT_NO_LAZY_FETCH`), and git's `PATH` has
   `/opt/homebrew/bin`, `/usr/local/bin` and the system's defaults
@@ -223,11 +224,14 @@ document each window holds; a page only says when something happened.
   `update-ref` would move that HEAD; the log says so once) or being
   rebased in one (its `rebase-merge/head-name` or `rebase-apply/head-name`
   names the branch), while the record's ref is a symbolic ref (the write
-  would land on the branch it points at), while `index.lock` exists, or
-  while a merge, rebase, cherry-pick or revert is in progress, and nothing
-  when the tree equals the tip's. Each guard's reason is a sentence, said
-  once in the log ("autosave: not recorded while a merge is in progress on
-  main") and shown as it is in the history view. The guards are asked
+  would land on the branch it points at), while `index.lock` exists, while
+  another app's rewind is writing the working tree (the lock it holds
+  beside `index.lock`, `claerbout-rewind.lock`: "Plass is rewinding this
+  project"), or while a merge, rebase, cherry-pick or revert is in
+  progress, and nothing when the tree equals the tip's. Each guard's
+  reason is a sentence, said once in the log ("autosave: not recorded
+  while a merge is in progress on main") and shown as it is in the
+  history view. The guards are asked
   again just before the ref moves, so only a few milliseconds of race
   remain after a fill that took seconds. In the working tree it does write: `untracked/`
   (made, empty), a `/untracked/` line in `.gitignore` (appended, or a new
@@ -273,8 +277,18 @@ document each window holds; a page only says when something happened.
   are cached under the app's state folder (`autosave/<project>/hashes.json`).
   A file in `untracked/` that the secrets list matches is left out of the
   manifest, name and hash (a hash of a short secret can be reversed), and
-  only counted in the log. The manifest is written beside itself and
-  renamed into place, so it is never half-written.
+  only counted in the log. The manifest is made in the app's state folder
+  (beside itself only when that folder is on another volume) and renamed
+  into place, so it is never half-written, and no fill (another app's
+  included) finds the new file in the working tree, not even after a crash;
+  what a shell that died left in its state folder (named for its pid) goes
+  at the next launch's first fill. While the manifest is kept, every fill
+  also leaves the top `untracked/` folder out by pathspec (and drops it from
+  the kept index), not only by the `.gitignore` line: the record is never
+  pruned, so a moment in which `.gitignore` lacks the line (another tool
+  rewriting it) must not be enough to take it in. The folder's contents
+  only, as the line matches: a file named `untracked` put in its place
+  mid-session is the project's, and is recorded.
 - **Secrets.** Kept out of the record by pathspec, in every folder and
   whatever the case (`Server.PEM`, `ID_RSA`): the files `.env`, `.env.*`,
   `*.pem`, `*.key`, `id_*`, `*.p8` (App Store Connect's `AuthKey_*.p8`),
@@ -348,7 +362,13 @@ node again, or the card's button, to rewind.
     records excluded (`--exclude=claerbout-autosave
     --exclude='claerbout-autosave-*'`) and this working tree's record by
     name: not `--all`, which would pull in `refs/stash`, remotes and other
-    worktrees' records. Newest first, at most 2000 (`before`, a sha, pages
+    worktrees' records. `--numstat` reads every blob it counts, so where
+    one is not in the repository (a partial clone's, never fetched; a
+    crafted commit's) the log is asked again for names only
+    (`--name-only`, which reads trees, never a blob; `plus` and `minus` are
+    then 0), and where a tree cannot be read at all (an empty name), for no
+    names: the page always loads, and such a commit's card says why no
+    rewind writes it. Newest first, at most 2000 (`before`, a sha, pages
     back in time). Each is `{sha, parents, line ('record' or the branch it
     was reached by), refs, time, subject, files, plus, minus, changed (the
     first 20 paths)}`; a record commit has its message parsed (`app`,
@@ -366,6 +386,8 @@ node again, or the card's button, to rewind.
     400 lines a file and 1 MB in all. Patches are asked only for files whose
     two sides are each 1 MB or less (16 MB read in all), so one huge file
     costs only itself its patch; such a file is `large`, with its `size`.
+    Where git cannot read a blob it would count, the files are listed
+    without counts or patches.
   - `history {action: 'blob', sha, path}`: `{text}` (UTF-8, at most 1 MB),
     `{binary: true, size}`, `{large: true, size}` or `{missing: true}`. The
     size is asked first: a file past 1 MB is never read, and the card says
@@ -376,8 +398,10 @@ node again, or the card's button, to rewind.
     fresh fill of the working tree, not committed, whose files the page can
     read), target, onRecord, unrecorded, write: [{path, status}], remove,
     skipped: [{path, why}], kept, same, untracked, untrackedGone, others,
-    blocked}`, and `invalid: {path, why}` (with nothing to write) for a
-    commit no rewind writes (below).
+    blocked}`, and `invalid: {path, why, absent?, partial?}` (with nothing
+    to write) for a commit no rewind writes (below): the rewind's own
+    checks, git's `read-tree` among them, so the card never offers a rewind
+    the click would refuse.
   - `rewind {sha, tip, paths?, anyway?}`: the rewind, below.
 
   Cells, `values.json` names and words written are the page's, worked out
@@ -391,14 +415,24 @@ node again, or the card's button, to rewind.
   again and sends it once more when nothing else changed); `{refused:
   'paused', reason}` under the record's guards (a merge, rebase,
   cherry-pick or revert in progress, `index.lock`, the record's branch
-  checked out or being rebased in any worktree, or a symbolic ref; the
-  reason is a sentence the page shows as it is, "a merge is in progress on
-  main", "git holds index.lock"); `{refused: 'invalid', path?, why}` for a
-  target that holds a path no rewind writes (below); and `{refused:
-  'other-app', app, documents}` when another app's windows hold a file it
-  would write or remove, unless the request says `anyway`. Nothing to write
-  or remove is `{same: true}`. All of these come before anything is
-  recorded, saved or touched. Then:
+  checked out or being rebased in any worktree, a symbolic ref, or another
+  app's rewind of this working tree; the reason is a sentence the page
+  shows as it is, "a merge is in progress on main", "git holds
+  index.lock", "Plass is rewinding this project"); `{refused: 'invalid',
+  path, why, absent?, partial?}` for a commit no rewind writes (below);
+  and `{refused: 'other-app', app, documents}` when another app's windows
+  hold a file it would write or remove, unless the request says `anyway`.
+  Nothing to write or remove is `{same: true}`. All of these come before
+  anything is recorded, saved or touched. Then the rewind takes the
+  working tree's lock: `claerbout-rewind.lock` in its git dir, beside
+  git's own `index.lock`, holding `{pid, app}` and made only if no other
+  is there. Another app's rewind holding it refuses this one (`paused`,
+  "Plass is rewinding this project"), and while it is held every other
+  app's commits wait (the guard above), so no two rewinds write over each
+  other and no timer records one half written. It goes when the rewind
+  ends; one whose pid is gone, or older than ten minutes (a pid the system
+  has since given to another process), is stale, and the next rewind
+  replaces it. Then:
   - **Save.** Every one of this shell's windows on the project hears `save
     {id, reason: 'rewind'}`, at once, and has 3 seconds to answer `{type:
     'saved', id, ok?, error?}`; one that answers `ok: false` refuses the
@@ -425,29 +459,56 @@ node again, or the card's button, to rewind.
      tree. Left alone and named: a gitlink, and a path with something in
      its way that the set does not remove (a file the record does not keep,
      ignored or kept out as a secret; a folder that still holds one; a link
-     or a file where the target has a folder). Left alone always:
-     `untracked/` and `.claerbout/untracked.json`, compared as the volume
-     compares names (`Untracked/` is `untracked/` on a Mac's volume, which
-     ignores case). Every removal and every write walks from the project's
-     root with `lstat`, name by name, and goes through no link: a folder
-     replaced by a link meanwhile is left, and named. The record's
+     or a file where the target has a folder); a file the target holds
+     under the name `untracked`, which the record keeps for its folder; and
+     whatever the target holds in a folder named `.gitignore` (git would
+     read no `.gitignore` then, and `untracked/` would lose its line). Left
+     alone always: `untracked/` and `.claerbout/untracked.json`, compared as
+     the volume compares names (`Untracked/` is `untracked/` on a Mac's
+     volume, which ignores case). Every removal and every write walks from
+     the project's root with `lstat`, name by name, and goes through no
+     link: a folder replaced by a link meanwhile is left, and named.
+     (Between a removal's walk and its unlink a few microseconds remain in
+     which a folder swapped for a link would be gone through, since Node
+     has no `unlinkat`; `checkout-index` itself replaces a leading link
+     rather than writing through it.) The top `.gitignore` is never
+     `checkout-index`'s: the rewind writes the target's itself, with the
+     `/untracked/` line appended where the record would append it, to a new
+     file made in the app's state folder (beside it only when that folder
+     is on another volume) and renamed over the old (a rename replaces a
+     link, never follows it), and one the set removes becomes that line
+     alone. So the working tree never holds a `.gitignore` without the
+     line, not for a moment, and another app's fill meanwhile cannot take
+     `untracked/` in; a fill leaves `untracked/` out by pathspec as well
+     (above). The record's
      `prepared` is cleared before anything is touched, and the record
-     prepares again as soon as the step ends, finished or not, so a target
-     whose `.gitignore` lacks `/untracked/` gets the line back at once and
-     no fill (the next, or another app's) takes `untracked/` in.
+     prepares again as soon as the step ends, finished or not.
   3. **Record the rewind:** `<app>: rewind to <target>` (the full sha; for
      a partial rewind its paths in brackets, `(a.py, b.json)`, or `(3
      files)` past two), always, even when its tree equals the tip's.
 
-  **A commit no rewind writes.** Before the save step, every path the
-  target holds is checked: no empty, `.` or `..` name, not absolute, no
+  **A commit no rewind writes.** Before the save step (and in `compare`,
+  so the card says so before any click), the target is checked whole,
+  whatever files are ticked: git must be able to list its tree; every path
+  it holds must have no empty, `.` or `..` name, not be absolute, have no
   `.git` anywhere along it (in any case, or with the code points HFS+
-  ignores), and none under another of its entries that is a link or a
-  nested repository. Then git checks it again (`read-tree <target>` into
-  the throwaway index the write uses). The record never makes such a path,
-  so a commit that holds one was crafted, or reached the record some other
-  way: it is refused whole, `{refused: 'invalid', path?, why}`, with
-  nothing recorded, saved, removed or written, and its card says so.
+  ignores), and lie under no other of its entries that is a link or a
+  nested repository; and every file and link it holds must be in the
+  repository as a blob (`cat-file --batch-check`, which never fetches):
+  not a tree object under a file's mode, and not a blob the repository
+  lacks (`absent: true`; with `partial: true` in a partial clone, where the
+  card says it was never fetched, and elsewhere that it was lost).
+  `checkout-index` finds those out only as it writes, after it has removed
+  the file it replaces. Then git checks it
+  again (`read-tree <target>` into the throwaway index the write uses). The
+  record never makes such a commit, so one that fails was crafted, reached
+  the record some other way, or is a partial clone's: it is refused whole,
+  `{refused: 'invalid', path, why, absent?, partial?}` (`path` as git
+  names it, a quote or a newline included, and null when git names none),
+  before anything is recorded, saved, removed or written, and its
+  card says "No rewind to this commit". What comes after the checks can
+  still fail (a full disk, a folder that may not be written): that is
+  `failed`, below.
 
   Then every one of this shell's windows on the project hears `reload {id,
   paths, reason: 'rewind', to}`, `paths` every file written or removed
@@ -474,9 +535,12 @@ node again, or the card's button, to rewind.
   project, `{app, pid, root, documents}`, removed when the last window
   leaves and at quit; a file whose pid is gone is ignored;
   `CLAERBOUT_PRESENCE_DIR` for a test). A rewind reads them for `others`
-  and `other-app`. When the two-second look finds another app's "rewind
-  to" on the record, this shell's windows on the project hear `reload {id,
-  paths, reason: 'rewind', to, app}`.
+  and `other-app`. A rewind holds the working tree's lock (above) while it
+  writes, so the other app neither rewinds nor commits meanwhile: its
+  History window shows the record paused, "Plass is rewinding this
+  project". When the two-second look finds another app's "rewind to" on
+  the record, this shell's windows on the project hear `reload {id, paths,
+  reason: 'rewind', to, app}`.
 
 The tests (`npm run test:history`) run real git in temporary repositories
 under `os.tmpdir()`: the graph with the record, a user branch and a fork,
@@ -486,10 +550,21 @@ three steps and its refusals: a file that becomes a folder and a folder
 that becomes a link, both ways, landing on the target's own tree; a folder
 that still holds an ignored file; a write step that fails after
 `.gitignore` is written, with `untracked/` still out of the next commit;
-seven crafted commits refused before anything is recorded or touched;
-`Untracked/` on a volume that ignores case; folders replaced by links
-during the rewind, never gone through; and a window that does not answer
-save.
+twelve crafted commits (a tree under a file's mode, a missing blob, an
+empty name, and `.gitmodules` links in folders named with a quote and a
+newline among them) refused before anything is recorded or touched, their
+cards saying so and naming the path whole, and the graph drawing each; a
+partial clone's commit whose files were never fetched, refused, nothing
+fetched, and the graph and its detail drawn all the same; one rewind at a
+time on a working tree, with another app's commit, rewind and card waiting
+on it, and a lock whose holder is gone taken over; the new `.gitignore`
+made in the state folder, never seen in the working tree or `git status`;
+a file named `untracked`, and a folder named `.gitignore`, in a target,
+left alone and named on the card and in the rewind; another app
+committing whenever `.gitignore` lacks the line during two rewinds, which
+never happens, and no record commit holding `untracked/`; `Untracked/`
+on a volume that ignores case; folders replaced by links during the
+rewind, never gone through; and a window that does not answer save.
 
 ## The protocol
 
