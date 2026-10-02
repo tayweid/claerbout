@@ -13,24 +13,34 @@
 // ~/.config/gh: where credentials live) or in a folder named like a
 // secret one (.ssh, .aws, .gnupg, .env), nor for a repository whose root
 // is the home folder or a folder it is in (a dotfiles ~/.git would take
-// in everything under home). The record is one branch per working tree:
-// refs/heads/claerbout-autosave for a repository's main working tree,
+// in everything under home), nor for one whose root git reports in a
+// hidden or secret-named folder. Every place is judged by the path as the
+// disk keeps it (realpath: links resolved, and the letter case and Unicode
+// form of each name as stored, so ~/DESKTOP is ~/Desktop on a volume that
+// ignores case), and a path under /System/Volumes/Data also by the one it
+// is firmlinked to (/System/Volumes/Data/Users/x is /Users/x); the log
+// names the path as it was given.
+//
+// The record is one branch per working tree: refs/heads/claerbout-autosave
+// for a repository's main working tree,
 // refs/heads/claerbout-autosave-<name> for a linked worktree. It is
 // written with plumbing only: a temporary index (GIT_INDEX_FILE, kept in
 // the shell's state folder between commits for its stat cache) filled by
 // `git add -A` over the working tree, so .gitignore applies, then
 // write-tree, commit-tree with the branch's tip as parent, and update-ref
-// --no-deref. The user's HEAD, branch and index are never touched:
-// nothing is committed while the record's branch is checked out in any
-// worktree or being rebased in one, while it is a symbolic ref, while git
-// itself is at work (index.lock), or while a merge, rebase, cherry-pick or
-// revert is in progress; all of that is checked again just before the ref
-// moves, so only a few milliseconds of race remain. A commit lands only
-// when the tree differs from the tip's. In the working tree the record
-// does write untracked/, a line in .gitignore and
-// .claerbout/untracked.json, never through a symbolic link: a link (or
-// anything else that is not a folder or a file) at any of those names
-// turns the manifest off for that project, said once.
+// --no-deref. The user's HEAD, branch and index are never touched: nothing
+// is committed while the record's branch is checked out in any worktree or
+// being rebased in one, while it is a symbolic ref, while git itself is at
+// work (index.lock), or while a merge, rebase, cherry-pick or revert is in
+// progress; all of that is checked again just before the ref moves, so
+// only a few milliseconds of race remain. A commit lands only when the
+// tree differs from the tip's. In the working tree the record does write
+// untracked/, a /untracked/ line in .gitignore (anchored, so a folder
+// named untracked deeper down is the user's as ever; none when the rules
+// already ignore untracked/) and .claerbout/untracked.json, never through
+// a symbolic link: a link (or anything else that is not a folder or a
+// file) at any of those names turns the manifest off for that project,
+// said once.
 //
 // Triggers: a page's `autosave` notice ("cell run [4]"), a timer per open
 // project (a tick while a job runs is dropped), `session open` when the
@@ -296,9 +306,14 @@ function filterFailure(stderr) {
 
 const nulList = (text) => text.split('\0').filter(Boolean);
 
+/** A path as the disk keeps it: links resolved, and each name in the case
+ *  and Unicode form it is stored in. The native realpath, since the JS one
+ *  keeps the case it is given: on a volume that ignores case,
+ *  /USERS/x/.CONFIG opens ~/.config but would pass every guard that
+ *  compares paths. The path resolved when it does not exist. */
 function realpath(file) {
   try {
-    return fs.realpathSync(file);
+    return fs.realpathSync.native(file);
   } catch {
     return path.resolve(file);
   }
@@ -386,9 +401,34 @@ const CLOUD_ROOTS = [
 ];
 const TEMPORARY_FOLDERS = () => [os.tmpdir(), '/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp'];
 
-/** A folder's two forms: as given and with symbolic links resolved (/tmp
- *  is /private/tmp on a Mac). */
-const forms = (file) => new Set([path.resolve(file), realpath(file)]);
+/** Where a Mac's data volume is mounted: /Users, /private, /Volumes and the
+ *  rest are firmlinks into it, so /System/Volumes/Data/Users/x is /Users/x,
+ *  and realpath leaves either alone. */
+const DATA_VOLUME = '/System/Volumes/Data';
+
+/** Whether two paths are the same folder or file (device and inode). */
+function sameFile(a, b) {
+  try {
+    const one = fs.statSync(a);
+    const two = fs.statSync(b);
+    return one.dev === two.dev && one.ino === two.ino;
+  } catch {
+    return false;
+  }
+}
+
+/** A folder's forms: as given, as the disk keeps it (realpath: /tmp is
+ *  /private/tmp on a Mac, ~/DESKTOP is ~/Desktop), and, for a path on the
+ *  data volume's mount, the path it is firmlinked to. */
+function forms(file) {
+  const found = new Set([path.resolve(file), realpath(file)]);
+  for (const form of [...found]) {
+    if (!form.startsWith(`${DATA_VOLUME}/`)) continue;
+    const firmlinked = form.slice(DATA_VOLUME.length);
+    if (sameFile(form, firmlinked)) found.add(firmlinked);
+  }
+  return found;
+}
 
 /** 'the home folder', 'a folder the home folder is in', or null. */
 function aboveHome(dir, home) {
@@ -436,8 +476,8 @@ function secretPlace(dir, home = os.homedir()) {
  * folder of the home folder or a folder in one, one of its standard
  * folders, a cloud-synced root, a temporary folder, or a volume root. A
  * folder at least one level below any of those but the hidden ones
- * qualifies (~/Projects/foo, ~/Desktop/week-3). Paths are compared as
- * given and with symbolic links resolved (/tmp is /private/tmp on a Mac).
+ * qualifies (~/Projects/foo, ~/Desktop/week-3). Paths are compared in
+ * each of their forms (as given, as the disk keeps them, and firmlinked).
  */
 function notProjectFolder(dir, { home = os.homedir(), temporary = TEMPORARY_FOLDERS() } = {}) {
   const here = forms(dir);
@@ -714,7 +754,9 @@ class Project {
     return false;
   }
 
-  /** untracked/ exists and is ignored; .claerbout/ exists. Once per
+  /** untracked/ exists and is ignored (a /untracked/ line appended to
+   *  .gitignore unless the rules already ignore it: an unanchored line an
+   *  earlier build wrote is left as it is); .claerbout/ exists. Once per
    *  process; idempotent on disk. Neither, and no manifest, when a file or
    *  a link has either name, or when the line has to go into a .gitignore
    *  that is a link (git reads no linked .gitignore, and the append would
@@ -735,7 +777,10 @@ class Project {
       this.prepared = true;
       return;
     }
-    const line = `# Claerbout: large data, caches and scratch, pinned by .claerbout/untracked.json\n${UNTRACKED}/\n`;
+    // Anchored: an unanchored untracked/ would ignore every folder of that
+    // name at any depth (tests/untracked/), in the user's own git as well
+    // as the record's, and the manifest covers only the top one.
+    const line = `# Claerbout: large data, caches and scratch, pinned by .claerbout/untracked.json\n/${UNTRACKED}/\n`;
     if (kind === 'missing') {
       await fsp.writeFile(file, line, { flag: 'wx' });
     } else {
@@ -749,7 +794,7 @@ class Project {
       }
     }
     this.prepared = true;
-    this.log(`autosave: ${UNTRACKED}/ added to .gitignore (${this.root})`);
+    this.log(`autosave: /${UNTRACKED}/ added to .gitignore (${this.root})`);
   }
 
   /** The repository's common git dir, where every worktree's own is. */
@@ -1099,32 +1144,43 @@ class Autosave {
    *  made there when it is in none and is a project's folder; null where
    *  no record is kept (said once per folder): a hidden folder of the home
    *  folder or a secret-named one, repository or not, and a repository
-   *  whose root is the home folder or a folder it is in (said once per
-   *  repository). */
-  async rootFor(dir) {
-    if (this.roots.has(dir)) return this.roots.get(dir);
+   *  whose root is the home folder or a folder it is in, or a hidden or
+   *  secret-named folder (said once per repository). Every guard and git
+   *  sees the folder as the disk keeps it (realpath), so a path typed in
+   *  another case (~/DESKTOP, ~/.CONFIG/gh) is judged as the folder it
+   *  opens; the log names it as given. */
+  async rootFor(given) {
+    if (this.roots.has(given)) return this.roots.get(given);
+    const dir = realpath(given);
     let root = null;
     try {
       const secret = secretPlace(dir, this.places.home);
       let found = secret ? 'refused' : await repositoryOf(this.binary, dir);
-      if (secret) this.log(`autosave: no record for ${dir}: it is in ${secret}, where credentials are kept`);
+      if (secret) this.log(`autosave: no record for ${given}: it is in ${secret}, where credentials are kept`);
       if (found === null) {
         const refused = notProjectFolder(dir, this.places);
         if (refused) {
-          this.log(`autosave: no record for ${dir}: ${refused} is not a project's folder; a document here needs a folder of its own`);
+          this.log(`autosave: no record for ${given}: ${refused} is not a project's folder; a document here needs a folder of its own`);
           found = 'refused';
         } else {
           found = await initRepository(this.binary, dir);
           this.log(`autosave: initialised a repository at ${found.root}`);
         }
       }
-      if (found === 'unusable') this.log(`autosave: no record for ${dir}: inside a git directory or a bare repository`);
+      if (found === 'unusable') this.log(`autosave: no record for ${given}: inside a git directory or a bare repository`);
       else if (found !== 'refused') {
-        const above = aboveHome(found.root, this.places.home);
-        if (above) {
+        // git reports the root as the disk keeps it, so this also catches a
+        // path whose form slipped past the guards above.
+        const place = secretPlace(found.root, this.places.home);
+        const above = place ? null : aboveHome(found.root, this.places.home);
+        if (place || above) {
           if (!this.refusedRoots.has(found.root)) {
             this.refusedRoots.add(found.root);
-            this.log(`autosave: no record for the repository at ${found.root}: it is ${above}, and would take in everything under it`);
+            this.log(
+              place
+                ? `autosave: no record for the repository at ${found.root}: it is in ${place}, where credentials are kept`
+                : `autosave: no record for the repository at ${found.root}: it is ${above}, and would take in everything under it`,
+            );
           }
         } else {
           root = found.root;
@@ -1147,9 +1203,9 @@ class Autosave {
         }
       }
     } catch (error) {
-      this.log(`autosave: no record for ${dir}: ${error.message}`);
+      this.log(`autosave: no record for ${given}: ${error.message}`);
     }
-    this.roots.set(dir, root);
+    this.roots.set(given, root);
     return root;
   }
 

@@ -186,7 +186,14 @@ document each window holds; a page only says when something happened.
   `~/.config/gh`: where credentials live) or in a folder named `.ssh`,
   `.aws`, `.gnupg` or `.env` anywhere, nor for a repository whose root is
   the home folder or a folder it is in (a dotfiles `~/.git` would take in
-  everything under home), said once per repository.
+  everything under home) or, as git reports it, one of those hidden or
+  secret-named folders, said once per repository. Every folder is judged
+  as the disk keeps it: symbolic links resolved and each name in the
+  letter case and Unicode form it is stored in, so `~/DESKTOP/note.txt`,
+  which a Mac's case-insensitive volume opens, is a document in `~/Desktop`
+  itself, and a path under `/System/Volumes/Data` also as the one it is
+  firmlinked to (`/System/Volumes/Data/Users/…` is `/Users/…`). The log
+  names the path as it was given.
 - **The branch.** One per working tree: `refs/heads/claerbout-autosave`
   in a repository's main working tree, `refs/heads/claerbout-autosave-<name>`
   in a linked worktree (`git worktree add`; `<name>` is the worktree's
@@ -221,13 +228,18 @@ document each window holds; a page only says when something happened.
   when the tree equals the tip's; the guards are asked again just before
   the ref moves, so only a few milliseconds of race remain after a fill
   that took seconds. In the working tree it does write: `untracked/`
-  (made, empty), a `.gitignore` line for it (appended, or a new
-  `.gitignore`), and `.claerbout/untracked.json`. These show in the
-  user's own `git status`, and ride along in a `git commit -a` or `git add
-  -A` the user makes. None of them is written through a symbolic link: a
-  link (or anything else that is not a folder or a file) at `untracked`,
-  `.claerbout`, the manifest or, when the line has to be added,
-  `.gitignore` turns the manifest off for that project, said once.
+  (made, empty), a `/untracked/` line in `.gitignore` (appended, or a new
+  `.gitignore`; anchored, so a folder named `untracked` deeper down, such
+  as `tests/untracked/`, stays in the user's git and in the record), and
+  `.claerbout/untracked.json`. These show in the user's own `git status`,
+  and ride along in a `git commit -a` or `git add -A` the user makes. None
+  of them is written through a symbolic link: a link (or anything else
+  that is not a folder or a file) at `untracked`, `.claerbout`, the
+  manifest or, when the line has to be added, `.gitignore` turns the
+  manifest off for that project, said once. No line is added while the
+  rules already ignore `untracked/`, so an unanchored `untracked/` line an
+  earlier build wrote is left as it is; it still ignores every folder of
+  that name at any depth until it is changed to `/untracked/` by hand.
 - **What git cannot read, or must leave out.** A file git cannot read is
   left out, and the log names it once; the rest is recorded. A nested
   repository without a commit (a fresh `git init` or `uv init` inside the
@@ -277,7 +289,7 @@ document each window holds; a page only says when something happened.
   catch is seen.
 - **The log** gets one line per commit (`autosave: knuth: cell run [4] →
   <hash> (<project>)`), and one when a repository is initialised, when
-  `.gitignore` gains `untracked/`, when a folder is refused, and when a
+  `.gitignore` gains `/untracked/`, when a folder is refused, and when a
   commit is skipped for a new reason. An error is git's last line that is
   not a `hint:`, a `warning:` or a wrap-up (`the remote end hung up
   unexpectedly`, after a filter that never started).

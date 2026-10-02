@@ -12,7 +12,10 @@
 // record's name, hidden folders of the home folder, a repository at the
 // home folder, symbolic links at the record's names, secrets whatever their
 // case (and in untracked/), a sparse checkout, git's PATH, a clean filter
-// that cannot run, and a failure every tick said once.
+// that cannot run, and a failure every tick said once; and from the third:
+// a document path in another letter case or in its firmlink form is judged
+// as the folder it opens, and the .gitignore line is anchored, so a folder
+// named untracked deeper down stays the user's.
 // Everything lives under os.tmpdir(); the user's git configuration is kept
 // out (GIT_CONFIG_GLOBAL points at an empty file), so the fallback
 // identity is what a bare machine gets.
@@ -123,7 +126,7 @@ test('a folder with no repository gets one, and the first commit holds the docum
   assert.ok(tree(dir).includes('note.txt'));
   assert.ok(tree(dir).includes('.claerbout/untracked.json'), 'the manifest is in the track');
   assert.ok(fs.existsSync(path.join(dir, 'untracked')), 'untracked/ exists');
-  assert.match(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), /^untracked\/$/m);
+  assert.match(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), /^\/untracked\/$/m);
   assert.ok(!tree(dir).some((entry) => entry.startsWith('untracked/')), 'untracked/ is ignored');
   // The user's side is untouched: HEAD is still unborn, the index empty.
   assert.throws(() => sh(dir, 'rev-parse', '--verify', '-q', 'HEAD'));
@@ -293,7 +296,11 @@ test('an existing .gitignore is appended, not replaced, and one that already ign
   const project = await projectAt(dir);
   await project.prepare();
   assert.equal(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8').split('\n')[0], 'node_modules/');
-  assert.match(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), /\nuntracked\/\n$/);
+  assert.match(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), /\n\/untracked\/\n$/);
+  // Once there, never twice.
+  await (await projectAt(dir)).prepare();
+  assert.equal(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8').match(/^\/untracked\/$/gm).length, 1);
+  // An unanchored line, as an earlier build wrote, is left as it is.
   const other = folder('ignored');
   fs.writeFileSync(path.join(other, '.gitignore'), 'untracked/\n');
   const second = await projectAt(other);
@@ -1022,6 +1029,148 @@ test('quit waits for a session close already queued and the job under way, and i
   assert.ok(lines.some((line) => line.includes('quit before the record was done')));
   await bounded.project(window)?.queue;
   for (const project of bounded.projects.values()) await project.queue;
+});
+
+test('the .gitignore line is anchored: a folder named untracked deeper down stays in the user\'s status and in the record', async () => {
+  const dir = folder('nested-untracked');
+  sh(dir, 'init', '-q', '--initial-branch=main', '.');
+  fs.mkdirSync(path.join(dir, 'tests', 'untracked'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'tests', 'untracked', 'old.txt'), 'old\n');
+  sh(dir, 'add', '.');
+  sh(dir, ...as, 'commit', '-q', '-m', 'a');
+  fs.writeFileSync(path.join(dir, 'tests', 'untracked', 'new.txt'), 'new\n');
+  const project = await projectAt(dir);
+  assert.equal((await project.commit('timer')).committed, true);
+  assert.match(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), /^\/untracked\/$/m);
+  assert.ok(!/^untracked\/$/m.test(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8')), 'no unanchored line');
+  const status = sh(dir, 'status', '--porcelain').split('\n');
+  assert.ok(status.includes('?? tests/untracked/new.txt'), `the user's git still sees it (${status.join(' | ')})`);
+  const recorded = tree(dir);
+  assert.ok(recorded.includes('tests/untracked/old.txt'), 'the tracked file is in the record');
+  assert.ok(recorded.includes('tests/untracked/new.txt'), 'and the new one');
+  // The top-level untracked/ is still ignored, and pinned by the manifest.
+  fs.writeFileSync(path.join(dir, 'untracked', 'data.bin'), 'data');
+  assert.equal((await project.commit('timer')).committed, true);
+  assert.ok(!tree(dir).some((entry) => entry.startsWith('untracked/')));
+  assert.deepEqual(JSON.parse(sh(dir, 'show', `${BRANCH}:.claerbout/untracked.json`)).files.map((entry) => entry.path), ['untracked/data.bin']);
+});
+
+/** Whether the volume the tests run on ignores letter case (a Mac's, as a rule). */
+const ignoresCase = fs.existsSync(path.join(path.dirname(work), path.basename(work).toUpperCase()));
+
+test('a document path in another letter case is judged as the folder it opens: no repository at home, ~/Desktop or ~/.config/gh', { skip: !ignoresCase && 'a case-sensitive volume' }, async () => {
+  const home = folder('case-home');
+  const files = ['.config/gh/hosts.yml', 'Desktop/note.txt', 'Desktop/Screenshot.png', 'notes.txt', 'Projects/plan/plan.typ'];
+  for (const file of files) {
+    fs.mkdirSync(path.dirname(path.join(home, file)), { recursive: true });
+    fs.writeFileSync(path.join(home, file), file.includes('hosts') ? 'github.com:\n  oauth_token: gho_SECRET\n' : `${file}\n`);
+  }
+  // The home folder opened through its upper-cased name: the case a second
+  // launch from a terminal, or a page's `document` request, may carry.
+  const upper = path.join(path.dirname(home), path.basename(home).toUpperCase());
+  assert.ok(fs.existsSync(path.join(upper, '.CONFIG', 'gh', 'hosts.yml')), 'the volume opens it in any case');
+  const autosave = new Autosave({ appName: 'Knuth', stateDir: folder('state'), log, interval: 60_000, binary, home });
+  const window = { id: 'w' };
+  lines.length = 0;
+  for (const [file, reason] of [
+    [path.join(upper, '.config', 'gh', 'hosts.yml'), 'it is in a hidden folder of the home folder'],
+    [path.join(upper, '.CONFIG', 'gh', 'hosts.yml'), 'it is in a hidden folder of the home folder'],
+    [path.join(upper, 'desktop', 'note.txt'), "the Desktop folder itself is not a project's folder"],
+    [path.join(upper, 'notes.txt'), "the home folder is not a project's folder"],
+  ]) {
+    await autosave.setDocument(window, file);
+    assert.equal(autosave.project(window), null, `no record for ${file}`);
+    assert.ok(lines.some((line) => line.includes(`no record for ${path.dirname(file)}: ${reason}`)), `${file}: said with the path as given (${lines.join(' | ')})`);
+  }
+  const repositories = fs.readdirSync(home, { recursive: true }).filter((entry) => path.basename(entry) === '.git');
+  assert.deepEqual(repositories, [], 'no .git anywhere under home');
+  for (const dir of ['.config/gh', 'Desktop', '.']) assert.ok(!fs.existsSync(path.join(home, dir, 'untracked')), `nothing written in ${dir}`);
+  // A project's folder in another case is a project as ever, at the folder
+  // as the disk keeps it, on the main working tree's branch.
+  await autosave.setDocument(window, path.join(upper, 'projects', 'PLAN', 'plan.typ'));
+  const project = autosave.project(window);
+  assert.equal(project?.root, fs.realpathSync.native(path.join(home, 'Projects', 'plan')));
+  assert.equal(project.ref, BRANCH);
+  await project.queue;
+  assert.deepEqual(subjects(path.join(home, 'Projects', 'plan')), ['knuth: session open']);
+  await autosave.quit();
+  // repositoryOf on a path in another case: the main working tree, not a
+  // linked one (its common dir is compared as the disk keeps it).
+  const plain = folder('case-plain');
+  sh(plain, 'init', '-q', '--initial-branch=main', '.');
+  const found = await repositoryOf(binary, path.join(path.dirname(plain), path.basename(plain).toUpperCase()));
+  assert.equal(found.linked, false);
+  assert.equal(branchFor(found), BRANCH_NAME);
+});
+
+/** A path on a Mac's data volume as mounted (/System/Volumes/Data/…), when
+ *  this machine has one and it is the same folder. */
+function firmlinkForm(dir) {
+  const canonical = fs.realpathSync.native(dir);
+  const long = `/System/Volumes/Data${canonical}`;
+  try {
+    const one = fs.statSync(long);
+    const two = fs.statSync(canonical);
+    return one.dev === two.dev && one.ino === two.ino ? long : null;
+  } catch {
+    return null;
+  }
+}
+
+test('a document path in its firmlink form (/System/Volumes/Data/…) is judged as the folder it opens', { skip: !firmlinkForm(work) && 'no data volume mounted at /System/Volumes/Data' }, async () => {
+  const home = folder('firm-home');
+  for (const file of ['.config/gh/hosts.yml', 'Desktop/note.txt', 'notes.txt', 'Projects/plan/plan.typ']) {
+    fs.mkdirSync(path.dirname(path.join(home, file)), { recursive: true });
+    fs.writeFileSync(path.join(home, file), `${file}\n`);
+  }
+  const long = firmlinkForm(home);
+  const autosave = new Autosave({ appName: 'Plass', stateDir: folder('state'), log, interval: 60_000, binary, home });
+  const window = { id: 'w' };
+  lines.length = 0;
+  for (const [file, reason] of [
+    [path.join(long, '.config', 'gh', 'hosts.yml'), 'it is in a hidden folder of the home folder'],
+    [path.join(long, 'Desktop', 'note.txt'), "the Desktop folder itself is not a project's folder"],
+    [path.join(long, 'notes.txt'), "the home folder is not a project's folder"],
+  ]) {
+    await autosave.setDocument(window, file);
+    assert.equal(autosave.project(window), null, `no record for ${file}`);
+    assert.ok(lines.some((line) => line.includes(`no record for ${path.dirname(file)}: ${reason}`)), `${file} (${lines.join(' | ')})`);
+  }
+  const repositories = fs.readdirSync(home, { recursive: true }).filter((entry) => path.basename(entry) === '.git');
+  assert.deepEqual(repositories, [], 'no .git anywhere under home');
+  // The rules themselves.
+  assert.equal(notProjectFolder(path.join(long, 'Desktop'), { home }), 'the Desktop folder itself');
+  assert.equal(secretPlace(path.join(long, '.config', 'gh'), home), 'a hidden folder of the home folder');
+  assert.equal(notProjectFolder(path.join(long, 'Projects', 'plan'), { home }), null);
+  await autosave.quit();
+});
+
+test('a repository whose root git reports in a hidden folder of the home folder is refused, whatever folder led to it', async () => {
+  const home = folder('redirect-home');
+  const hidden = path.join(home, '.config', 'nvim');
+  const elsewhere = path.join(home, 'Projects', 'd');
+  const store = folder('redirect-store');
+  for (const dir of [hidden, elsewhere]) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(hidden, 'init.lua'), 'secret\n');
+  fs.writeFileSync(path.join(elsewhere, 'doc.typ'), '= Doc\n');
+  // A folder whose .git points at a repository with its working tree in
+  // ~/.config/nvim: the folder passes, the root git reports does not.
+  sh(store, 'init', '-q', '--initial-branch=main', '.');
+  sh(store, 'config', 'core.worktree', hidden);
+  fs.writeFileSync(path.join(elsewhere, '.git'), `gitdir: ${path.join(store, '.git')}\n`);
+  const autosave = new Autosave({ appName: 'Plass', stateDir: folder('state'), log, interval: 60_000, binary, home });
+  const window = { id: 'w' };
+  lines.length = 0;
+  await autosave.setDocument(window, path.join(elsewhere, 'doc.typ'));
+  assert.equal(autosave.project(window), null);
+  fs.mkdirSync(path.join(elsewhere, 'sub'));
+  await autosave.setDocument(window, path.join(elsewhere, 'sub', 'doc.typ'));
+  assert.equal(autosave.project(window), null);
+  const said = lines.filter((line) => line.includes(`no record for the repository at ${fs.realpathSync.native(hidden)}: it is in a hidden folder of the home folder`));
+  assert.equal(said.length, 1, `said once (${lines.join(' | ')})`);
+  assert.throws(() => sh(store, 'rev-parse', '--verify', '-q', BRANCH), 'no record branch');
+  assert.ok(!fs.existsSync(path.join(hidden, 'untracked')), 'nothing written in ~/.config/nvim');
+  await autosave.quit();
 });
 
 test('the error line is the last one that is not a hint or a warning', () => {
