@@ -90,6 +90,16 @@ if pgrep -f "^(/private)?${app#/private}/Contents/MacOS/" >/dev/null 2>&1; then
     die "@NAME@ is open. Quit it (@NAME@ menu → Quit @NAME@), then run this again."
 fi
 
+# An app built for one processor only (ManimLive, Apple silicon): the
+# site's latest.json names the zips there are, so say so plainly instead
+# of failing on a download that cannot exist. Without the file (an older
+# deploy) the download decides.
+if fetch "$site/app/latest.json" "$work/latest.json" 2>/dev/null \
+    && ! grep -q "\"$arch\":" "$work/latest.json"; then
+    have="$(grep -oE '"(arm64|x64)":' "$work/latest.json" | tr -d '":' | sort -u | sed 's/arm64/Apple silicon/; s/x64/Intel/' | paste -sd, - | sed 's/,/, /g')"
+    die "no @NAME@.app for this processor ($(uname -m)); the site builds it for ${have:-another one}."
+fi
+
 echo "@NAME@: downloading…"
 fetch "$site/app/@NAME@-$arch.zip" "$work/@NAME@.zip" \
     || die "could not download @NAME@ — check the connection and run this again."
