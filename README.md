@@ -5,7 +5,7 @@ built once per app from a config. Each app gets its own name, icon, Dock
 entry, menus, file types and install line; the shell is the same code. The
 design record is in Knuth's `docs/APP.md` ("Electron, one shell for
 Claerbout") and `docs/SHELL_STABILITY.md`; Plass's port is in its
-`docs/CLAERBOUT-SHELL.md`.
+`docs/CLAERBOUT-SHELL.md`, ManimLive's in its `docs/claerbout_experiment.md`.
 
 The shell owns what a native app must: a window per document, the native
 open and save dialogs, a first-launch choice of Python and its setup (uv,
