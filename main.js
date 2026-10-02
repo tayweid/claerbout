@@ -626,6 +626,31 @@ function setDocument(window, file) {
   if (isMac) window.setRepresentedFilename(file ?? '');
 }
 
+/** The window's title bar, from the config: the native one (`default`),
+ *  or none (`hiddenInset`, `hidden`): the page reaches the top of the
+ *  window and draws the bar itself, with the traffic lights over it —
+ *  Zen's shape. The page marks its bar `-webkit-app-region: drag` (and
+ *  its controls `no-drag`) so the window can still be moved by it, and
+ *  learns where the lights are from the Window Controls Overlay
+ *  (`navigator.windowControlsOverlay`, CSS `env(titlebar-area-*)`),
+ *  which is published only when the title bar is not native, so a page
+ *  that pads its bar by `env(titlebar-area-x, 0px)` is right under either
+ *  bar and asks the shell nothing. `trafficLightPosition` ({x, y}, macOS)
+ *  moves the lights; the overlay's height follows (2·y + 14 px). The
+ *  setup page gets the same bar. */
+function titleBar() {
+  const style = config.window.titleBarStyle;
+  const titleBarStyle = ['hidden', 'hiddenInset'].includes(style) ? style : 'default';
+  const position = config.window.trafficLightPosition;
+  return {
+    titleBarStyle,
+    ...(titleBarStyle !== 'default' ? { titleBarOverlay: true } : {}),
+    ...(isMac && position && Number.isFinite(position.x) && Number.isFinite(position.y)
+      ? { trafficLightPosition: { x: position.x, y: position.y } }
+      : {}),
+  };
+}
+
 function openWindow(url, document = null) {
   const last = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows().at(-1);
   const size = readPreferences().windowSize;
@@ -634,6 +659,7 @@ function openWindow(url, document = null) {
     height: size?.[1] ?? config.window.height,
     minWidth: config.window.minWidth,
     minHeight: config.window.minHeight,
+    ...titleBar(),
     title: document ? path.basename(document) : NAME,
     show: false,
     webPreferences: {

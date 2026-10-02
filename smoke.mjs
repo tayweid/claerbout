@@ -178,6 +178,22 @@ const title = await page.title();
 // The update test is about the bundle, not the document: a page that
 // titles its window its own way (Plass) is not held to the file's name.
 if (!updating && title !== path.basename(doc)) await fail(`the document did not open (title: ${title})`);
+// A hidden title bar (config.window.titleBarStyle) reaches the page as
+// the Window Controls Overlay, and a native one does not (README, the
+// config's `window`); the geometry is the lights' room.
+if (process.platform === 'darwin') {
+  const hidden = ['hidden', 'hiddenInset'].includes(config.window?.titleBarStyle);
+  const overlay = await page.evaluate(() => {
+    const overlay = navigator.windowControlsOverlay;
+    const rect = overlay?.getTitlebarAreaRect?.();
+    return { visible: overlay?.visible === true, x: rect?.x ?? 0, height: rect?.height ?? 0 };
+  });
+  if (overlay.visible !== hidden) await fail(`the title bar is ${hidden ? 'hidden' : 'native'} but the overlay is ${overlay.visible ? '' : 'not '}visible`);
+  const lights = config.window?.trafficLightPosition;
+  if (hidden && lights && (overlay.x <= lights.x || overlay.height !== 2 * lights.y + 14)) {
+    await fail(`the lights at ${JSON.stringify(lights)} give an overlay of x ${overlay.x}, height ${overlay.height}`);
+  }
+}
 
 if (!updating) {
   // The `focus` request: a second open of the document (an open-file
