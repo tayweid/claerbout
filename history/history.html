@@ -118,7 +118,7 @@
          altogether (the river's "now" and the card still say the record is paused) */
       #topbar.crowded #here, #topbar.crowded #rec { display: none; }
       /* the record's state, only when it is not simply recording */
-      #rec { height: 30px; border-radius: 8px; background: var(--pill); flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 0 11px; font: 12px var(--sans); color: var(--frame-ink-soft); white-space: nowrap; overflow: hidden; }
+      #rec { height: 30px; border-radius: 8px; background: var(--pill); flex: 0 1 auto; flex-shrink: 1000; /* gives way before #here's squares; its title holds the whole reason */ min-width: 0; display: flex; align-items: center; gap: 8px; padding: 0 11px; font: 12px var(--sans); color: var(--frame-ink-soft); white-space: nowrap; overflow: hidden; }
       #rec[hidden] { display: none; }
       #rec i { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); display: block; flex: 0 0 auto; }
       #rec .st { color: #e2b765; }
@@ -987,6 +987,8 @@
         }
 
         /* ---------- the card ---------- */
+        const focusKey = (a) => (a.dataset.path != null ? `input[data-path="${CSS.escape(a.dataset.path)}"]` : a.dataset.act ? `[data-act="${CSS.escape(a.dataset.act)}"]` : null);
+        card.addEventListener('focusin', (e) => { if (S.card) S.card.keep = focusKey(e.target); });
         function placeCard() {
           const c = S.sel && find(S.sel);
           const r = c && S.rmap.get(c.sha);
@@ -997,11 +999,12 @@
           if (!S.busy) {
             // A redraw (a resize, a commit arriving, a figure worked out) keeps the keyboard where
             // it was: on the same box, or the same button.
-            const a = document.activeElement;
-            const keep = a && card.contains(a) ? (a.dataset.path != null ? `input[data-path="${CSS.escape(a.dataset.path)}"]` : a.dataset.act ? `[data-act="${CSS.escape(a.dataset.act)}"]` : null) : null;
+            // Remembered on the card (focusin), not only for this render: a render while the
+            // figures are worked out again (a commit arriving) has no boxes, and the next has them.
+            const keep = S.card && S.card.keep;
             card.innerHTML = cardHTML(c);
             const again = keep && card.querySelector(keep);
-            if (again) again.focus({ preventScroll: true });
+            if (again && (!document.activeElement || document.activeElement === document.body)) again.focus({ preventScroll: true });
           }
           const need = r.cy + card.offsetHeight + 60;
           if (need > river.offsetHeight) river.style.height = need + 'px';
@@ -1116,7 +1119,7 @@
           const stillHere = () => S.card && S.card.sha === sha;
           const same = S.card && S.card.sha === sha;
           // The files unticked stay unticked when the card is asked again (the record moved on).
-          S.card = { sha, detail: S.details.get(sha) || null, compare: null, files: new Map(), back: new Map(), notice: same ? S.card.notice : null, off: same && S.card.off ? S.card.off : new Set() };
+          S.card = { sha, detail: S.details.get(sha) || null, compare: null, files: new Map(), back: new Map(), notice: same ? S.card.notice : null, off: same && S.card.off ? S.card.off : new Set(), keep: same ? S.card.keep : null };
           const detailP = S.details.has(sha) ? Promise.resolve(S.details.get(sha)) : ask({ type: 'history', action: 'commit', sha }).then((d) => { if (d && !d.error) S.details.set(sha, d); return d; });
           const compareP = compareFor(sha);
           const [detail, compare] = await Promise.all([detailP, compareP]);
@@ -1574,7 +1577,7 @@
           card.scrollTop = card.scrollHeight;
           // The button the keyboard was on is gone: the refusal's first choice takes its place.
           const first = card.querySelector('.refuse button');
-          if (first && (!document.activeElement || document.activeElement === document.body)) first.focus({ preventScroll: true });
+          if (first && (!document.activeElement || document.activeElement === document.body || (S.card && S.card.keep === '[data-act="rewind"]'))) first.focus({ preventScroll: true });
         }
         function refusalHTML(result, ctx) {
           const block = (text, buttons) => `<div class="refuse">${text}${buttons ? `<div class="act">${buttons}</div>` : ''}</div>`;
