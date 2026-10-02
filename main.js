@@ -604,19 +604,39 @@ function touch(file) {
 }
 
 /** The touched file a page's report names: the newest whose name, size
- *  and mtime agree, else the newest of that name, else null. */
+ *  and mtime agree, else null. A report without the size and mtime, or
+ *  one no touched file matches, names none, never a same-named file
+ *  that happens to be newest (another window's Untitled.typ). */
 function touchedFile({ name, size, modified }) {
-  const named = [...touched.keys()].reverse().filter((file) => path.basename(file) === name);
-  const stamped = typeof size === 'number' && typeof modified === 'number';
-  for (const file of named) {
+  if (typeof size !== 'number' || typeof modified !== 'number') return null;
+  for (const file of [...touched.keys()].reverse()) {
+    if (path.basename(file) !== name) continue;
     try {
       const info = fs.statSync(file);
-      if (!stamped || (info.size === size && Math.abs(info.mtimeMs - modified) < 1)) return file;
+      if (info.isFile() && info.size === size && Math.abs(info.mtimeMs - modified) < 1) return file;
     } catch {
       // Gone since: not this one.
     }
   }
-  return named[0] ?? null;
+  return null;
+}
+
+/** A page's report of a path is taken only when it is an absolute path to
+ *  an existing regular file: the shell starts a repository in its folder
+ *  and writes there, so a page cannot point it anywhere else. A refusal
+ *  is logged once per path. */
+const refusedReports = new Set();
+function reportedFile(file) {
+  try {
+    if (path.isAbsolute(file) && fs.statSync(file).isFile()) return file;
+  } catch {
+    // Not there: refused below.
+  }
+  if (!refusedReports.has(file)) {
+    refusedReports.add(file);
+    log(`document: refused ${JSON.stringify(file)}: not an absolute path to an existing file`);
+  }
+  return null;
 }
 /** nil until a Python is chosen and ready: documents wait in `pending`. */
 let mode = null;
@@ -952,9 +972,10 @@ async function answer(window, message) {
       // matched against the files handles have lately touched
       // (`touched`); {path: null} for none. The window's represented
       // file, and the project the autosave record follows for it. A
-      // report that matches nothing is none, never a stale path. Knuth
-      // opens by path and never needs to.
-      let file = typeof message.path === 'string' && path.isAbsolute(message.path) ? message.path : null;
+      // path is taken only when it is an absolute path to an existing
+      // regular file; a report that matches nothing is none, never a
+      // stale path. Knuth opens by path and never needs to.
+      let file = typeof message.path === 'string' && message.path ? reportedFile(message.path) : null;
       if (!file && typeof message.name === 'string' && message.name) file = touchedFile(message);
       setDocument(window, file);
       return { path: file };

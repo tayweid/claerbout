@@ -169,46 +169,98 @@ Knuth's `docs/AUTOSAVE.md`): a GPX track for research. The shell is the
 git runner for every app, since it has the filesystem and knows which
 document each window holds; a page only says when something happened.
 
-- A document's project is the git repository its folder is in (`git
-  rev-parse --show-toplevel`). A folder in none gets one, quietly, once
-  (`git init`, with `untracked/` in its `.gitignore`).
-- The record is one branch per repository, `refs/heads/claerbout-autosave`,
-  shared by every app on it, written with plumbing only: a temporary
-  index (`GIT_INDEX_FILE`) filled by `git add -A` over the working tree,
-  so `.gitignore` applies, then `write-tree`, `commit-tree` with the
-  branch's tip as parent, and `update-ref`. The user's HEAD, branch,
-  index and working tree are never touched. Nothing is committed while
-  `.git/index.lock` exists or a merge, rebase, cherry-pick or revert is
-  in progress, and nothing when the tree equals the tip's.
-- Commits are `<app>: <trigger>`: `knuth: cell run [4]`, `plass: timer`,
+- **The project.** A document's project is the git repository its folder
+  is in (`git rev-parse --show-toplevel`), wherever that repository is. A
+  folder in none gets one, quietly, once (`git init`), but only in a
+  project's folder: never the home folder or a folder it is in, never
+  `~/Desktop`, `~/Documents`, `~/Downloads`, `~/Movies`, `~/Music`,
+  `~/Pictures`, `~/Public` or `~/Library` themselves, never a cloud-synced
+  root (iCloud Drive and the apps' containers under `~/Library/Mobile
+  Documents`, `~/Library/CloudStorage/*` and a Google Drive's `My Drive`,
+  `~/Dropbox`, `~/OneDrive…`, `~/Box`), a temporary folder (`os.tmpdir()`,
+  `/tmp`, `/var/tmp`) or a volume root (`/`, `/Volumes/*`). A folder at
+  least one level below any of those qualifies: `~/Projects/foo`,
+  `~/Desktop/week-3`. A document elsewhere has no record, and the log says
+  why, once per folder per launch.
+- **The branch.** One per working tree: `refs/heads/claerbout-autosave`
+  in a repository's main working tree, `refs/heads/claerbout-autosave-<name>`
+  in a linked worktree (`git worktree add`; `<name>` is the worktree's
+  folder name as git keeps it in `.git/worktrees`), so two worktrees open
+  at once never write over each other's tip. (A refinement of the spec's
+  "one branch per repo"; a hyphen, since git cannot keep
+  `claerbout-autosave/<name>` beside `claerbout-autosave`.) Every app on a
+  working tree shares its branch.
+- **Plumbing only.** A temporary index (`GIT_INDEX_FILE`, kept between
+  commits in the app's state folder, `autosave/<project>/index`, for its
+  stat cache, and removed at quit) is filled by `git add -A --ignore-errors`
+  over the working tree, so `.gitignore` applies; entries the ignore rules
+  or the secrets list have come to match since are dropped from it; then
+  `write-tree`, `commit-tree` with the branch's tip as parent, and
+  `update-ref` as a compare-and-swap. Every git it runs has
+  `core.splitIndex`, `core.fsmonitor` and the add advice off, so nothing
+  is written into the user's `.git` but objects and the record's branch
+  (and its reflog).
+- **What it never touches, and what it writes.** The user's HEAD, branch
+  and index are never touched. Nothing is committed while the record's
+  branch is checked out in any working tree of the repository (an
+  `update-ref` would move that HEAD; the log says so once), while
+  `index.lock` exists, or while a merge, rebase, cherry-pick or revert is
+  in progress, and nothing when the tree equals the tip's. In the working
+  tree it does write: `untracked/` (made, empty), a `.gitignore` line for
+  it (appended, or a new `.gitignore`), and `.claerbout/untracked.json`.
+  These show in the user's own `git status`, and ride along in a `git
+  commit -a` or `git add -A` the user makes.
+- **What git cannot read, or must leave out.** A file git cannot read is
+  left out, and the log names it once; the rest is recorded. A nested
+  repository without a commit (a fresh `git init` or `uv init` inside the
+  project) is left out, said once, until it has one; a nested repository
+  with a commit is recorded as a gitlink, as git does. A file named
+  `untracked` (not a folder) means no `untracked/` and no manifest for that
+  project, said once.
+- **Messages.** `<app>: <trigger>`: `knuth: cell run [4]`, `plass: timer`,
   `knuth: session open`, `plass: session close`. The author is the
   repository's git identity when it has one, else `Claerbout Autosave
   <autosave@claerbout.local>`; commits are not signed.
-- Triggers: a page's `autosave {trigger}` request (Knuth sends `cell run
-  [n]` once a run's writes have landed); a one-minute timer per open
-  project; `session open` when the first window on a project opens and
-  `session close` when the last closes; quitting flushes.
-- `untracked/` in the project, for large data, caches and scratch, is
-  ignored but pinned: `.claerbout/untracked.json` lists every file in it
-  with its path, size, mtime and SHA-256, rewritten before every commit
-  so the manifest is inside the track. A file is hashed again only when
-  its size or mtime changed; the hashes are cached under the app's state
-  folder (`autosave/<project>/hashes.json`).
-- Common secret files are kept out of the temporary index by pathspec,
-  in every folder: `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `*.p12`,
-  `credentials.json`, `.npmrc`, `.netrc`. Nothing scans file contents.
-- The log gets one line per commit (`autosave: knuth: cell run [4] →
-  <hash> (<project>)`), and one when a repository is initialised or
-  `.gitignore` gains `untracked/`.
-- Nothing is pushed. The spec's outside witness (the branch pushed to a
-  remote on a schedule) is not built; see "Built" in Knuth's
+- **Triggers.** A page's `autosave {trigger}` request (Knuth sends `cell
+  run [n]` once a run's writes have landed); a one-minute timer per open
+  project, not per window, whose tick is dropped while a commit is under
+  way, so a commit slower than a minute never piles up; `session open`
+  when the first window on a project opens and `session close` when the
+  last closes. One job at a time per project. Quitting closes every open
+  session and waits for every job already queued (a session close from a
+  window just shut included), for at most 20 s, so quitting never hangs.
+- **`untracked/`**, for large data, caches and scratch, is ignored but
+  pinned: `.claerbout/untracked.json` lists every file in it with its
+  path, size, mtime and SHA-256, rewritten before every commit, and is
+  always recorded, as is `.gitignore`, whatever the ignore rules say (a
+  `*.json` or `.claerbout/` line cannot make `untracked/` a loophole). A
+  file is hashed again only when its size or mtime changed; the hashes
+  are cached under the app's state folder (`autosave/<project>/hashes.json`).
+- **Secrets.** Kept out of the record by pathspec, in every folder: the
+  files `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`,
+  `id_ecdsa*`, `id_dsa*`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`,
+  `*.gpg`, `*.asc`, `credentials.json`, `service-account*.json`,
+  `.git-credentials`, `.pypirc`, `.npmrc`, `.netrc`, `token*`, `*.token`,
+  and everything under a folder named `.env/`, `.aws/`, `.ssh/` or
+  `.gnupg/`. Names only: nothing scans file contents, so a key pasted into
+  a notebook is recorded. `token*` also catches `tokenizer.py` and the
+  like; the log names what the list kept out of a project, once per
+  launch, so such a catch is seen.
+- **The log** gets one line per commit (`autosave: knuth: cell run [4] →
+  <hash> (<project>)`), and one when a repository is initialised, when
+  `.gitignore` gains `untracked/`, when a folder is refused, and when a
+  commit is skipped for a new reason. An error is git's last line that is
+  not a `hint:` or `warning:`.
+- **Nothing is pushed.** The spec's outside witness (the branch pushed to
+  `origin` after every ~10 commits, every 30 minutes with anything
+  unpushed, on close and on launch) is not built; see "Built" in Knuth's
   `docs/AUTOSAVE.md`.
 
 `<PREFIX>_AUTOSAVE=0` turns the record off for a test;
 `<PREFIX>_AUTOSAVE_INTERVAL` (seconds) sets the timer. Without git on the
 machine (on a Mac, without the developer tools) the record is off and the
 log says so. The tests (`npm run test:autosave`) run real git in
-temporary repositories.
+temporary repositories under `os.tmpdir()`.
 
 ## The protocol
 
@@ -241,8 +293,10 @@ Chromium asks the shell's permission handler about every read and write
 of a handle, with the path but no window, and a File from a handle's
 `getFile()` is blob-backed, so `pathOf` has nothing for it (both measured
 2026-10-02; a dropped File has a path). Newest first, by name and the
-file's size and mtime; nothing matching is none. A page opened by path
-never needs to. Answered `{path}`), `autosave {trigger}` (something
+file's size and mtime; nothing matching, or a report without the size
+and mtime, is none. A `path` is taken only when it is an absolute path to
+an existing regular file (a refusal is logged once). A page opened by
+path never needs to. Answered `{path}`), `autosave {trigger}` (something
 happened in the page worth a commit on the record, `cell run [4]`; a
 notice).
 
