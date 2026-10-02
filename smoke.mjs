@@ -226,7 +226,17 @@ if (updating) {
     await new Promise((resolve) => setTimeout(resolve, 3000));
     if (fs.existsSync(`${bundle}.old`)) await fail('the relaunched app left the old bundle beside itself');
   }
-  fs.rmSync(work, { recursive: true, force: true });
+  // The relaunched app's engine, started in the throwaway folder, may
+  // still be going down (it stops once its parent is gone): the folder
+  // is removed once it lets go.
+  for (let i = 0; i < 15; i++) {
+    try {
+      fs.rmSync(work, { recursive: true, force: true });
+      break;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
   console.log(`smoke (${NAME}, update, ${path.basename(bundle)}): ok, build ${before} → ${after}`);
   process.exit(0);
 }
