@@ -51,9 +51,16 @@ fi
 rm -rf "$target" "$incoming"
 
 # Whole, checked, then renamed into place (a rename within a folder is
-# atomic).
+# atomic). The check is the main binary's hash, which names the Electron,
+# and, when the app carries the manifest package.mjs writes, every file of
+# the framework against it.
+manifest="$app/Contents/Resources/framework.sha256"
 place() {
     [ "$(binary_hash "$incoming")" = "$expected" ] || die "the copied Electron does not match the build this app expects."
+    if [ -f "$manifest" ]; then
+        (cd "$incoming" && shasum -a 256 --check --status "$manifest") \
+            || die "the copied Electron is not whole: a file differs from the build this app expects."
+    fi
     mv "$incoming" "$target"
 }
 

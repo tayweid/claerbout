@@ -289,6 +289,18 @@ for (const arch of archs) {
   rmSync(path.dirname(framework), { recursive: true, force: true });
   mkdirSync(path.dirname(framework), { recursive: true });
   renameSync(frameworkDir, framework);
+  // Every regular file of the framework with its SHA-256, for complete.sh
+  // to check a clone or a download against before placing it: the main
+  // binary's hash in Info.plist says which Electron; this says the whole
+  // framework is that one (Knuth's SHELL_STABILITY.md, item 8). Symbolic
+  // links (Versions/Current and the top-level names) are left to the copy.
+  const manifest = [];
+  for (const entry of readdirSync(framework, { withFileTypes: true, recursive: true })) {
+    if (!entry.isFile()) continue;
+    const file = path.join(entry.parentPath ?? entry.path, entry.name);
+    manifest.push(`${createHash('sha256').update(readFileSync(file)).digest('hex')}  ${path.relative(framework, file)}`);
+  }
+  writeFileSync(path.join(contents, 'Resources', 'framework.sha256'), `${manifest.sort((a, b) => a.slice(66).localeCompare(b.slice(66))).join('\n')}\n`);
   renameSync(path.join(contents, 'MacOS', config.name), path.join(contents, 'MacOS', `${config.name} Electron`));
   execFileSync('swiftc', [
     '-O',
