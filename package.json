@@ -9,6 +9,7 @@
   "files": [
     "main.js",
     "preload.js",
+    "update.js",
     "complete.sh",
     "launcher.swift",
     "package.mjs",
@@ -17,7 +18,8 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node smoke.mjs --config test/fixture/app.json browser",
+    "test": "node smoke.mjs --config test/fixture/app.json browser && node test/update.mjs",
+    "test:update": "node test/update.mjs",
     "fixture": "CLAERBOUT_APP=test/fixture/app.json electron .",
     "fixture:build": "node package.mjs --config test/fixture/app.json --install /tmp/Fixture.app"
   },

@@ -8,6 +8,9 @@
 //   node smoke.mjs --config app/knuth.json browser              # the checkout, Pyodide
 //   node smoke.mjs --config app/knuth.json uv                   # the checkout, uv's Python
 //   node smoke.mjs --config app/knuth.json uv path/to/Knuth.app # a built app, complete or not
+//   node smoke.mjs --config app/knuth.json update path/to/Knuth.app path/to/site
+//                                               # an installed app updating itself from a
+//                                               # site folder (app/latest.json and the zips)
 //
 // With one Python in the config, the mode may be left out. The uv run
 // installs Python into the throwaway folder (and uv itself into
@@ -32,6 +35,17 @@ const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 const pythons = Array.isArray(config.pythons) && config.pythons.length > 0 ? config.pythons : ['uv', 'browser'];
 let mode = args[0];
 let bundle = args[1];
+// The update check: an installed app, and a site folder whose build is
+// not the app's. The app runs on the cheaper Python it offers.
+const updating = mode === 'update';
+const siteDir = updating ? path.resolve(args[2] ?? '') : null;
+if (updating) {
+  if (!bundle?.endsWith('.app') || !fs.existsSync(path.join(siteDir, 'app', 'latest.json'))) {
+    console.error('usage: node smoke.mjs --config app.json update App.app site-folder');
+    process.exit(2);
+  }
+  mode = pythons.includes('browser') ? 'browser' : pythons[0];
+}
 if (mode && mode.endsWith('.app')) {
   bundle = mode;
   mode = undefined;
@@ -59,6 +73,7 @@ const env = {
   CLAERBOUT_UV_DIR: path.join(work, 'uv-claerbout'),
   [`${PREFIX}_CHOOSE`]: mode,
   [`${PREFIX}_PORT`]: port,
+  ...(updating ? { [`${PREFIX}_SITE`]: siteDir } : {}),
 };
 const executable = bundle ? path.join(bundle, 'Contents', 'MacOS', NAME) : null;
 
@@ -161,6 +176,59 @@ if (smoke.ready) {
 }
 const title = await page.title();
 if (title !== path.basename(doc)) await fail(`the document did not open (title: ${title})`);
+
+if (updating) {
+  // The page asks, as its update button would: the site's build is not
+  // this one, the install runs (its steps arrive as events), the bundle
+  // on disk becomes the site's build, and the app relaunches into it.
+  const stampOf = (app) => JSON.parse(fs.readFileSync(path.join(app, 'Contents', 'Resources', 'app', 'package.json'), 'utf8')).build;
+  const before = stampOf(bundle);
+  const wanted = JSON.parse(fs.readFileSync(path.join(siteDir, 'app', 'latest.json'), 'utf8')).build;
+  if (before === wanted) await fail(`the site's build is the installed one (${wanted}); nothing to update to`);
+  const checked = await page.evaluate(() => window.claerbout.request({ type: 'update' }));
+  if (checked?.state !== 'available' || checked.latest?.build !== wanted) await fail(`the check answered ${JSON.stringify(checked)}`);
+  await page.evaluate(() => {
+    window.__update = null;
+    window.claerbout.on('update', (detail) => { window.__update = detail; });
+  });
+  const exited = new Promise((resolve) => app.process().once('exit', resolve));
+  await page.evaluate(() => window.claerbout.request({ type: 'update', action: 'install' }));
+  let last = null;
+  const until = Date.now() + 600_000;
+  while (Date.now() < until) {
+    const seen = await page.evaluate(() => window.__update).catch(() => ({ state: 'gone' }));
+    if (seen) last = seen;
+    if (last?.state === 'ready' || last?.state === 'failed' || last?.state === 'gone') break;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  if (last?.state === 'failed') await fail(`the update failed: ${last.text}`);
+  if (!last || last.state === 'gone' && stampOf(bundle) !== wanted) await fail(`no update event arrived (last: ${JSON.stringify(last)})`);
+  // The app relaunches itself into the new bundle: the process goes, and a
+  // new one appears at the same path, which has the next build.
+  await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 30_000))]);
+  const after = stampOf(bundle);
+  if (after !== wanted) await fail(`the bundle is build ${after}, not the site's ${wanted}`);
+  await new Promise((resolve) => setTimeout(resolve, 6000));
+  // macOS may report a path under /private without that prefix.
+  const plain = bundle.replace(/^\/private/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const running = `^(/private)?${plain}/Contents/MacOS/`;
+  let relaunched = '';
+  try {
+    relaunched = execFileSync('pgrep', ['-f', running], { encoding: 'utf8' });
+  } catch {
+    // pgrep exits 1 when nothing matches.
+  }
+  if (!relaunched.trim()) await fail('the app did not relaunch into the new bundle');
+  spawnSync('pkill', ['-f', running]);
+  if (fs.existsSync(`${bundle}.old`)) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    if (fs.existsSync(`${bundle}.old`)) await fail('the relaunched app left the old bundle beside itself');
+  }
+  fs.rmSync(work, { recursive: true, force: true });
+  console.log(`smoke (${NAME}, update, ${path.basename(bundle)}): ok, build ${before} → ${after}`);
+  process.exit(0);
+}
+
 if (smoke.run) {
   await page.click(smoke.run);
   if (smoke.written) {

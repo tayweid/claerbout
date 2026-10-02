@@ -53,6 +53,23 @@ for (const key of ['name', 'id', 'envPrefix', 'scheme', 'icon']) {
 }
 if (!config.package && !config.web) fail('the config needs "package" (a Python package holding the page) or "web" (the page)');
 
+// The build this is: CLAERBOUT_BUILD, else the commit (the deploy's
+// GITHUB_SHA, or the working directory's HEAD), else "local". It is the
+// identity an installed app compares with the site's latest.json
+// (update.js): the site's build differs → an update. The time is for
+// people.
+function buildId() {
+  if (process.env.CLAERBOUT_BUILD) return process.env.CLAERBOUT_BUILD;
+  if (process.env.GITHUB_SHA) return process.env.GITHUB_SHA.slice(0, 7);
+  try {
+    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || 'local';
+  } catch {
+    return 'local';
+  }
+}
+const buildStamp = buildId();
+const built = new Date().toISOString();
+
 // The app's version: the environment's, else the package.json beside the
 // config or in its parent (an app repository's own).
 const version =
@@ -135,7 +152,7 @@ rmSync(stage, { recursive: true, force: true });
 // The shell, with the app's config beside it as app.json.
 const appDir = path.join(stage, 'app');
 mkdirSync(appDir, { recursive: true });
-for (const file of ['main.js', 'preload.js']) cpSync(path.join(here, file), path.join(appDir, file));
+for (const file of ['main.js', 'preload.js', 'update.js']) cpSync(path.join(here, file), path.join(appDir, file));
 cpSync(configPath, path.join(appDir, 'app.json'));
 // The engine's requirements file (an exact export of the app's lockfile,
 // say) rides beside the config; main.js reads it there when packaged.
@@ -146,7 +163,7 @@ if (config.engine?.requirementsFile) {
 }
 writeFileSync(
   path.join(appDir, 'package.json'),
-  JSON.stringify({ name: config.package ?? config.name.toLowerCase(), productName: config.name, version, main: 'main.js' }, null, 2),
+  JSON.stringify({ name: config.package ?? config.name.toLowerCase(), productName: config.name, version, build: buildStamp, built, main: 'main.js' }, null, 2),
 );
 
 // The bundle's resources: a Python package (the engine's code, with the
@@ -223,6 +240,9 @@ function sdk() {
 }
 
 const frameworkName = 'Electron Framework.framework';
+// What the zips are, for an installed app checking for an update
+// (update.js): written as latest.json beside them once every arch is zipped.
+const published = { name: config.name, version, build: buildStamp, built, electron: electronVersion, zips: {}, sha256: {} };
 for (const arch of archs) {
   const [bundleDir] = await packager({
     dir: appDir,
@@ -305,6 +325,8 @@ for (const arch of archs) {
     rmSync(zip, { force: true });
     execFileSync('ditto', ['-c', '-k', '--keepParent', bundle, zip]);
     console.log(`zipped ${zip}`);
+    published.zips[arch] = path.basename(zip);
+    published.sha256[arch] = createHash('sha256').update(readFileSync(zip)).digest('hex');
     // A page's download button: the same app under the plain name, for
     // Apple silicon (Intel Macs use the install line).
     if (arch === 'arm64') {
@@ -339,4 +361,11 @@ for (const arch of archs) {
     renameSync(incoming, installTo);
     console.log(`installed ${installTo}`);
   }
+}
+
+
+if (zipTo) {
+  const latest = path.resolve(zipTo, 'latest.json');
+  writeFileSync(latest, `${JSON.stringify(published, null, 2)}\n`);
+  console.log(`wrote ${latest} (build ${buildStamp})`);
 }

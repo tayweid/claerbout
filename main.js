@@ -133,6 +133,21 @@ function run(file, args, { timeout = 30_000, env: childEnv } = {}) {
   });
 }
 
+// MARK: - Updating the app
+
+/** The app updating itself from its site (update.js): a check on request
+ *  and quietly after launch; an install the page or the menu starts. */
+const updater = require('./update.js')({ app, net, config, env, log });
+/** The last check that found a new build, told to every window opened
+ *  since, so a page can show its update button. */
+let latestKnown = null;
+
+function broadcast(name, detail) {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send('claerbout:event', name, detail);
+  }
+}
+
 function readPreferences() {
   try {
     return JSON.parse(fs.readFileSync(preferencesPath, 'utf8'));
@@ -650,6 +665,9 @@ function openWindow(url, document = null) {
     }
   });
   window.once('ready-to-show', () => window.show());
+  contents.on('did-finish-load', () => {
+    if (latestKnown) contents.send('claerbout:event', 'update', latestKnown);
+  });
   window.on('close', () => {
     if (!window.isMaximized() && !window.isFullScreen()) writePreference('windowSize', window.getSize());
   });
@@ -844,6 +862,21 @@ async function answer(window, message) {
     case 'status':
       log(`page: Python is ${message.state ?? '?'} (${window.getTitle()})`);
       return null;
+    case 'update': {
+      // {action: 'install'} starts the install (the page follows it by
+      // `update` events); anything else is a check, answered in full.
+      if (message.action === 'install') {
+        void runUpdate(false);
+        return { state: 'installing', current: updater.current };
+      }
+      try {
+        const result = await updater.check();
+        if (result.state === 'available') latestKnown = { state: 'available', latest: result.latest, current: result.current };
+        return result;
+      } catch (error) {
+        return { state: 'failed', text: error.message, current: updater.current };
+      }
+    }
     case 'error':
       log(`page error: ${message.message ?? '?'} (${window.getTitle()})`);
       return null;
@@ -881,10 +914,94 @@ function choosePython() {
   if (!installing) showSetup(null);
 }
 
+const when = (build) => (build?.built ? `, built ${build.built.slice(0, 10)}` : '');
+
+/** Check for Updates… in the menu: the answer in a dialog, and the offer
+ *  to install when the site has a newer build. */
+async function checkForUpdates() {
+  let result;
+  try {
+    result = await updater.check();
+  } catch (error) {
+    await dialog.showMessageBox({ type: 'warning', message: `${NAME} could not check for updates`, detail: error.message, buttons: ['OK'] });
+    return;
+  }
+  const mine = `build ${result.current.build ?? 'unknown'}${when(result.current)}`;
+  const theirs = `build ${result.latest.build}${when(result.latest)}`;
+  if (result.state === 'current') {
+    await dialog.showMessageBox({ type: 'info', message: `${NAME} is up to date`, detail: `This is ${mine}.`, buttons: ['OK'] });
+    return;
+  }
+  if (result.state === 'development') {
+    await dialog.showMessageBox({ type: 'info', message: `${NAME} is running from a checkout`, detail: `The site has ${theirs}. A development build is not updated: build or install it again.`, buttons: ['OK'] });
+    return;
+  }
+  if (result.state === 'unsupported') {
+    await dialog.showMessageBox({ type: 'info', message: `${NAME} updates itself only on a Mac`, detail: `The site has ${theirs}; this is ${mine}. Run the install line again to update.`, buttons: ['OK'] });
+    return;
+  }
+  latestKnown = { state: 'available', latest: result.latest, current: result.current };
+  const { response } = await dialog.showMessageBox({
+    type: 'info',
+    message: `A new ${NAME} is available`,
+    detail: `The site has ${theirs}; this is ${mine}. ${NAME} downloads it, swaps it in and relaunches; open documents are reopened.`,
+    buttons: ['Install and Relaunch', 'Not Now'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (response === 0) void runUpdate(true);
+}
+
+let updateRun = null;
+
+/** One install at a time, from the menu or from a page: every window hears
+ *  its progress as `update` events, the log keeps it, and the app relaunches
+ *  into the new bundle once it is in place (from the menu, after saying so). */
+function runUpdate(fromMenu) {
+  if (updateRun) return updateRun;
+  updateRun = (async () => {
+    try {
+      const result = await updater.install((step) => {
+        log(`update: ${step.text}`);
+        broadcast('update', { ...step, current: updater.current });
+      });
+      if (result.state !== 'ready') {
+        broadcast('update', { ...result });
+        return result;
+      }
+      const detail = `Build ${result.latest.build}${when(result.latest)} is in place; ${NAME} relaunches now.`;
+      broadcast('update', { state: 'ready', text: detail, latest: result.latest, current: result.current });
+      if (fromMenu) await dialog.showMessageBox({ type: 'info', message: `${NAME} has been updated`, detail, buttons: ['Relaunch'] });
+      else await sleep(1500);
+      relaunch();
+      return result;
+    } catch (error) {
+      log(`update failed: ${error.message}`);
+      broadcast('update', { state: 'failed', text: error.message, current: updater.current });
+      if (fromMenu) {
+        await dialog.showMessageBox({ type: 'warning', message: `${NAME} could not update`, detail: `${error.message}\n\nLog: ${logPath}`, buttons: ['OK'] });
+      }
+      return { state: 'failed', text: error.message };
+    } finally {
+      updateRun = null;
+    }
+  })();
+  return updateRun;
+}
+
+/** The new bundle, with this instance's documents reopened: `relaunch`
+ *  starts the executable at this process's path, which the swap made the
+ *  new one's, once `quit` has stopped the engine. */
+function relaunch() {
+  app.relaunch({ args: [...documents.values()].filter(Boolean) });
+  app.quit();
+}
+
 function buildMenu() {
   const appItems = [
     // A choice only where there is one.
     ...(pythons.length > 1 ? [{ label: 'Choose Python…', click: choosePython }] : []),
+    { label: 'Check for Updates…', click: () => void checkForUpdates() },
     { label: 'Show Log', click: () => void shell.openPath(logPath) },
   ];
   const template = [
@@ -1028,6 +1145,22 @@ if (!app.requestSingleInstanceLock()) {
     protocol.handle(scheme, servePage);
     grantPermissions();
     buildMenu();
+    // What the last update left behind, then a quiet look at the site:
+    // only an installed app, and the pages hear of a new build.
+    updater.clean();
+    if (updater.bundle) {
+      setTimeout(() => {
+        updater
+          .check()
+          .then((result) => {
+            if (result.state !== 'available') return;
+            latestKnown = { state: 'available', latest: result.latest, current: result.current };
+            log(`update available: build ${result.latest.build} (this is ${result.current.build ?? 'unknown'})`);
+            broadcast('update', latestKnown);
+          })
+          .catch((error) => log(`update check: ${error.message}`));
+      }, 8000);
+    }
     // What was chosen before, if the app still offers it; with one
     // Python on offer there is nothing to choose, and it is simply started.
     const remembered = readPreferences().python;

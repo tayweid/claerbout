@@ -88,7 +88,7 @@ copies it into the bundle as `app.json`.
 | `icon` | A PNG, 512 px or larger, relative to the config. |
 | `copyright` | For the bundle's Info.plist. |
 | `documentTypes` | Finder's Open With: `name`, `role`, `rank` (`Alternate` unless you mean to take the type), and `contentTypes` (UTIs) or `extensions`. |
-| `site` | The URL the install line downloads from (`https://knuth.tayweid.io`); the zips live at `<site>/app/`. |
+| `site` | The URL the install line downloads from (`https://knuth.tayweid.io`); the zips and `latest.json` live at `<site>/app/`, and the app checks there for updates. |
 | `elsewhere` | A sentence the install line adds when run off macOS. |
 | `smoke` | What `smoke.mjs` checks: `document` (name), `text` (contents), `ready` (a selector) and `readyText` (its text, or per mode `{uv, browser}`), `run` (a selector to click), `written` (a file expected beside the document), and `json` (keys it must hold) or `contains` (text it must hold). |
 
@@ -122,6 +122,44 @@ copies it into the bundle as `app.json`.
 - It runs with `PYTHONPATH` set to the bundle's `python/` folder, and
   `PYTHONDONTWRITEBYTECODE=1`: the bundle is not the engine's to write.
 
+## Updating
+
+An installed app updates itself (`update.js`; Knuth's `SHELL_STABILITY.md`,
+"An update path for the download button"). `package.mjs --zip` writes
+`latest.json` beside the zips — the build the zips are (`CLAERBOUT_BUILD`,
+else the deploy's `GITHUB_SHA`, else the working directory's `HEAD`), the
+time, the Electron version, the zip names and their SHA-256 — and stamps
+the same build into the bundle's `package.json`. The site is the config's
+`site`; every deploy publishes `app/latest.json` with the zips. Then:
+
+- **In the menu**, Check for Updates… compares the two builds and offers
+  to install: the app downloads the zip, checks it against the site's
+  checksum and its own signature, unpacks it beside the bundle, completes
+  it with its own `complete.sh` (cloning the framework from the running
+  app when the Electron version is unchanged, downloading Electron
+  otherwise), swaps the bundles with two renames and relaunches, reopening
+  its documents. The bundle it replaced is removed by the next launch.
+- **In the page**, an `update` request is the same check, answered
+  `{state: 'current' | 'available' | 'development' | 'unsupported' |
+  'failed', current, latest, text?}`; `{type: 'update', action: 'install'}`
+  starts the install, whose steps every window hears as `update` events
+  (`{state: 'downloading' | 'unpacking' | 'completing' | 'installing' |
+  'ready' | 'failed', text, percent?}`). The shell also checks quietly
+  eight seconds after launch and sends `{state: 'available', latest,
+  current}` to every window (and to each opened later), which is when a
+  page shows its update button.
+- **From a terminal**, the install line updates in place (as before), and
+  `curl -fsSL <site>/install | bash -s -- --check` says what is installed
+  and what the site has, installing nothing.
+
+Only an installed Mac app replaces itself; a checkout answers
+`development`, Windows `unsupported`. `<PREFIX>_SITE` overrides the site
+for a test (a URL, or a folder holding `app/latest.json` and the zips), and
+`smoke.mjs --config … update App.app site-folder` is that test: it has the
+page request the install and checks that the bundle on disk becomes the
+site's build, that the app relaunches into it, and that the old bundle is
+cleaned up.
+
 ## The protocol
 
 The preload exposes `window.claerbout.request(message) → Promise` and
@@ -133,12 +171,17 @@ Requests: `open` and `saveAs {name}` (the native panels; `{path}` or
 `rename {path, name}`, `remove {path}` (files by absolute path, replies
 shaped like Knuth's engine's), `choose {python}` (the setup page's
 answer), `status {state}` and `error {message}` (logged), `ready` (the
-page is listening for a dropped document; see `openBy`).
+page is listening for a dropped document; see `openBy`), `update` and
+`update {action: 'install'}` (above).
 
-Events: `setup {kind: 'progress' | 'failed', text}` on the setup page.
+Events: `setup {kind: 'progress' | 'failed', text}` on the setup page;
+`update {state, …}` (above).
 
 ## Testing here
 
 `npm test` runs the smoke test on `test/fixture`, a page with no Python
-that reads its document through the shell and writes a copy beside it.
-`npm run fixture:build` packages it. Both need macOS.
+that reads its document through the shell and writes a copy beside it,
+and then the update test: the fixture built twice under two build ids
+(`CLAERBOUT_BUILD`), the first installed and updating itself to the
+second from a site folder. `npm run fixture:build` packages it. All need
+macOS.
