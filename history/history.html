@@ -1,0 +1,1677 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'"
+    />
+    <title>History</title>
+    <style>
+      /* THE HISTORY WINDOW (Knuth's docs/mockups/history.md, the
+         recommended mockup history-recommended.html). The shell's own page,
+         served at <scheme>://app/_claerbout/history.html for one project.
+
+         The record (claerbout-autosave) is a river running down the room:
+         time flows down, the oldest at the top, and the window opens at the
+         mouth, now. A cell run is a bold dot with its message (a red ring
+         when the run raised); a timer commit is a faint bead, and three or
+         more in a row fold to one line naming what they caught. Earlier
+         days fold to one reach each. The user's own branches are
+         tributaries beside the river, square nodes and serif words, tied to
+         the record where they hold the same files (the record shares no
+         commit with them: it is written from its own tip).
+
+         Click a node and a card opens beside it: what that commit changed,
+         then what a rewind would change against now, file by file, with a
+         box to leave a file out. Click the node again, or the card's
+         button, to rewind. A rewind never resets: the record commits now
+         ("rewind from"), writes the commit's files into the folder, and
+         commits again ("rewind to"), so the river only grows.
+
+         Everything comes from the shell (window.claerbout): the graph, a
+         commit, a file at a commit, the rewind's preview and the rewind;
+         the page works out cells, values.json names and words from blob
+         text. The frame is the suite's: #18181a, a 48px rail of 32px tiles,
+         the room rounded 12px inside one 8px edge. */
+      :root {
+        --frame: #18181a;
+        --frame-ink: #d5d3cf;
+        --frame-ink-soft: #85837f;
+        --pill: #232326;
+        --tile: #2e2e32;
+        --tile-hover: #252528;
+        --tip: #0e0e10;
+        --bg: #2b2a2d;
+        --card: #242327;
+        --room-line: rgba(255, 255, 255, 0.07);
+        --room-ink: #d8d6d1;
+        --room-ink-soft: #8f8d88;
+        --room-ink-faint: #6b6965;
+        --blue: #9db8d6;
+        --accent: #305c8a;
+        --amber: #c98a1d;
+        --green: #6ea576;
+        --red: #cd6452;
+        --stream: rgba(157, 184, 214, 0.36);
+        --serif: 'STIX Two Text', 'Charter', 'Iowan Old Style', 'Georgia', serif;
+        --mono: ui-monospace, 'SF Mono', 'Menlo', 'Consolas', monospace;
+        --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+        /* The bar is the traffic lights' band (the shell puts them in it). */
+        --topbar: env(titlebar-area-height, 44px);
+        --edge: 8px;
+        --rail: 48px;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; }
+      body { background: var(--frame); font: 14px/1.5 var(--sans); color: var(--frame-ink); }
+      button { font: inherit; color: inherit; }
+
+      /* ---------- the top bar: part of the frame ---------- */
+      #topbar {
+        position: absolute; top: 0; left: 0; right: 0; height: var(--topbar);
+        display: flex; align-items: center; gap: 6px;
+        padding: 0 var(--edge) 0 max(14px, calc(env(titlebar-area-x, 0px) + 4px));
+        -webkit-app-region: drag;
+      }
+      #topbar > * { -webkit-app-region: no-drag; }
+      #topbar > #title { -webkit-app-region: drag; }
+      svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; flex: 0 0 auto; }
+      #title {
+        flex: 1; min-width: 0; height: 30px; border-radius: 8px; background: var(--pill);
+        display: flex; align-items: center; gap: 10px; padding: 0 12px;
+      }
+      #title .ico { color: var(--frame-ink-soft); display: inline-flex; }
+      #title .name { font: 15px/1 var(--serif); letter-spacing: 0.06em; color: var(--frame-ink); white-space: nowrap; }
+      #title .path { color: var(--frame-ink-soft); font: 12px var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+      #title .meta { margin-left: auto; color: var(--frame-ink-soft); font: 11.5px var(--mono); white-space: nowrap; padding-left: 10px; }
+      #zoom { display: flex; height: 30px; padding: 3px; gap: 2px; border-radius: 8px; background: var(--pill); flex: 0 0 auto; }
+      #zoom button { border: 0; border-radius: 6px; background: transparent; color: var(--frame-ink-soft); font: 12px var(--sans); padding: 0 10px; cursor: pointer; }
+      #zoom button:hover { color: var(--frame-ink); }
+      #zoom button.on { background: var(--tile); color: var(--frame-ink); }
+      #zoom button:disabled { opacity: 0.35; cursor: default; }
+      button:focus { outline: none; }
+      button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+      #here {
+        position: relative; height: 30px; border-radius: 8px; background: var(--pill); flex: 0 1 auto; min-width: 0; overflow: hidden;
+        display: flex; align-items: center; gap: 7px; padding: 0 11px; font: 12px var(--sans); color: var(--frame-ink-soft); white-space: nowrap;
+      }
+      #here .app { width: 17px; height: 17px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; font: 600 9.5px var(--sans); color: var(--frame-ink); background: #38383e; flex: 0 0 auto; }
+      #here .app.other { background: rgba(201, 138, 29, 0.35); }
+      #here .doc { color: var(--frame-ink); font: 11.5px var(--mono); margin-right: 4px; }
+      #here:empty { display: none; }
+      /* the record's state, only when it is not simply recording */
+      #rec { height: 30px; border-radius: 8px; background: var(--pill); flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 0 11px; font: 12px var(--sans); color: var(--frame-ink-soft); white-space: nowrap; overflow: hidden; }
+      #rec[hidden] { display: none; }
+      #rec i { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); display: block; flex: 0 0 auto; }
+      #rec .st { color: #e2b765; }
+      #rec .sep { width: 1px; height: 14px; background: rgba(255, 255, 255, 0.11); flex: 0 0 auto; }
+      #rec .why2 { overflow: hidden; text-overflow: ellipsis; }
+      [data-label] { position: relative; }
+      [data-label]::after {
+        content: attr(data-label); position: absolute; background: var(--tip); color: var(--frame-ink); font: 12px/1.3 var(--sans); white-space: nowrap;
+        padding: 5px 9px; border-radius: 7px; border: 1px solid rgba(255, 255, 255, 0.08); opacity: 0; pointer-events: none; transition: opacity 0.12s; z-index: 60;
+      }
+      [data-label]:hover::after { opacity: 1; transition-delay: 0.3s; }
+
+      /* ---------- the rail: part of the frame ---------- */
+      #rail {
+        position: absolute; top: var(--topbar); left: 0; bottom: var(--edge); width: var(--rail);
+        display: flex; flex-direction: column; align-items: center; gap: 2px;
+      }
+      .rb { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 9px; background: transparent; color: rgba(240, 238, 233, 0.64); cursor: pointer; flex: 0 0 auto; }
+      .rb:hover:not(:disabled) { background: var(--tile-hover); color: var(--frame-ink); }
+      .rb.on { background: var(--tile); color: var(--frame-ink); }
+      .rb:disabled { opacity: 0.3; cursor: default; }
+      .rb .i { width: 17px; height: 17px; }
+      #rail .rb[data-label]::after { left: calc(100% + 10px); top: 50%; transform: translateY(-50%); }
+      .rule { width: 18px; height: 1px; background: rgba(255, 255, 255, 0.09); margin: 5px 0; flex: 0 0 auto; }
+      .grow { flex: 1; }
+
+      /* ---------- the room ---------- */
+      #room {
+        position: absolute; top: var(--topbar); left: var(--rail); right: var(--edge); bottom: var(--edge);
+        border-radius: 12px; background: var(--bg); overflow: hidden; color: var(--room-ink);
+        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05), 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 26px rgba(0, 0, 0, 0.42);
+      }
+      #scroll { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.14) transparent; }
+      #scroll[hidden] { display: none; }
+      #scroll.nobar { scrollbar-width: none; }
+      #scroll.nobar::-webkit-scrollbar { display: none; }
+      #river { position: relative; margin: 0 auto; }
+      #lines { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+
+      /* the river and what is drawn on it */
+      .riv { stroke: var(--stream); stroke-width: 2.5; stroke-linecap: round; }
+      .riv.dot { stroke: rgba(157, 184, 214, 0.42); stroke-width: 2; stroke-dasharray: 0.5 6; }
+      .reach { fill: rgba(157, 184, 214, 0.4); }
+      .trib { stroke: rgba(216, 214, 209, 0.4); stroke-width: 1.6; stroke-linecap: round; }
+      .fork { fill: none; stroke: rgba(216, 214, 209, 0.4); stroke-width: 1.4; }
+      .tribmark { fill: var(--bg); stroke: rgba(216, 214, 209, 0.55); stroke-width: 1.4; }
+      .tie { fill: none; stroke: rgba(216, 214, 209, 0.4); stroke-width: 1.3; }
+      .tie.near { stroke-dasharray: 1 4; stroke-linecap: round; stroke-width: 1.5; }
+      .arc { fill: none; stroke: rgba(157, 184, 214, 0.75); stroke-width: 1.4; stroke-dasharray: 4 4; }
+      .arrow { fill: none; stroke: rgba(157, 184, 214, 0.9); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+
+      /* rows: a time, a node on the river (or a tributary), a label */
+      .row { position: absolute; left: 0; }
+      .row.pick { cursor: pointer; }
+      .row::before { content: ''; position: absolute; left: 4px; right: 0; top: 1px; bottom: 1px; border-radius: 7px; transition: background 0.12s; }
+      .row.pick:hover::before { background: rgba(255, 255, 255, 0.025); }
+      .row.sel::before { background: rgba(157, 184, 214, 0.07); }
+      .t-timer.pick:hover::before, .t-timer.sel::before { top: 0; bottom: 0; }
+      .tm { position: absolute; left: 0; width: var(--timer); text-align: right; top: 50%; transform: translateY(-50%); font: 11.5px/1 var(--mono); color: var(--room-ink-soft); white-space: nowrap; }
+      .lb { position: absolute; left: var(--lx); top: 50%; transform: translateY(-50%); white-space: nowrap; font: 12.5px/1.2 var(--mono); color: var(--room-ink); max-width: calc(100% - var(--lx) - 8px); overflow: hidden; text-overflow: ellipsis; }
+      .row.sel .lb, .row:hover .lb { overflow: visible; }
+      .lb .ap { color: var(--room-ink-soft); }
+      .lb .hint { color: var(--room-ink-faint); font: 12px var(--sans); margin-left: 6px; }
+      .lb.soft { color: var(--room-ink-soft); }
+      .lb.it { font: italic 12.5px var(--sans); color: var(--room-ink-faint); }
+      .ghost { opacity: 0; transition: opacity 0.12s; pointer-events: none; }
+      .row:hover .ghost, .row.sel .ghost { opacity: 1; }
+      .row.sel .lb { color: #f0eee9; }
+      .lb.user { font: 15px/1.2 var(--serif); color: var(--room-ink); }
+      .lb .br { display: inline-block; font: 11px/1 var(--mono); color: var(--room-ink); border: 1px solid rgba(216, 214, 209, 0.3); border-radius: 999px; padding: 3px 7px 3px; margin-left: 8px; vertical-align: 1px; }
+      .lb .tag { display: inline-block; font: 11px/1 var(--mono); color: var(--blue); border: 1px solid rgba(157, 184, 214, 0.4); border-radius: 999px; padding: 3px 7px; margin-left: 8px; vertical-align: 1px; }
+      .t-rto .lb { color: var(--blue); }
+      .t-dayhead .lb { font: 600 10.5px/1 var(--sans); letter-spacing: 0.09em; text-transform: uppercase; color: var(--room-ink-soft); }
+      .t-dayhead .lb .n { font-weight: 400; letter-spacing: 0.02em; text-transform: none; color: var(--room-ink-faint); font-size: 11.5px; margin-left: 8px; }
+      .t-dayhead .lb .chev { display: inline-block; margin-left: 6px; opacity: 0; transition: opacity 0.12s; letter-spacing: 0; text-transform: none; font-weight: 400; color: var(--room-ink-soft); }
+      .t-dayhead:hover .lb .chev { opacity: 1; }
+      .t-dayhead, .t-more { cursor: pointer; }
+      .t-more .lb { font: 12px var(--sans); color: var(--room-ink-soft); }
+      .t-more:hover .lb { color: var(--room-ink); }
+      .t-dayfold .lb { font: 13px/1.2 var(--sans); color: var(--room-ink); }
+      .t-dayfold .lb b { font-weight: 600; }
+      .t-cluster .lb { font: 12px var(--sans); color: var(--room-ink-faint); }
+      .t-cluster:hover .lb { color: var(--room-ink-soft); }
+
+      .nd { position: absolute; left: var(--rx); top: 50%; transform: translate(-50%, -50%); border-radius: 50%; }
+      .nd.run { width: 11px; height: 11px; background: var(--room-ink); box-shadow: 0 0 0 3px var(--bg); }
+      .nd.note { width: 9px; height: 9px; background: var(--room-ink-soft); box-shadow: 0 0 0 3px var(--bg); }
+      .nd.bead { width: 5px; height: 5px; background: rgba(216, 214, 209, 0.5); box-shadow: 0 0 0 2px var(--bg); }
+      .row.pick:hover .nd.bead { background: rgba(216, 214, 209, 0.75); }
+      .nd.weir { width: 22px; height: 3px; border-radius: 2px; background: var(--room-ink-soft); box-shadow: 0 0 0 3px var(--bg); }
+      .nd.ring { width: 12px; height: 12px; background: var(--bg); border: 1.7px solid var(--room-ink); }
+      .nd.back { width: 19px; height: 19px; background: var(--blue); color: #1d2733; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 0 3px var(--bg); }
+      .nd.back svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+      .nd.sq { width: 11px; height: 11px; border-radius: 3px; background: var(--bg); border: 1.7px solid var(--room-ink); box-shadow: 0 0 0 3px var(--bg); }
+      .nd.now { width: 13px; height: 13px; background: var(--bg); border: 1.6px dashed rgba(157, 184, 214, 0.8); }
+      .nd.beads { border-radius: 0; display: flex; flex-direction: column; align-items: center; gap: 2px; width: 5px; }
+      .nd.beads b { width: 4px; height: 4px; border-radius: 50%; background: rgba(216, 214, 209, 0.32); display: block; }
+      .row.sel .nd.run, .row.sel .nd.note { background: var(--blue); box-shadow: 0 0 0 3px var(--bg), 0 0 0 5.5px rgba(157, 184, 214, 0.35); }
+      .row.sel .nd.bead { width: 8px; height: 8px; background: var(--blue); box-shadow: 0 0 0 2px var(--bg), 0 0 0 4.5px rgba(157, 184, 214, 0.35); }
+      .row.sel .nd.weir { background: var(--blue); }
+      .row.sel .nd.ring, .row.sel .nd.sq { border-color: var(--blue); box-shadow: 0 0 0 3px var(--bg), 0 0 0 5.5px rgba(157, 184, 214, 0.3); }
+      .row.sel .nd.back { box-shadow: 0 0 0 3px var(--bg), 0 0 0 5.5px rgba(157, 184, 214, 0.35); }
+      .nd.run.err { width: 12px; height: 12px; background: var(--bg); border: 2px solid var(--red); }
+      .row.sel .nd.run.err { background: var(--bg); border-color: var(--red); box-shadow: 0 0 0 3px var(--bg), 0 0 0 5.5px rgba(205, 100, 82, 0.35); }
+      .lb .err { color: var(--red); opacity: 0.9; }
+      .row.near .ghost { opacity: 0.72; }
+      .t-timer .lb, .t-timer .tm { line-height: 1; }
+      .row.near.t-timer .lb, .row.near.t-timer .tm { font-size: 11px; }
+      /* the selected node says what a second click does */
+      .again {
+        display: inline-block; margin-left: 12px; white-space: nowrap; vertical-align: 1px;
+        font: 11.5px/1 var(--sans); color: var(--blue); background: var(--bg); padding: 4px 9px; border-radius: 999px;
+        border: 1px solid rgba(157, 184, 214, 0.35); opacity: 0; transition: opacity 0.12s; pointer-events: none;
+      }
+      .row.sel:hover .again, .row.show-again .again { opacity: 1; }
+      .row.landed .nd { animation: land 1.4s ease-out; }
+      @keyframes land { 0% { box-shadow: 0 0 0 3px var(--bg), 0 0 0 10px rgba(157, 184, 214, 0.5); } 100% { box-shadow: 0 0 0 3px var(--bg), 0 0 0 3px rgba(157, 184, 214, 0); } }
+
+      /* ---------- the card: beside the selected node ---------- */
+      #tie { position: absolute; height: 0; border-top: 1px solid rgba(157, 184, 214, 0.45); pointer-events: none; }
+      #card {
+        position: absolute; z-index: 3; background: var(--card); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 11px;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.32); padding: 12px 14px 13px; font: 12.5px/1.45 var(--sans); color: var(--room-ink);
+        overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+      }
+      #card[hidden], #tie[hidden] { display: none; }
+      .ch { display: flex; align-items: flex-start; gap: 10px; }
+      .cg { flex: 0 0 auto; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; margin-top: 1px; }
+      .cg i { display: block; border-radius: 50%; }
+      .cg .g-run { width: 10px; height: 10px; background: var(--blue); }
+      .cg .g-note { width: 8px; height: 8px; background: var(--blue); }
+      .cg .g-bead { width: 6px; height: 6px; background: var(--blue); }
+      .cg .g-weir { width: 16px; height: 3px; border-radius: 2px; background: var(--blue); }
+      .cg .g-ring { width: 11px; height: 11px; border: 1.7px solid var(--blue); }
+      .cg .g-sq { width: 11px; height: 11px; border-radius: 3px; border: 1.7px solid var(--blue); }
+      .cg .g-err { width: 11px; height: 11px; border: 2px solid var(--red); }
+      .cg .g-back { width: 18px; height: 18px; background: var(--blue); color: #1d2733; display: flex; align-items: center; justify-content: center; }
+      .cg .g-back svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+      .ct { flex: 1; min-width: 0; }
+      .cname { font: 14px/1.3 var(--mono); color: #f0eee9; overflow-wrap: anywhere; }
+      .cname .ap { color: var(--room-ink-soft); }
+      .cname.user { font: 17px/1.25 var(--serif); }
+      .cmeta { margin-top: 3px; color: var(--room-ink-soft); font-size: 12px; }
+      .cmeta .sha { font: 11.5px var(--mono); }
+      .cx { flex: 0 0 auto; width: 24px; height: 24px; margin: -3px -5px 0 0; border: 0; border-radius: 6px; background: transparent; color: var(--room-ink-soft); cursor: pointer; font-size: 15px; line-height: 1; }
+      .cx:hover { background: rgba(255, 255, 255, 0.06); color: var(--room-ink); }
+      .note { margin: 10px 0 0; padding: 7px 9px; border-radius: 7px; background: rgba(255, 255, 255, 0.03); color: var(--room-ink-soft); font-size: 12px; }
+      .note b { color: var(--room-ink); font-weight: 500; }
+      .note .eq { font: 12px var(--mono); color: var(--room-ink); margin-right: 4px; }
+      .note.err { box-shadow: inset 2px 0 0 rgba(205, 100, 82, 0.7); }
+      .note.moved { box-shadow: inset 2px 0 0 rgba(157, 184, 214, 0.7); }
+      .sec { margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--room-line); }
+      .sl { font: 600 10px/1 var(--sans); letter-spacing: 0.09em; text-transform: uppercase; color: var(--room-ink-soft); margin-bottom: 7px; }
+      .sl span { font-weight: 400; letter-spacing: 0.02em; text-transform: none; font-size: 11.5px; color: var(--room-ink-faint); margin-left: 6px; }
+      .fr { display: flex; align-items: baseline; gap: 8px; margin-top: 7px; }
+      .fr:first-of-type { margin-top: 0; }
+      .fp { font: 12px var(--mono); color: var(--room-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+      .fs { margin-left: auto; font: 11.5px var(--mono); white-space: nowrap; }
+      .fs .pl { color: var(--green); font-style: normal; }
+      .fs .mi { color: var(--red); font-style: normal; opacity: 0.85; }
+      .fn { color: var(--room-ink-soft); font-size: 12px; margin: 1px 0 0; }
+      .diff { margin: 5px 0 2px; padding: 6px 8px; border-radius: 6px; background: #282c34; border: 1px solid rgba(255, 255, 255, 0.06); font: 11.5px/1.55 var(--mono); color: #abb2bf; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+      .diff .cl { color: #5c6370; display: block; }
+      .diff .m { color: #e06c75; }
+      .diff .p { color: #98c379; }
+      .diff .c { color: #6f7682; }
+      .thumbrow { display: flex; align-items: flex-end; gap: 10px; margin: 5px 0 2px; }
+      .thumb { display: block; width: 92px; background: #fff; border-radius: 4px; padding: 3px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45); }
+      .thumb img { display: block; width: 100%; height: auto; }
+      .thumbrow .fn { margin: 0; }
+      .nr { display: flex; align-items: flex-start; gap: 8px; margin-top: 6px; cursor: pointer; }
+      .nr:first-of-type { margin-top: 0; }
+      .nr input { margin: 2px 0 0; accent-color: #7f9cbd; flex: 0 0 auto; }
+      .nr .nb { min-width: 0; }
+      .nr .fp { display: inline; white-space: normal; overflow-wrap: anywhere; }
+      .nr .win { margin-left: 6px; font-size: 11px; color: var(--room-ink-faint); }
+      .nr .nn { display: block; color: var(--room-ink-soft); font-size: 12px; }
+      .nr.warn .nn::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--amber); margin-right: 6px; vertical-align: 1px; }
+      .nr.off .fp, .nr.off .nn { opacity: 0.45; text-decoration: line-through; text-decoration-color: rgba(216, 214, 209, 0.35); }
+      .nr.fixed { cursor: default; padding-left: 21px; }
+      .same { margin-top: 7px; color: var(--room-ink-faint); font-size: 12px; }
+      .same:empty { display: none; }
+      /* the document's cells, one box each */
+      .dmap { display: flex; flex-wrap: wrap; gap: 3px; margin: 6px 0 2px; }
+      .dmap i { width: 19px; height: 15px; border-radius: 3px; font: 9.5px/15px var(--mono); text-align: center; font-style: normal; color: var(--room-ink-faint); background: rgba(255, 255, 255, 0.035); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06); }
+      .dmap i.chg { background: rgba(110, 165, 118, 0.2); color: #cfe6d3; box-shadow: inset 0 0 0 1px rgba(110, 165, 118, 0.55); }
+      .dmap i.back { background: rgba(201, 138, 29, 0.17); color: #efd5a4; box-shadow: inset 0 0 0 1px rgba(201, 138, 29, 0.5); }
+      .dmap i.out { background: transparent; color: rgba(222, 130, 112, 0.95); box-shadow: inset 0 0 0 1px rgba(205, 100, 82, 0.5); text-decoration: line-through; }
+      .dmap i.come { background: rgba(157, 184, 214, 0.16); color: #dbe6f2; box-shadow: inset 0 0 0 1px rgba(157, 184, 214, 0.55); }
+      .dkey { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 3px 0 0; font: 11px var(--sans); color: var(--room-ink-faint); }
+      .dkey span { display: inline-flex; align-items: center; gap: 5px; }
+      .dkey i { width: 9px; height: 8px; border-radius: 2px; display: block; }
+      .nr .dmap { margin-top: 5px; }
+      /* another app holds a file the rewind writes */
+      .other { margin: 9px 0 0; padding: 7px 9px; border-radius: 7px; background: rgba(201, 138, 29, 0.07); box-shadow: inset 2px 0 0 rgba(201, 138, 29, 0.6); color: var(--room-ink-soft); font-size: 12px; }
+      .other b { color: var(--room-ink); font-weight: 500; }
+      .why { margin: 8px 0 0; color: var(--room-ink-soft); font-size: 12px; }
+      .why b { color: #e2b765; font-weight: 500; }
+      .ghostbtn { white-space: nowrap; height: 32px; padding: 0 12px; border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 8px; background: transparent; color: var(--room-ink); font: 13px var(--sans); cursor: pointer; }
+      .ghostbtn:hover { background: rgba(255, 255, 255, 0.05); }
+      .refuse { margin-top: 12px; }
+      .act { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+      .rw {
+        display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 14px 0 11px; border: 0; border-radius: 8px;
+        background: var(--accent); color: #fff; font: 500 13px var(--sans); cursor: pointer; transition: background 0.12s; white-space: nowrap;
+      }
+      .rw:hover { background: #3a6b9d; }
+      .rw svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+      .rw:disabled { background: rgba(255, 255, 255, 0.06); color: var(--room-ink-soft); cursor: default; }
+      .kbd { color: var(--room-ink-faint); font: 11.5px var(--sans); }
+      .fine { margin: 9px 0 0; color: var(--room-ink-faint); font-size: 11.5px; line-height: 1.5; }
+      .wait { margin-top: 8px; color: var(--room-ink-faint); font-size: 12px; }
+      .steps { list-style: none; margin: 12px 0 0; padding: 0; font-size: 12px; color: var(--room-ink-faint); }
+      .steps li { position: relative; padding: 3px 0 3px 20px; overflow-wrap: anywhere; }
+      .steps li::before { content: ''; position: absolute; left: 3px; top: 8px; width: 7px; height: 7px; border-radius: 50%; border: 1.4px solid var(--room-ink-faint); }
+      .steps li.doing { color: var(--room-ink); }
+      .steps li.doing::before { border-color: var(--blue); border-top-color: transparent; animation: turn 0.7s linear infinite; }
+      .steps li.done { color: var(--room-ink-soft); }
+      .steps li.done::before { border-color: var(--green); background: var(--green); }
+      .steps .sha { font: 11.5px var(--mono); }
+      @keyframes turn { to { transform: rotate(360deg); } }
+
+      /* ---------- the strip at the room's right edge: the whole record ---------- */
+      #mini { position: absolute; right: 7px; top: 12px; bottom: 12px; width: 16px; cursor: pointer; z-index: 4; }
+      #mini[hidden] { display: none; }
+      #mini svg { display: block; }
+      .m-run { fill: rgba(216, 214, 209, 0.42); }
+      .m-tick { fill: rgba(216, 214, 209, 0.16); }
+      .m-reach { fill: rgba(157, 184, 214, 0.38); }
+      .m-day { fill: rgba(255, 255, 255, 0.16); }
+      .m-rw { fill: var(--blue); }
+      .m-err { fill: var(--red); }
+      .m-user { fill: none; stroke: rgba(216, 214, 209, 0.7); stroke-width: 1; }
+      #mview { fill: rgba(255, 255, 255, 0.05); stroke: rgba(255, 255, 255, 0.16); stroke-width: 1; }
+
+      /* ---------- the note after a rewind ---------- */
+      #toast {
+        position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 6; max-width: min(640px, calc(100% - 48px));
+        display: flex; align-items: center; gap: 12px; padding: 9px 10px 9px 14px; border-radius: 10px;
+        background: rgba(24, 24, 26, 0.95); border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+        font: 12.5px/1.45 var(--sans); color: var(--room-ink-soft);
+      }
+      #toast[hidden] { display: none; }
+      #toast b { color: var(--room-ink); font-weight: 500; }
+      #toast .k { color: var(--blue); font-size: 15px; }
+      #toast button { flex: 0 0 auto; border: 1px solid rgba(255, 255, 255, 0.14); background: transparent; color: var(--room-ink); border-radius: 7px; padding: 4px 11px; cursor: pointer; font: 12.5px var(--sans); }
+      #toast button:hover { background: rgba(255, 255, 255, 0.06); }
+
+      /* ---------- no record ---------- */
+      #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; overflow-y: auto; }
+      #empty[hidden] { display: none; }
+      .em { display: flex; gap: 28px; align-items: flex-start; max-width: 600px; }
+      .em .bed { flex: 0 0 auto; position: relative; width: 70px; }
+      .em h2 { margin: 6px 0 8px; font: 400 23px/1.25 var(--serif); color: #f0eee9; }
+      .em p { margin: 0 0 10px; color: var(--room-ink-soft); font-size: 14px; line-height: 1.55; }
+      .em p b { color: var(--room-ink); font-weight: 500; overflow-wrap: anywhere; }
+      .em .foot { margin-top: 16px; font: 11.5px var(--mono); color: var(--room-ink-faint); }
+      .em .br { display: inline-block; font: 11px/1 var(--mono); color: var(--room-ink); border: 1px solid rgba(216, 214, 209, 0.3); border-radius: 999px; padding: 3px 7px; vertical-align: 1px; }
+      .em .ucs { margin: 14px 0 0; padding: 0; list-style: none; }
+      .em .ucs li { display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px; }
+      .em .ucs .t { font: 11.5px var(--mono); color: var(--room-ink-faint); width: 92px; flex: 0 0 auto; }
+      .em .ucs .m { font: 15px var(--serif); color: var(--room-ink); }
+
+      @media (max-width: 980px) { #here { display: none; } #title .meta { display: none; } }
+      @media (max-width: 720px) { #zoom button { padding: 0 7px; } }
+    </style>
+  </head>
+  <body>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <symbol id="g-back" viewBox="0 0 24 24"><polyline points="3 4 3 10 9 10"/><path d="M3.8 15a8.5 8.5 0 1 0 1.9-8.8L3 10"/></symbol>
+      </defs>
+    </svg>
+
+    <div id="topbar">
+      <div id="title">
+        <span class="ico"><svg class="i" viewBox="0 0 24 24"><use href="#g-back"/><polyline points="12 7.5 12 12 15 14"/></svg></span>
+        <span class="name">History</span>
+        <span class="path" id="t-path"></span>
+        <span class="meta" id="t-meta"></span>
+      </div>
+      <div id="zoom" role="group" aria-label="Zoom">
+        <button data-z="days" type="button">Days</button><button data-z="runs" type="button">Runs</button><button data-z="all" type="button">Every commit</button>
+      </div>
+      <div id="rec" hidden><i></i><span class="st">paused</span><span class="sep"></span><span class="why2"></span></div>
+      <div id="here"></div>
+    </div>
+
+    <nav id="rail" aria-label="Toolbar">
+      <button class="rb on" id="rb-proj" type="button" data-label="This project"><svg class="i" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
+      <div class="rule"></div>
+      <button class="rb" id="rb-branch" type="button" data-label="Your branches"><svg class="i" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="8" r="2.2"/><line x1="6" y1="7.2" x2="6" y2="16.8"/><path d="M18 10.2c0 4.5-6 4-11.2 7"/></svg></button>
+      <button class="rb" id="rb-now" type="button" data-label="Go to now (End)"><svg class="i" viewBox="0 0 24 24"><line x1="12" y1="4" x2="12" y2="16"/><polyline points="7 11 12 16 17 11"/><line x1="5" y1="20" x2="19" y2="20"/></svg></button>
+      <button class="rb" id="rb-start" type="button" data-label="Go to the start (Home)"><svg class="i" viewBox="0 0 24 24"><line x1="12" y1="20" x2="12" y2="8"/><polyline points="7 13 12 8 17 13"/><line x1="5" y1="4" x2="19" y2="4"/></svg></button>
+      <div class="grow"></div>
+      <button class="rb" id="rb-about" type="button" data-label="Kept on this Mac"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16.5"/><line x1="12" y1="7.6" x2="12" y2="7.7"/></svg></button>
+    </nav>
+
+    <main id="room">
+      <div id="scroll" hidden>
+        <div id="river">
+          <svg id="lines"></svg>
+          <div id="rows"></div>
+          <div id="tie" hidden></div>
+          <div id="card" hidden></div>
+        </div>
+      </div>
+      <div id="mini" hidden></div>
+      <div id="toast" hidden></div>
+      <div id="empty" hidden></div>
+    </main>
+
+    <script>
+      /* The protocol (claerbout/README.md, "The history view"):
+           request {type:'history', action:'graph', before?, limit?}
+             → {state:'on'|'paused'|'none', reason, detail?, project, app, tip, head, branches, commits, more, total, windows, others}
+           request {type:'history', action:'commit', sha} → {files:[{path, status, plus, minus, binary, patch?}]}
+           request {type:'history', action:'blob', sha, path} → {text} | {binary, size} | {large, size} | {missing}
+           request {type:'history', action:'compare', sha, paths?}
+             → {tip, now, target, onRecord, unrecorded, write, remove, skipped, kept, same, untracked, untrackedGone, others, blocked}
+           request {type:'rewind', sha, tip, paths?, anyway?}
+             → {ok, from, to, target, written, removed, skipped} | {same:true} | {refused, ...}
+           events  history {kind:'commit'|'refs'|'state'|'focus', ...}, rewind {step, state, detail?}
+         Cells, values.json names and word counts are worked out here, from
+         blob text: the shell knows git, not the apps' formats. */
+      (function () {
+        'use strict';
+        const $ = (s, r) => (r || document).querySelector(s);
+        const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+        const esc = (t) => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        const shell = window.claerbout || null;
+        const ask = (message) => (shell ? shell.request(message).catch((error) => ({ error: String(error && error.message ? error.message : error) })) : Promise.resolve(null));
+        window.addEventListener('error', (event) => void ask({ type: 'error', message: `${event.message} (${event.lineno})` }));
+        window.addEventListener('unhandledrejection', (event) => void ask({ type: 'error', message: String(event.reason && event.reason.stack ? event.reason.stack : event.reason) }));
+
+        /* ================= geometry ================= */
+        // x positions inside the river column; the card takes the column's right end
+        const G = { top: 26, timeR: 56, rx: 122, tx: 152, lane: 22, lx: 142, cardW: 356, w: 940, bottom: 140, gap: 12 * 60 * 1000 };
+        const HT = { more: 40, dayhead: 46, dayfold: 50, open: 32, close: 32, run: 30, note: 30, timer: 11, cluster: 26, user: 36, rfrom: 30, rto: 34, gap: 34, now: 48 };
+        const PICK = new Set(['open', 'close', 'run', 'note', 'timer', 'rfrom', 'rto', 'user']);
+        const LANES = 3;
+        const BACK = '<svg viewBox="0 0 24 24"><use href="#g-back"/></svg>';
+        const STEP_ORDER = ['save', 'record-from', 'write', 'record-to', 'reload'];
+
+        /* ================= small helpers ================= */
+        const pad = (n) => String(n).padStart(2, '0');
+        const hm = (t) => { const d = new Date(t); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+        const hms = (t) => { const d = new Date(t); return `${hm(t)}:${pad(d.getSeconds())}`; };
+        const dayKey = (t) => { const d = new Date(t); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+        const plural = (n, one, many) => `${n.toLocaleString('en-US')} ${n === 1 ? one : many || one + 's'}`;
+        const WD = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        const MO = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+        function dayInfo(key) {
+          const [y, m, d] = key.split('-').map(Number);
+          const w = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+          return { short: `${WD[w].slice(0, 3)} ${d} ${MO[m - 1].slice(0, 3)}`, long: `${WD[w]} ${d} ${MO[m - 1]}` };
+        }
+        const today = () => dayKey(Date.now());
+        function when(c) { return c.day === today() ? hm(c.t) : `${dayInfo(c.day).short}, ${hm(c.t)}`; }
+        const short = (sha) => String(sha || '').slice(0, 7);
+        const base = (file) => String(file).split('/').pop();
+        function listCells(cells) {
+          const a = cells.slice().sort((x, y) => x - y);
+          if (a.length === 1) return `cell ${a[0]}`;
+          return `cells ${a.slice(0, -1).join(', ')} and ${a[a.length - 1]}`;
+        }
+        function listNames(names, most = 3) {
+          if (names.length <= most) return names.join(', ');
+          return `${names.slice(0, most).join(', ')} and ${names.length - most} more`;
+        }
+        const capital = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+        const isFigure = (file) => /\.svg$/i.test(file);
+        const isImage = (file) => /\.(svg|png|jpe?g|gif|webp|pdf)$/i.test(file);
+
+        /* ================= the data ================= */
+        // S.graph: the shell's answer, commits merged as events arrive. S.data: built from it for drawing.
+        const S = {
+          graph: null, data: null, zoom: 'runs', sel: null, dayFold: new Map(), openClusters: new Set(), showBranch: true,
+          busy: false, rows: [], rmap: new Map(), landed: null, cardX: 580, selAt: 0, hintOn: false, selRow: -1,
+          details: new Map(), blobs: new Map(), compares: new Map(), card: null, at: null, loading: false, last: null,
+        };
+        try {
+          const at = new URL(location.href).searchParams.get('at');
+          if (at && /^[0-9a-f]{4,64}$/.test(at)) S.at = at;
+        } catch {
+          // No address to read: nothing selected.
+        }
+
+        function kindOf(c) {
+          if (c.line !== 'record') return 'user';
+          return { run: 'run', timer: 'timer', open: 'open', close: 'close', 'rewind-from': 'rfrom', 'rewind-to': 'rto' }[c.trigger] || 'note';
+        }
+        function build() {
+          const g = S.graph;
+          const records = [];
+          const users = [];
+          // The graph is newest first, parents after children: reversed, the record reads down.
+          for (let i = g.commits.length - 1; i >= 0; i--) {
+            const raw = g.commits[i];
+            const c = Object.assign({}, raw, { kind: kindOf(raw), t: Date.parse(raw.time) || 0 });
+            c.day = dayKey(c.t);
+            (c.kind === 'user' ? users : records).push(c);
+          }
+          const index = new Map(records.map((c, i) => [c.sha, i]));
+          records.forEach((c, i) => (c.i = i));
+          // The user's lines, the branch HEAD is on first, as lanes beside the river.
+          const lines = [];
+          const headBranch = g.head && g.head.branch;
+          if (headBranch && users.some((u) => u.line === headBranch)) lines.push(headBranch);
+          for (const u of users) if (!lines.includes(u.line)) lines.push(u.line);
+          const laneOf = new Map(lines.map((line, i) => [line, Math.min(i, LANES - 1)]));
+          users.forEach((u) => (u.lane = laneOf.get(u.line)));
+          const userTips = new Set((g.branches || []).map((b) => b.tip));
+          const days = new Map();
+          const dayOf = (key) => { if (!days.has(key)) days.set(key, { key, commits: [], users: [] }); return days.get(key); };
+          records.forEach((c) => dayOf(c.day).commits.push(c));
+          users.forEach((u) => dayOf(u.day).users.push(u));
+          const dayList = [...days.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+          const newest = dayList.length ? dayList[dayList.length - 1].key : null;
+          dayList.forEach((d) => (d.fold = d.key !== newest));
+          // The rewinds that reproduce each commit.
+          const rewoundTo = new Map();
+          records.forEach((c) => {
+            if (c.kind !== 'rto' || !c.target) return;
+            const target = find(c.target, records, users);
+            if (target) rewoundTo.set(target.sha, [...(rewoundTo.get(target.sha) || []), c]);
+          });
+          S.data = { records, users, index, lines, lanes: Math.min(lines.length, LANES), days: dayList, rewoundTo, userTips, tip: g.tip };
+        }
+        function find(sha, records, users) {
+          if (!sha) return null;
+          const D = S.data;
+          const rs = records || (D ? D.records : []);
+          const us = users || (D ? D.users : []);
+          if (!records && D && D.index.has(sha)) return rs[D.index.get(sha)];
+          return rs.find((c) => c.sha === sha || c.sha.startsWith(sha)) || us.find((c) => c.sha === sha || c.sha.startsWith(sha)) || null;
+        }
+        const laneX = (lane) => G.tx + lane * G.lane;
+        const labelX = () => (S.data.lanes && S.showBranch ? laneX(S.data.lanes - 1) + 22 : G.lx);
+
+        /* ================= the rows' words ================= */
+        function restOf(c) {
+          if (c.kind === 'rto') {
+            const paths = c.paths ? ` (${c.paths.join(', ')})` : c.partial ? ` (${plural(c.partial, 'file')})` : '';
+            return `rewind to ${short(c.target)}${paths}`;
+          }
+          if (c.kind === 'rfrom') return `rewind from ${short(c.from)}`;
+          const i = c.subject.indexOf(': ');
+          return i > 0 && c.app ? c.subject.slice(i + 2) : c.subject;
+        }
+        function labelHTML(c) {
+          if (c.kind === 'user') return esc(c.subject);
+          if (!c.app) return esc(c.subject);
+          let rest = esc(restOf(c));
+          if (c.error) rest = `${rest.replace(' (error)', '')} <span class="err">(error)</span>`;
+          return `<span class="ap">${esc(c.app)}:</span> ${rest}`;
+        }
+        function shortMsg(c) {
+          if (c.kind === 'user') return `“${c.subject}”`;
+          return c.kind === 'run' || c.kind === 'timer' ? restOf(c) : `${c.app ? c.app + ': ' : ''}${restOf(c)}`;
+        }
+        // What a commit touched, by name: the files it changed, a few.
+        function touchedNames(cs) {
+          const names = [];
+          for (const c of cs) for (const file of c.changed || []) if (file !== '.claerbout/untracked.json' && !names.includes(base(file))) names.push(base(file));
+          return names;
+        }
+
+        /* ================= rows: the river laid out down the page ================= */
+        function itemsOf(d) {
+          const list = d.commits.slice();
+          if (S.showBranch) list.push(...d.users);
+          return list.sort((a, b) => a.t - b.t || (a.kind === 'user' ? 1 : 0) - (b.kind === 'user' ? 1 : 0) || (a.i || 0) - (b.i || 0));
+        }
+        function dayFolded(d) {
+          if (S.dayFold.has(d.key)) return S.dayFold.get(d.key);
+          if (S.zoom === 'days') return true;
+          return d.fold;
+        }
+        function layout() {
+          const D = S.data, rows = [];
+          let y = G.top;
+          const push = (r) => { r.h = HT[r.type]; r.y = y; r.cy = y + r.h / 2; y += r.h; rows.push(r); return r; };
+          if (S.graph.more) push({ type: 'more' });
+          D.days.forEach((d) => {
+            if (!d.commits.length && !(S.showBranch && d.users.length)) return;
+            if (dayFolded(d)) { push({ type: 'dayfold', day: d, items: itemsOf(d) }); return; }
+            push({ type: 'dayhead', day: d });
+            const items = itemsOf(d);
+            let last = null;
+            for (let i = 0; i < items.length; i++) {
+              const c = items[i];
+              if (c.kind !== 'user') {
+                if (last !== null && c.t - last > G.gap) push({ type: 'gap', span: c.t - last });
+                last = c.t;
+              }
+              if (c.kind === 'timer' && S.zoom !== 'all' && !S.openClusters.has(c.sha)) {
+                let j = i;
+                while (j + 1 < items.length && items[j + 1].kind === 'timer' && items[j + 1].t - items[j].t <= G.gap) j++;
+                if (j - i + 1 >= 3 && !items.slice(i, j + 1).some((x) => x.sha === S.sel)) {
+                  push({ type: 'cluster', items: items.slice(i, j + 1), key: c.sha });
+                  last = items[j].t;
+                  i = j;
+                  continue;
+                }
+              }
+              push({ type: c.kind, item: c });
+            }
+          });
+          push({ type: 'now' });
+          return { rows, height: y + G.bottom };
+        }
+
+        function rowHTML(r, i) {
+          const D = S.data;
+          const c = r.item;
+          let tm = '', nd = '', lb = '', pick = false;
+          const tags = c ? (D.rewoundTo.get(c.sha) || []).map((x) => `<span class="tag">↺ ${hm(x.t)}</span>`).join('') : '';
+          switch (r.type) {
+            case 'more':
+              lb = `<span class="lb">↑ Earlier commits<span class="hint">click to read them</span></span>`;
+              break;
+            case 'dayhead': {
+              const n = r.day.commits.length + (S.showBranch ? r.day.users.length : 0);
+              lb = `<span class="lb">${dayInfo(r.day.key).long}<span class="n">${plural(n, 'commit')}</span><span class="chev">fold ▴</span></span>`;
+              break;
+            }
+            case 'dayfold': {
+              const cs = r.day.commits, info = dayInfo(r.day.key);
+              const runs = cs.filter((x) => x.kind === 'run').length, errs = cs.filter((x) => x.kind === 'run' && x.error).length;
+              const timers = cs.filter((x) => x.kind === 'timer').length, rws = cs.filter((x) => x.kind === 'rto').length;
+              const us = r.items.filter((x) => x.kind === 'user').length;
+              const span = r.items.length ? `${hm(r.items[0].t)}–${hm(r.items[r.items.length - 1].t)}` : '';
+              const first = D.records[0] && D.records[0].day === r.day.key && !S.graph.more ? ' · the record begins' : '';
+              const parts = [span];
+              if (cs.length) parts.push(`${plural(runs, 'run')}${errs ? `, ${errs} raised` : ''}`, plural(timers, 'timer commit'));
+              if (rws) parts.push(plural(rws, 'rewind'));
+              if (us) parts.push(`${us} of yours`);
+              lb = `<span class="lb"><b>${info.short}</b><span class="hint">${parts.filter(Boolean).join(' · ')}${first}</span></span>`;
+              pick = true;
+              break;
+            }
+            case 'gap': {
+              const m = Math.round(r.span / 60000);
+              const span = m >= 60 * 24 ? plural(Math.round(m / (60 * 24)), 'day') : m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`;
+              lb = `<span class="lb it">${span} with nothing recorded</span>`;
+              break;
+            }
+            case 'cluster': {
+              const a = r.items[0], b = r.items[r.items.length - 1];
+              const names = touchedNames(r.items);
+              tm = `<span class="tm" style="color:var(--room-ink-faint)">${hm(a.t)}</span>`;
+              nd = '<i class="nd beads"><b></b><b></b><b></b></i>';
+              lb = `<span class="lb">${r.items.length} timer commits${names.length ? ' · ' + esc(listNames(names, 2)) : ''}<span class="hint">until ${hm(b.t)}</span></span>`;
+              pick = true;
+              break;
+            }
+            case 'now': {
+              tm = `<span class="tm" id="now-time">${hm(Date.now())}</span>`;
+              nd = '<i class="nd now"></i>';
+              const paused = S.graph.state === 'paused';
+              lb = `<span class="lb soft"><span style="color:var(--room-ink)">now</span><span class="hint">${paused ? `nothing is recorded while ${esc(S.graph.reason)}` : 'the record commits within a minute of any change'}</span></span>`;
+              break;
+            }
+            case 'run': case 'note': {
+              tm = `<span class="tm">${hm(c.t)}</span>`;
+              nd = `<i class="nd ${r.type}${c.error ? ' err' : ''}"></i>`;
+              const figs = (c.changed || []).filter(isImage).map(base);
+              lb = `<span class="lb">${labelHTML(c)}${figs.length ? `<span class="hint">· ${esc(listNames(figs, 2))}</span>` : ''}${first(c)}${tags}${again(c)}</span>`;
+              pick = true;
+              break;
+            }
+            case 'timer': {
+              const names = touchedNames([c]);
+              tm = `<span class="tm${tags ? '' : ' ghost'}">${hm(c.t)}</span>`;
+              nd = '<i class="nd bead"></i>';
+              lb = `<span class="lb${tags ? '' : ' ghost'}">${labelHTML(c)}${names.length ? `<span class="hint">· ${esc(listNames(names, 2))}</span>` : ''}${first(c)}${tags}${again(c)}</span>`;
+              pick = true;
+              break;
+            }
+            case 'open': case 'close': {
+              tm = `<span class="tm">${hm(c.t)}</span>`;
+              nd = '<i class="nd weir"></i>';
+              lb = `<span class="lb soft">${labelHTML(c)}${first(c)}${tags}${again(c)}</span>`;
+              pick = true;
+              break;
+            }
+            case 'rfrom': {
+              tm = `<span class="tm">${hm(c.t)}</span>`;
+              nd = '<i class="nd ring"></i>';
+              lb = `<span class="lb">${labelHTML(c)}<span class="hint">· the files as they were, kept</span>${tags}${again(c)}</span>`;
+              pick = true;
+              break;
+            }
+            case 'rto': {
+              const t = find(c.target);
+              tm = `<span class="tm">${hm(c.t)}</span>`;
+              nd = `<i class="nd back">${BACK}</i>`;
+              lb = `<span class="lb">${labelHTML(c)}<span class="hint">· back to ${t ? esc(when(t) + ', ' + shortMsg(t)) : esc(short(c.target))}</span>${tags}${again(c)}</span>`;
+              pick = true;
+              break;
+            }
+            case 'user': {
+              const names = (c.refs || []).filter((name) => (S.graph.branches || []).some((b) => b.name === name));
+              tm = `<span class="tm">${hm(c.t)}</span>`;
+              nd = `<i class="nd sq" style="left:${laneX(c.lane)}px"></i>`;
+              lb = `<span class="lb user">${esc(c.subject)}${names.map((name) => `<span class="br">${esc(name)}</span>`).join('')}${tags}${again(c)}</span>`;
+              pick = true;
+              break;
+            }
+          }
+          const sel = c && S.sel === c.sha ? ' sel' : '';
+          const near = !sel && S.selRow >= 0 && Math.abs(i - S.selRow) <= 2 ? ' near' : '';
+          const hint = sel && S.hintOn ? ' show-again' : '';
+          const landed = c && S.landed && S.landed.has(c.sha) ? ' landed' : '';
+          return `<div class="row t-${r.type}${pick ? ' pick' : ''}${sel}${near}${hint}${landed}" data-i="${i}" style="top:${r.y}px;height:${r.h}px;width:${S.cardX - 18}px">${tm}${nd}${lb}</div>`;
+        }
+        // The selected node's hint: a second click rewinds, when the card says a rewind would change something.
+        function again(c) {
+          if (S.sel !== c.sha || !S.card || S.card.sha !== c.sha || !rewindable()) return '';
+          return `<span class="again">click again to rewind to ${esc(when(c))}</span>`;
+        }
+        function first(c) { return S.data.records[0] === c && !S.graph.more ? '<span class="hint">· the record begins</span>' : ''; }
+        function rewindable() {
+          const k = S.card && S.card.compare;
+          return !!(k && !k.error && !k.blocked && S.graph.state !== 'paused' && k.write.length + k.remove.length > 0);
+        }
+
+        /* ---------- the drawing: river, reaches, tributaries, ties, arcs ---------- */
+        function linesSVG(rows, height) {
+          const D = S.data, rx = G.rx, P = [];
+          const pts = rows.filter((r) => r.type !== 'user' && r.type !== 'more');
+          for (let k = 1; k < pts.length; k++) {
+            const a = pts[k - 1], b = pts[k];
+            if (k === 1 && a.type === 'dayhead') continue;
+            const y1 = a.type === 'dayfold' ? a.y + a.h - 9 : a.cy;
+            const y2 = b.type === 'dayfold' ? b.y + 9 : b.cy;
+            const dotted = a.type === 'gap' || b.type === 'gap' || a.type === 'dayhead' || b.type === 'dayhead' || (a.type === 'dayfold' && b.type === 'dayfold') || b.type === 'now';
+            P.push(`<line class="riv${dotted ? ' dot' : ''}" x1="${rx}" y1="${y1}" x2="${rx}" y2="${y2}"/>`);
+          }
+          rows.forEach((r) => { if (r.type === 'dayfold' && r.day.commits.length) P.push(`<rect class="reach" x="${rx - 3.5}" y="${r.y + 9}" width="7" height="${r.h - 18}" rx="3.5"/>`); });
+          if (D.users.length && S.showBranch) {
+            for (let lane = 0; lane < D.lanes; lane++) {
+              const urows = [];
+              D.users.forEach((u) => { if (u.lane !== lane) return; const r = S.rmap.get(u.sha); if (r && urows[urows.length - 1] !== r) urows.push(r); });
+              if (!urows.length) continue;
+              const x = laneX(lane);
+              P.push(`<line class="trib" x1="${x}" y1="${urows[0].cy}" x2="${x}" y2="${urows[urows.length - 1].cy}"/>`);
+              urows.forEach((r) => { if (r.type === 'dayfold') P.push(`<rect class="tribmark" x="${x - 4}" y="${r.cy - 4}" width="8" height="8" rx="2.2"/>`); });
+            }
+            // A fork or a merge: a curve from the parent's node in another lane.
+            const byUser = new Map(D.users.map((u) => [u.sha, u]));
+            D.users.forEach((u) => {
+              const ur = S.rmap.get(u.sha);
+              if (!ur || ur.type !== 'user') return;
+              (u.parents || []).forEach((p) => {
+                const parent = byUser.get(p);
+                const pr = parent && S.rmap.get(p);
+                if (!parent || !pr || parent.lane === u.lane) return;
+                const x1 = laneX(parent.lane), x2 = laneX(u.lane);
+                P.push(`<path class="fork" d="M${x1},${pr.cy} C${x1},${(pr.cy + ur.cy) / 2} ${x2},${(pr.cy + ur.cy) / 2} ${x2},${ur.cy - 8}"/>`);
+              });
+            });
+            // Ties: where a commit of yours holds the same files as the record.
+            D.users.forEach((u) => {
+              const ur = S.rmap.get(u.sha), tr = u.tie && S.rmap.get(u.tie.sha);
+              if (!ur || ur.type !== 'user' || !tr || tr === ur) return;
+              const y1 = tr.cy, y2 = ur.cy, x2 = laneX(u.lane) - 8;
+              const mx = (rx + x2) / 2;
+              P.push(`<path class="tie${u.tie.exact ? '' : ' near'}" d="M${rx + 6},${y1} C${mx + 4},${y1} ${mx - 4},${y2} ${x2},${y2}"/>`);
+            });
+          }
+          const lanes = [];
+          rows.filter((r) => r.type === 'rto').forEach((r) => {
+            const target = find(r.item.target);
+            const tr = target && S.rmap.get(target.sha);
+            if (!tr || tr === r) return;
+            const y1 = tr.cy, y2 = r.cy;
+            let lane = 0;
+            while (lanes.some((l) => l.lane === lane && !(l.y2 < y1 - 4 || l.y1 > y2 + 4))) lane++;
+            lanes.push({ lane, y1, y2 });
+            const ax = rx - 24 - lane * 10;
+            P.push(`<path class="arc" d="M${rx - 10},${y2} H${ax + 7} Q${ax},${y2} ${ax},${y2 - 7} V${y1 + 7} Q${ax},${y1} ${ax + 7},${y1} H${rx - 10}"/>`);
+            P.push(`<path class="arrow" d="M${rx - 15},${y1 - 3.5} L${rx - 10},${y1} L${rx - 15},${y1 + 3.5}"/>`);
+          });
+          return P.join('');
+        }
+
+        /* ================= render ================= */
+        const scroll = $('#scroll'), river = $('#river'), lines = $('#lines'), rowsEl = $('#rows'), card = $('#card'), tie = $('#tie'), mini = $('#mini');
+        function render() {
+          if (!S.data) return;
+          const w = Math.min(G.w, Math.max(560, scroll.clientWidth - 36));
+          S.cardX = w - G.cardW;
+          river.style.width = w + 'px';
+          const { rows, height } = layout();
+          S.rows = rows;
+          S.rmap = new Map();
+          rows.forEach((r) => { if (r.item) S.rmap.set(r.item.sha, r); if (r.items) r.items.forEach((c) => S.rmap.set(c.sha, r)); });
+          const sr = S.sel ? S.rmap.get(S.sel) : null;
+          S.selRow = sr && sr.item ? rows.indexOf(sr) : -1;
+          river.style.setProperty('--rx', G.rx + 'px');
+          river.style.setProperty('--lx', labelX() + 'px');
+          river.style.setProperty('--timer', G.timeR + 'px');
+          river.style.height = height + 'px';
+          lines.setAttribute('width', w);
+          lines.setAttribute('height', height);
+          lines.innerHTML = linesSVG(rows, height);
+          rowsEl.innerHTML = rows.map(rowHTML).join('');
+          paintChrome();
+          placeCard();
+          drawMini();
+        }
+        function paintChrome() {
+          const g = S.graph, D = S.data;
+          $('#t-path').textContent = g.project ? g.project.display : '';
+          const n = D.records.filter((c) => c.day === today()).length;
+          $('#t-meta').textContent = `${plural(g.total || D.records.length, 'commit')}${n ? ` · ${n} today` : ''} · ${g.project ? g.project.branch : ''}`;
+          paintHere();
+          $$('#zoom button').forEach((b) => { b.disabled = false; b.classList.toggle('on', b.dataset.z === S.zoom); });
+          const rb = $('#rb-branch');
+          rb.disabled = !D.users.length;
+          rb.classList.toggle('on', !!(D.users.length && S.showBranch));
+          rb.dataset.label = D.users.length ? `${S.showBranch ? 'Hide' : 'Show'} ${listNames(D.lines, 2)}` : 'No commits of your own in this project';
+          $('#rb-proj').dataset.label = g.project ? g.project.name : 'No project';
+          $('#rb-about').dataset.label = g.project ? `Kept on this Mac, on the branch ${g.project.branch}` : 'Kept on this Mac';
+          paintRec();
+        }
+        function paintHere() {
+          const g = S.graph;
+          const own = (g.windows || []).map((file) => `<span class="app" title="${esc(capital(g.app))}">${esc((g.app || '?').charAt(0).toUpperCase())}</span><span class="doc">${esc(base(file))}</span>`);
+          const others = (g.others || []).flatMap((o) => o.documents.map((file) => `<span class="app other" title="${esc(capital(o.app))}">${esc(o.app.charAt(0).toUpperCase())}</span><span class="doc">${esc(base(file))}</span>`));
+          $('#here').innerHTML = own.concat(others).join('');
+          $('#here').title = 'Open on this project: a rewind saves and reloads them';
+        }
+        function paintRec() {
+          const rec = $('#rec');
+          const paused = S.graph && S.graph.state === 'paused';
+          rec.hidden = !paused;
+          if (paused) rec.querySelector('.why2').textContent = S.graph.reason || '';
+        }
+
+        /* ---------- the card ---------- */
+        function placeCard() {
+          const c = S.sel && find(S.sel);
+          const r = c && S.rmap.get(c.sha);
+          if (!c || !r || !r.item) { card.hidden = true; tie.hidden = true; return; }
+          card.hidden = false;
+          card.style.left = S.cardX + 'px';
+          card.style.width = G.cardW + 'px';
+          if (!S.busy) card.innerHTML = cardHTML(c);
+          const need = r.cy + card.offsetHeight + 60;
+          if (need > river.offsetHeight) river.style.height = need + 'px';
+          fitCard();
+          const rowEl = rowsEl.children[S.rows.indexOf(r)];
+          const lb = rowEl && rowEl.querySelector('.lb');
+          const x1 = lb ? lb.offsetLeft + Math.min(lb.scrollWidth, lb.offsetWidth) + 12 : G.rx + 16;
+          if (x1 < S.cardX - 14) {
+            tie.hidden = false;
+            tie.style.left = x1 + 'px';
+            tie.style.top = r.cy + 'px';
+            tie.style.width = S.cardX - x1 + 'px';
+          } else tie.hidden = true;
+        }
+        // The card's head sits on the node's line; when that would run the card off the bottom
+        // of the room it lifts, as far as keeping the node's line inside the card allows.
+        function fitCard() {
+          if (card.hidden || !S.sel) return;
+          const r = S.rmap.get(S.sel);
+          if (!r) return;
+          card.style.maxHeight = scroll.clientHeight - 22 + 'px';
+          const h = card.offsetHeight;
+          const vt = scroll.scrollTop + 10, vb = scroll.scrollTop + scroll.clientHeight - 12;
+          let top = r.cy - 22;
+          if (top + h > vb) top = vb - h;
+          if (top < vt) top = vt;
+          top = Math.min(top, r.cy - 22);
+          top = Math.max(top, r.cy - h + 22);
+          card.style.top = Math.max(8, top) + 'px';
+        }
+        scroll.addEventListener('scroll', fitCard, { passive: true });
+        function prevOf(c) {
+          if (c.kind === 'user') {
+            const p = c.parents && c.parents[0];
+            return p ? find(p) : null;
+          }
+          return c.i > 0 ? S.data.records[c.i - 1] : null;
+        }
+        function glyph(c) {
+          if (c.kind === 'run' && c.error) return '<i class="g-err"></i>';
+          return { run: '<i class="g-run"></i>', note: '<i class="g-note"></i>', timer: '<i class="g-bead"></i>', open: '<i class="g-weir"></i>', close: '<i class="g-weir"></i>', rfrom: '<i class="g-ring"></i>', rto: `<i class="g-back">${BACK}</i>`, user: '<i class="g-sq"></i>' }[c.kind];
+        }
+
+        /* ---------- what the page works out from blob text ---------- */
+        // A blob, read once: {text} | {binary} | {large} | {missing}.
+        function blob(sha, path) {
+          const key = `${sha}:${path}`;
+          if (!S.blobs.has(key)) S.blobs.set(key, ask({ type: 'history', action: 'blob', sha, path }).then((b) => b || { missing: true }));
+          return S.blobs.get(key);
+        }
+        // A percent-format document's cells: each `# %%` line starts one. [{start, end}] (1-based lines), or null.
+        function cellsIn(text) {
+          if (typeof text !== 'string') return null;
+          const ls = text.split('\n');
+          const starts = [];
+          ls.forEach((line, i) => { if (/^# %%/.test(line)) starts.push(i + 1); });
+          if (!starts.length) return null;
+          return starts.map((start, k) => ({ start, end: k + 1 < starts.length ? starts[k + 1] - 1 : ls.length, text: ls.slice(start - 1, k + 1 < starts.length ? starts[k + 1] - 1 : ls.length).join('\n') }));
+        }
+        const cellAt = (cells, line) => { for (let k = cells.length - 1; k >= 0; k--) if (cells[k].start <= line) return k + 1; return cells.length ? 1 : 0; };
+        // A patch's changed lines, each with the new-side line it lands on: [{kind: 'p' | 'm', text, at}].
+        // Blank lines are left out: a cell's trailing blank line is not a change to its code.
+        function changedLines(patch) {
+          const out = [];
+          let n = 0, inHunk = false;
+          for (const line of String(patch || '').split('\n')) {
+            const h = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+            if (h) { n = +h[1]; inHunk = true; continue; }
+            if (!inHunk) continue;
+            const text = line.slice(1);
+            if (line.startsWith('+')) { if (text.trim()) out.push({ kind: 'p', text, at: n }); n++; }
+            else if (line.startsWith('-')) { if (text.trim()) out.push({ kind: 'm', text, at: n }); }
+            else if (line.startsWith(' ')) n++;
+          }
+          return out;
+        }
+        const words = (text) => (String(text || '').match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) || []).length;
+        function valuesDiff(a, b) {
+          try {
+            const x = JSON.parse(a || '{}'), y = JSON.parse(b || '{}');
+            if (!x || !y || typeof x !== 'object' || typeof y !== 'object') return null;
+            return [...new Set([...Object.keys(x), ...Object.keys(y)])].filter((k) => JSON.stringify(x[k]) !== JSON.stringify(y[k]));
+          } catch { return null; }
+        }
+        function dmapHTML(n, st, key) {
+          let s = '';
+          for (let k = 1; k <= n; k++) s += `<i class="${st[k] || ''}">${k}</i>`;
+          const K = { chg: ['rgba(110,165,118,.45)', 'changed'], out: ['transparent;box-shadow:inset 0 0 0 1px rgba(205,100,82,.6)', 'comes out'], back: ['rgba(201,138,29,.45)', 'goes back'], come: ['rgba(157,184,214,.45)', 'comes back'] };
+          const used = [...new Set(Object.values(st))];
+          const keyH = key ? `<div class="dkey">${used.map((u) => `<span><i style="background:${K[u][0]}"></i>${K[u][1]}</span>`).join('')}<span><i style="background:rgba(255,255,255,.08)"></i>the same</span></div>` : '';
+          return `<div class="dmap">${s}</div>${keyH}`;
+        }
+        const svgImg = (text) => `<span class="thumb"><img alt="" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(text)}"></span>`;
+
+        /* ---------- the card's content, worked out once per selection ---------- */
+        // S.card: {sha, detail, compare, extra: path → html bits, notice, refusal, steps}
+        async function loadCard(c) {
+          const sha = c.sha;
+          const stillHere = () => S.card && S.card.sha === sha;
+          S.card = { sha, detail: S.details.get(sha) || null, compare: null, files: new Map(), back: new Map(), notice: S.card && S.card.sha === sha ? S.card.notice : null };
+          const detailP = S.details.has(sha) ? Promise.resolve(S.details.get(sha)) : ask({ type: 'history', action: 'commit', sha }).then((d) => { if (d && !d.error) S.details.set(sha, d); return d; });
+          const compareP = compareFor(sha);
+          const [detail, compare] = await Promise.all([detailP, compareP]);
+          if (!stillHere()) return;
+          S.card.detail = detail;
+          S.card.compare = compare;
+          refreshCard();
+          await Promise.all([workOutCommit(c, detail), workOutRewind(c, compare)]);
+          if (stillHere()) refreshCard();
+        }
+        function compareFor(sha, paths) {
+          const key = `${sha} ${S.graph.tip || ''} ${S.graph.state}`;
+          if (!paths && S.compares.has(key)) return S.compares.get(key);
+          const p = ask({ type: 'history', action: 'compare', sha, ...(paths ? { paths } : {}) });
+          if (!paths) S.compares.set(key, p);
+          return p;
+        }
+        // This commit: cells lit, figures drawn, values named.
+        async function workOutCommit(c, detail) {
+          if (!detail || detail.error || !detail.files) return;
+          const parent = detail.parents && detail.parents[0];
+          await Promise.all(detail.files.slice(0, 12).map(async (f) => {
+            const bits = {};
+            if (f.status !== 'D' && isFigure(f.path)) {
+              const b = await blob(detail.sha, f.path);
+              if (b.text) bits.thumb = svgImg(b.text);
+            }
+            if (f.status !== 'D' && /\.py$/i.test(f.path) && f.patch) {
+              const b = await blob(detail.sha, f.path);
+              const cells = cellsIn(b.text);
+              if (cells) {
+                const changed = changedLines(f.patch);
+                const lit = new Set(changed.map((l) => cellAt(cells, l.at)));
+                lit.delete(0);
+                bits.cells = { n: cells.length, lit: [...lit].sort((a, b) => a - b), firstCell: changed.length ? cellAt(cells, changed[0].at) : 0 };
+              }
+            }
+            if (base(f.path) === 'values.json' && f.status === 'M' && parent) {
+              const [a, b] = await Promise.all([blob(parent, f.path), blob(detail.sha, f.path)]);
+              const keys = valuesDiff(a.text, b.text);
+              if (keys && keys.length) bits.values = keys;
+            }
+            if (/\.typ$/i.test(f.path) && f.status === 'M' && parent) {
+              const [a, b] = await Promise.all([blob(parent, f.path), blob(detail.sha, f.path)]);
+              if (a.text != null && b.text != null) bits.words = words(b.text) - words(a.text);
+            }
+            S.card && S.card.files.set(f.path, bits);
+          }));
+        }
+        // Rewinding here: each file against now, said in its own terms.
+        async function workOutRewind(c, k) {
+          if (!k || k.error || !k.now) return;
+          await Promise.all(k.write.slice(0, 16).map(async (entry) => {
+            const p = entry.path, bits = {};
+            if (entry.status === 'M') {
+              if (/\.py$/i.test(p)) {
+                const [t, n] = await Promise.all([blob(k.target, p), blob(k.now, p)]);
+                const tc = cellsIn(t.text), nc = cellsIn(n.text);
+                if (tc && nc) {
+                  const st = {}, back = [], out = [], come = [];
+                  for (let i = 1; i <= Math.max(tc.length, nc.length); i++) {
+                    if (i > tc.length) { st[i] = 'out'; out.push(i); }
+                    else if (i > nc.length) { st[i] = 'come'; come.push(i); }
+                    else if (tc[i - 1].text !== nc[i - 1].text) { st[i] = 'back'; back.push(i); }
+                  }
+                  bits.cells = { st, back, out, come, n: Math.max(tc.length, nc.length) };
+                }
+              }
+              if (base(p) === 'values.json') {
+                const [t, n] = await Promise.all([blob(k.target, p), blob(k.now, p)]);
+                const keys = valuesDiff(t.text, n.text);
+                if (keys && keys.length) bits.values = keys;
+              }
+              if (/\.typ$/i.test(p)) {
+                const [t, n] = await Promise.all([blob(k.target, p), blob(k.now, p)]);
+                if (t.text != null && n.text != null) bits.words = words(n.text) - words(t.text);
+              }
+            }
+            if (entry.status !== 'D' && isFigure(p)) {
+              const t = await blob(k.target, p);
+              if (t.text) bits.thumb = svgImg(t.text);
+            }
+            S.card && S.card.back.set(p, bits);
+          }));
+        }
+        function refreshCard() {
+          if (S.busy) return;
+          render();
+        }
+
+        function changeHTML(f, bits) {
+          const stat = f.binary ? '<span class="fs">binary</span>' : f.plus || f.minus ? `<span class="fs"><i class="pl">+${f.plus}</i> <i class="mi">−${f.minus}</i></span>` : '';
+          let h = `<div class="fr"><span class="fp" title="${esc(f.path)}">${esc(f.path)}</span>${stat}</div>`;
+          const notes = [];
+          if (f.gitlink) notes.push('a nested repository');
+          else if (f.link) notes.push(f.status === 'D' ? 'a symbolic link, removed' : 'a symbolic link');
+          else if (f.status === 'A') notes.push('new');
+          else if (f.status === 'D') notes.push('removed');
+          else if (f.status === 'T') notes.push('changed kind');
+          if (bits && bits.cells && bits.cells.lit.length) notes.push(listCells(bits.cells.lit));
+          if (bits && bits.values) notes.push(`${listNames(bits.values)} ${bits.values.length === 1 ? 'was' : 'were'} rewritten`);
+          if (bits && bits.words) notes.push(bits.words > 0 ? `about ${bits.words} words written` : `about ${-bits.words} words cut`);
+          if (bits && bits.thumb) h += `<div class="thumbrow">${bits.thumb}<span class="fn">${esc(notes.join(' · ') || (f.status === 'A' ? 'new' : 'redrawn'))}</span></div>`;
+          else if (notes.length) h += `<div class="fn">${esc(notes.join(' · '))}</div>`;
+          if (bits && bits.cells && bits.cells.lit.length) {
+            const st = {};
+            bits.cells.lit.forEach((k) => (st[k] = 'chg'));
+            h += dmapHTML(bits.cells.n, st, false);
+          }
+          // The changed lines, a few; none under a figure, which its picture says better.
+          if (f.patch && !f.binary && !(bits && bits.thumb)) {
+            const changed = changedLines(f.patch);
+            const shown = changed.slice(0, 8);
+            if (shown.length) {
+              const head = bits && bits.cells && bits.cells.firstCell && !/^# %%/.test(shown[0].text) ? `<span class="cl"># %% cell ${bits.cells.firstCell}</span>` : '';
+              const more = changed.length > shown.length || f.cut ? `\n<span class="c">… ${changed.length > shown.length ? plural(changed.length - shown.length, 'more line') : 'more'}</span>` : '';
+              h += `<div class="diff">${head}${shown.map((l) => `<span class="${l.kind}">${l.kind === 'm' ? '−' : '+'}</span> ${esc(l.text)}`).join('\n')}${more}</div>`;
+            }
+          }
+          return h;
+        }
+
+        function backHTML(entry, bits, c, removed) {
+          const g = S.graph, k = S.card.compare;
+          const t = when(c);
+          const own = (g.windows || []).map((file) => relative(file));
+          const other = (k.others || g.others || []).find((o) => o.documents.some((file) => relative(file) === entry.path));
+          const win = own.includes(entry.path) ? `<span class="win">open here: saved first, then reloads</span>` : other ? `<span class="win">open in ${esc(capital(other.app))}</span>` : '';
+          let note = '', warn = !!other, strip = '';
+          if (removed) note = 'comes out: not in this commit (the record keeps it)';
+          else if (entry.status === 'A') note = c.kind === 'user' ? `written from this commit; not here now` : 'comes back: it was removed since';
+          else if (entry.status === 'T') note = 'goes back, and changes kind';
+          else if (bits && bits.cells) {
+            const { back, out, come } = bits.cells;
+            const verb = (a, one, many) => `${listCells(a)} ${a.length === 1 ? one : many}`;
+            const parts = [];
+            if (back.length) parts.push(verb(back, 'goes back', 'go back'));
+            if (out.length) parts.push(verb(out, 'comes out', 'come out'));
+            if (come.length) parts.push(verb(come, 'comes back', 'come back'));
+            note = parts.length ? parts.join('; ') : `goes back to ${t}`;
+            if (Object.keys(bits.cells.st).length) strip = dmapHTML(bits.cells.n, bits.cells.st, true);
+          } else if (bits && bits.values) note = `${listNames(bits.values)} go${bits.values.length === 1 ? 'es' : ''} back`;
+          else if (bits && bits.words > 0) {
+            note = `about ${Math.max(10, Math.round(bits.words / 10) * 10)} words written since ${t} leave the page; they stay in the record`;
+            warn = true;
+          } else if (bits && bits.thumb) note = `the figure as it was at ${t}`;
+          else note = `goes back to ${t}`;
+          const thumb = bits && bits.thumb && !removed ? `<div class="thumbrow">${bits.thumb}</div>` : '';
+          const disabled = k.blocked || S.graph.state === 'paused' ? ' disabled' : '';
+          return `<label class="nr${warn ? ' warn' : ''}"><input type="checkbox" checked data-path="${esc(entry.path)}"${disabled}><span class="nb"><span class="fp">${esc(entry.path)}</span>${win}<span class="nn">${esc(note)}</span>${strip}${thumb}</span></label>`;
+        }
+        // A document's path inside the project, as the record names it.
+        function relative(file) {
+          const root = S.graph.project ? S.graph.project.root : '';
+          return root && file.startsWith(root + '/') ? file.slice(root.length + 1) : file;
+        }
+
+        function cardHTML(c) {
+          const g = S.graph;
+          const isUser = c.kind === 'user';
+          const day = dayInfo(c.day).long;
+          const title = isUser ? `<div class="cname user">${esc(c.subject)}</div>` : `<div class="cname">${labelHTML(c)}</div>`;
+          const meta = isUser
+            ? `${esc(c.line)} · ${esc(c.author || '')} · ${day}, ${hms(c.t)} · <span class="sha">${short(c.sha)}</span>`
+            : `${day}, ${hms(c.t)} · <span class="sha">${short(c.sha)}</span>`;
+          let note = '';
+          if (isUser) {
+            const t = c.tie && find(c.tie.sha);
+            if (!c.tie) note = `<div class="note">Made before the record began, or with files no record commit holds, so it is tied to nothing.</div>`;
+            else if (!c.tie.exact) note = `<div class="note"><span class="eq">≈</span>The record at <b>${esc(t ? when(t) : short(c.tie.sha))}</b>${t ? ` (${esc(shortMsg(t))})` : ''} holds these files, except ${esc(listNames(c.tie.differs || [], 3))}.</div>`;
+            else note = `<div class="note"><span class="eq">=</span>The same files as the record at <b>${esc(t ? when(t) : short(c.tie.sha))}</b>${t ? ` (${esc(shortMsg(t))})` : ''}.</div>`;
+          } else if (c.kind === 'rto') {
+            const t = find(c.target);
+            note = `<div class="note">The files of <b>${esc(t ? when(t) : short(c.target))}</b>${t ? ` (${esc(shortMsg(t))})` : ''}, written back. Nothing between them was removed from the record.</div>`;
+          } else if (c.kind === 'rfrom') {
+            note = `<div class="note">The files at the moment of a rewind: <span class="eq" style="margin:0">${esc(short(c.from))}</span> and what had not been recorded yet. Rewinding here undoes that rewind.</div>`;
+          } else if (c.error) {
+            note = `<div class="note err">The run raised an error. Its saved output holds the traceback.</div>`;
+          }
+          if (S.card && S.card.notice) note += `<div class="note moved">${S.card.notice}</div>`;
+          const prev = prevOf(c);
+          const vs = prev ? `since ${esc(when(prev))}, ${esc(shortMsg(prev))}` : 'the first commit';
+          const detail = S.card && S.card.sha === c.sha ? S.card.detail : null;
+          let thisBody;
+          if (!detail) thisBody = '<div class="fn">Reading the commit…</div>';
+          else if (detail.error) thisBody = `<div class="fn">${esc(detail.error)}</div>`;
+          else if (!detail.files.length) thisBody = '<div class="fn">No file changes.</div>';
+          else {
+            const shown = detail.files.filter((f) => f.path !== '.claerbout/untracked.json').slice(0, 12);
+            const man = detail.files.some((f) => f.path === '.claerbout/untracked.json') ? '<div class="same">untracked/ changed: the manifest pins its files by hash.</div>' : '';
+            const rest = detail.files.length - shown.length - (man ? 1 : 0);
+            thisBody = shown.map((f) => changeHTML(f, S.card.files.get(f.path))).join('') + (rest > 0 ? `<div class="same">and ${plural(rest, 'more file')}</div>` : '') + man;
+          }
+          const thisSec = `<div class="sec"><div class="sl">This commit<span>${vs}</span></div>${thisBody}</div>`;
+          return `<div class="ch"><span class="cg">${glyph(c)}</span><div class="ct">${title}<div class="cmeta">${meta}</div></div><button class="cx" data-act="close" type="button" aria-label="Close">×</button></div>${note}${thisSec}${rewindHTML(c)}`;
+        }
+
+        function rewindHTML(c) {
+          const g = S.graph;
+          const k = S.card && S.card.sha === c.sha ? S.card.compare : null;
+          if (!k) return `<div class="sec"><div class="sl">Rewinding here</div><div class="fn">Comparing with now…</div></div>`;
+          if (k.error) return `<div class="sec"><div class="sl">Rewinding here</div><div class="fn">${esc(k.error)}</div></div>`;
+          const t = when(c);
+          const paused = k.blocked || (g.state === 'paused' ? g.reason : null);
+          const after = (() => { const anchor = c.kind === 'user' ? c.tie && find(c.tie.sha) : c; return anchor && anchor.i != null ? S.data.records.length - 1 - anchor.i : null; })();
+          const back = c.day === today() ? `${Math.max(1, Math.round((Date.now() - c.t) / 60000))} min back` : dayInfo(c.day).short;
+          const entries = [...k.write.map((e) => [e, false]), ...k.remove.map((p) => [{ path: p, status: 'D' }, true])];
+          if (!entries.length) {
+            return `<div class="sec"><div class="sl">Rewinding here</div><div class="fn">This is where you are: the files now are this commit’s${k.kept && k.kept.length && !k.onRecord ? ', and the files it does not hold stay as they are' : ''}.</div>${skippedHTML(k)}</div>
+              <div class="act"><button class="rw" type="button" disabled>${BACK} You are here</button></div>`;
+          }
+          const rowsH = entries.map(([e, removed]) => backHTML(e, S.card.back.get(e.path), c, removed)).join('');
+          const man = k.untracked
+            ? `<div class="nr fixed"><span class="nb"><span class="fp">untracked/</span><span class="nn">stays as it is: the record keeps only names and hashes there${k.untrackedGone.length ? `; ${esc(listNames(k.untrackedGone.map(base), 2))} cannot come back` : ''}</span></span></div>`
+            : '';
+          const kept = k.kept && k.kept.length
+            ? k.onRecord
+              ? `<div class="same">${esc(listNames(k.kept.map(base), 2))} ${k.kept.length === 1 ? 'is' : 'are'} new since the record last committed, so ${k.kept.length === 1 ? 'it stays' : 'they stay'}.</div>`
+              : `<div class="same">${k.kept.length > 2 ? plural(k.kept.length, 'file') : esc(k.kept.join(' and '))} ${k.kept.length === 1 ? 'is' : 'are'} not in this commit, so ${k.kept.length === 1 ? 'it stays' : 'they stay'} as now.</div>`
+            : '';
+          const touchedSet = new Set(entries.map(([e]) => e.path));
+          const held = (k.others || []).map((o) => ({ app: o.app, docs: o.documents.map(relative).filter((p) => touchedSet.has(p)) })).filter((o) => o.docs.length);
+          const otherH = held.length
+            ? `<div class="other"><b>${esc(listNames(held[0].docs.map(base)))} ${held[0].docs.length === 1 ? 'is' : 'are'} open in ${esc(capital(held[0].app))}</b>, a separate app, so it is not saved first. Close it there or untick it; rewound anyway, ${esc(capital(held[0].app))} reloads it when it sees the rewind.</div>`
+            : '';
+          const same = k.same > 0 ? `${plural(k.same, 'other file is', 'other files are')} the same at both moments.` : '';
+          const own = (g.windows || []).map(base);
+          const head = g.head && g.head.branch ? `${esc(g.head.branch)} stays where it is, and ` : '';
+          const refusal = S.card.refusal;
+          const button = `<div class="act"><button class="rw" type="button" data-act="rewind">${BACK}<span class="rwl">Rewind to ${esc(t)}</span></button><span class="kbd">or click the node again · ⌘↩</span></div>
+               <p class="fine">${own.length ? `${esc(listNames(own, 2))} ${own.length === 1 ? 'is' : 'are'} saved first and ${own.length === 1 ? 'reloads' : 'reload'}. ` : ''}Now is recorded first, so this can be undone; ${head}HEAD and the index are not touched (git status lists the rewound files as changed). A kernel’s memory is not rewound: cells come back stale.</p>`;
+          const action = paused
+            ? `<div class="act"><button class="rw" type="button" disabled>${BACK}<span class="rwl">Rewind waits</span></button></div>
+               <p class="why"><b>The record is paused:</b> ${esc(paused)}, and git’s work comes first. Nothing is recorded or rewound until it ends.</p>`
+            : refusal
+              ? refusal.html + (refusal.replaces ? '' : button)
+              : button;
+          return `<div class="sec"><div class="sl">Rewinding here<span>${back}${after ? ' · ' + plural(after, 'commit') + ' since' : ''}</span></div>${rowsH}${man}
+            <div class="same">${same}</div>${kept}${skippedHTML(k)}${otherH}</div>${action}`;
+        }
+        function skippedHTML(k) {
+          if (!k.skipped || !k.skipped.length) return '';
+          return k.skipped.slice(0, 6).map((s) => `<div class="nr fixed"><span class="nb"><span class="fp">${esc(s.path)}</span><span class="nn">left as it is: ${esc(s.why)}</span></span></div>`).join('');
+        }
+
+        /* ---------- rewind ---------- */
+        function chosenPaths() {
+          const boxes = $$('#card input[data-path]');
+          const on = boxes.filter((b) => b.checked).map((b) => b.dataset.path);
+          return on.length === boxes.length ? null : on;
+        }
+        function stepsHTML(c, k, paths) {
+          const g = S.graph;
+          const app = capital(g.app);
+          const own = (g.windows || []).map(base);
+          const n = paths ? paths.length : k.write.length + k.remove.length;
+          const others = (g.others || []).filter((o) => o.documents.length);
+          const target = c.sha;
+          const labels = {
+            save: own.length ? `Save ${esc(listNames(own, 2))} in ${esc(app)}` : `No ${esc(app)} window on this project to save`,
+            'record-from': `Record now: <span class="sha">${esc(g.app)}: rewind from ${short(k.tip)}</span>`,
+            write: `Write ${plural(n, 'file')} from <span class="sha">${short(target)}</span> into the folder`,
+            'record-to': `Record <span class="sha">${esc(g.app)}: rewind to ${short(target)}</span>`,
+            reload: `Reload ${own.length ? esc(listNames(own, 2)) : 'nothing here'}${others.length ? `; ${esc(capital(others[0].app))} reloads its files when it sees the rewind` : ''}`,
+          };
+          return `<ol class="steps">${STEP_ORDER.map((s) => `<li data-step="${s}">${labels[s]}</li>`).join('')}</ol>`;
+        }
+        function onStep(detail) {
+          const li = card.querySelector(`.steps li[data-step="${detail.step}"]`);
+          if (!li) return;
+          const i = STEP_ORDER.indexOf(detail.step);
+          $$('.steps li', card).forEach((x, j) => { if (j < i && !x.classList.contains('done')) { x.classList.remove('doing'); x.classList.add('done'); } });
+          li.classList.toggle('doing', detail.state === 'doing');
+          li.classList.toggle('done', detail.state === 'done');
+          if (detail.step === 'record-from' && detail.state === 'done' && detail.detail && detail.detail.from === null) li.innerHTML = 'Now was the tip: nothing to record first';
+        }
+        async function startRewind(c, opts) {
+          const k = S.card && S.card.compare;
+          if (S.busy || !k || k.error || k.blocked || S.graph.state === 'paused') return;
+          const options = opts || {};
+          const paths = options.paths !== undefined ? options.paths : chosenPaths();
+          if (paths && !paths.length) return;
+          S.card.chosen = paths || [...k.write.map((x) => x.path), ...k.remove];
+          if (S.card.refusal || S.card.notice) {
+            S.card.refusal = null;
+            S.card.notice = null;
+            render();
+            // The boxes as they were chosen, again.
+            $$('#card input[data-path]').forEach((b) => { b.checked = S.card.chosen.includes(b.dataset.path); b.closest('.nr').classList.toggle('off', !b.checked); });
+          }
+          S.busy = true;
+          S.hintOn = false;
+          $$('.row.show-again').forEach((r) => r.classList.remove('show-again'));
+          const anchor = card.querySelector('.act');
+          const fine = card.querySelector('.fine');
+          if (fine) fine.remove();
+          card.querySelectorAll('.nr input').forEach((b) => (b.disabled = true));
+          const wrap = document.createElement('div');
+          wrap.innerHTML = stepsHTML(c, k, paths);
+          if (anchor) anchor.replaceWith(wrap.firstChild);
+          else card.appendChild(wrap.firstChild);
+          fitCard();
+          const before = S.graph.tip;
+          const result = await ask({ type: 'rewind', sha: c.sha, tip: k.tip, ...(paths ? { paths } : {}), ...(options.anyway ? { anyway: true } : {}) });
+          S.busy = false;
+          await afterRewind(c, result, { paths, before, retried: options.retried });
+        }
+        async function afterRewind(c, result, ctx) {
+          if (result && result.ok) {
+            S.card = null;
+            S.sel = null;
+            S.last = { result, target: c, before: ctx.before };
+            S.landed = new Set([result.to, result.from].filter(Boolean));
+            await loadGraph({ keep: false });
+            scroll.scrollTop = scroll.scrollHeight;
+            toastRewound(c, result);
+            return;
+          }
+          if (result && result.refused === 'moved' && !ctx.retried) {
+            // The record moved since the card was drawn (a timer tick): ask again, and if the
+            // rewind would do the same, send it again, once.
+            S.compares.clear();
+            if (S.graph.tip !== result.tip) S.graph.tip = result.tip;
+            const fresh = await ask({ type: 'history', action: 'compare', sha: c.sha });
+            const sameSet = (a, b) => a && b && !a.error && !b.error && JSON.stringify([a.write.map((e) => e.path), a.remove]) === JSON.stringify([b.write.map((e) => e.path), b.remove]);
+            const old = S.card && S.card.compare;
+            if (S.card) S.card.compare = fresh;
+            if (sameSet(old, fresh)) { render(); return startRewind(c, { paths: ctx.paths, retried: true }); }
+            if (S.card) S.card.notice = 'The record moved on while this card was open. This is the rewind against now.';
+            await loadGraph({ keep: true });
+            return;
+          }
+          if (!S.card) return;
+          if (result && result.same) {
+            // Nothing to change after all (a timer recorded it meanwhile): ask again.
+            S.compares.clear();
+            S.card.notice = 'Nothing to change: the files now are this commit’s.';
+            void loadCard(c);
+            return;
+          }
+          S.card.refusal = { html: refusalHTML(result, ctx), replaces: !!(result && result.refused === 'other-app') };
+          render();
+        }
+        function refusalHTML(result, ctx) {
+          const block = (text, buttons) => `<div class="refuse">${text}${buttons ? `<div class="act">${buttons}</div>` : ''}</div>`;
+          if (!result) return block('<div class="other"><b>The shell did not answer.</b> Nothing has been written.</div>');
+          switch (result.refused) {
+            case 'other-app': {
+              const docs = (result.documents || []).map(relative);
+              return block(
+                `<div class="other"><b>${esc(listNames(docs.map(base)))} ${docs.length === 1 ? 'is' : 'are'} open in ${esc(capital(result.app))} now.</b> ${esc(capital(result.app))} is a separate app, so it cannot be asked to save first. Nothing has been written.</div>`,
+                `<button class="rw" type="button" data-act="without" data-docs="${esc(JSON.stringify(docs))}">${BACK}<span class="rwl">Without ${esc(listNames(docs.map(base), 2))}</span></button><button class="ghostbtn" type="button" data-act="anyway">Rewind anyway</button>`,
+              ) + `<p class="fine">Or close it in ${esc(capital(result.app))} and click the node again. Rewound anyway, ${esc(capital(result.app))} reloads it when it sees the rewind.</p>`;
+            }
+            case 'paused':
+              return block(`<p class="why"><b>The record is paused:</b> ${esc(result.reason)}. Nothing has been written.</p>`);
+            case 'unsaved':
+              return block(`<div class="other"><b>${esc(base(result.path || 'A document'))} could not be saved${result.error ? `: ${esc(result.error)}` : ''}.</b> Nothing has been written.</div>`);
+            case 'moved':
+              return block('<div class="note moved">The record moved on again. Click the node to see the rewind against now.</div>');
+            default:
+              return block(`<div class="other"><b>The rewind did not finish:</b> ${esc(result.detail || result.error || 'no reason given')}. The record’s next commit keeps whatever the folder holds.</div>`);
+          }
+        }
+        function toastRewound(c, result) {
+          const g = S.graph;
+          const own = (g.windows || []).map(base);
+          const what = c.kind === 'rfrom' ? `Back where you were at ${hm(c.t)}, before that rewind` : `Rewound to <b>${esc(when(c))}</b>, ${esc(shortMsg(c))}`;
+          const skipped = result.skipped && result.skipped.length ? ` ${plural(result.skipped.length, 'file was', 'files were')} left as they are.` : '';
+          showToast(`<span class="k">↺</span><span>${what}. ${own.length ? `${esc(listNames(own, 2))} ${own.length === 1 ? 'reloads' : 'reload'}; ` : ''}a kernel’s memory is not rewound.${skipped}</span><button type="button" data-act="undo">Undo</button>`);
+        }
+        async function undo() {
+          const last = S.last;
+          if (!last || S.busy) return;
+          // Undo is one more rewind: to the "rewind from" commit, or to the tip it started from.
+          const sha = last.result.from || last.before;
+          const target = find(sha);
+          if (!target) return;
+          hideToast();
+          S.busy = true;
+          const result = await ask({ type: 'rewind', sha, tip: S.graph.tip });
+          S.busy = false;
+          if (result && result.ok) {
+            S.last = { result, target, before: S.graph.tip };
+            S.landed = new Set([result.to, result.from].filter(Boolean));
+            await loadGraph({ keep: false });
+            scroll.scrollTop = scroll.scrollHeight;
+            toastRewound(target, result);
+          } else {
+            showToast(`<span>The undo was not made: ${esc(result ? result.refused || result.detail || 'nothing to change' : 'no answer')}. Click the ring to rewind from its card.</span>`);
+          }
+        }
+
+        /* ---------- the note ---------- */
+        const toast = $('#toast');
+        function showToast(h) { toast.innerHTML = h; toast.hidden = false; }
+        function hideToast() { toast.hidden = true; }
+        toast.addEventListener('click', (e) => { if (e.target.closest('[data-act="undo"]')) void undo(); });
+
+        /* ---------- the strip: the whole record at the room's edge ---------- */
+        function drawMini() {
+          const H = river.offsetHeight;
+          const show = H > scroll.clientHeight * 1.15;
+          mini.hidden = !show;
+          scroll.classList.toggle('nobar', show);
+          if (!show) return;
+          const mh = mini.clientHeight, k = mh / H, P = [];
+          S.rows.forEach((r) => {
+            const y = (r.cy * k).toFixed(1);
+            if (r.type === 'run' || r.type === 'note') P.push(`<rect class="${r.item.error ? 'm-err' : 'm-run'}" x="4" y="${y}" width="8" height="1"/>`);
+            else if (r.type === 'timer') P.push(`<rect class="m-tick" x="6.5" y="${y}" width="3" height="1"/>`);
+            else if (r.type === 'cluster') P.push(`<rect class="m-tick" x="6.5" y="${(r.y * k).toFixed(1)}" width="3" height="${Math.max(1, r.h * k).toFixed(1)}"/>`);
+            else if (r.type === 'dayfold') P.push(`<rect class="m-reach" x="5.5" y="${((r.y + 9) * k).toFixed(1)}" width="5" height="${Math.max(2, (r.h - 18) * k).toFixed(1)}" rx="1.5"/>`);
+            else if (r.type === 'dayhead') P.push(`<rect class="m-day" x="1" y="${y}" width="14" height="1"/>`);
+            else if (r.type === 'rto') P.push(`<rect class="m-rw" x="1.5" y="${y - 1}" width="13" height="2" rx="1"/>`);
+            else if (r.type === 'user') P.push(`<rect class="m-user" x="11.5" y="${y - 1.5}" width="3" height="3"/>`);
+          });
+          mini.innerHTML = `<svg width="16" height="${mh}">${P.join('')}<rect id="mview" x="0.5" y="0" width="15" height="10" rx="3"/></svg>`;
+          miniView();
+        }
+        function miniView() {
+          const v = $('#mview');
+          if (!v || mini.hidden) return;
+          const H = river.offsetHeight, mh = mini.clientHeight;
+          v.setAttribute('y', Math.max(0.5, (scroll.scrollTop / H) * mh));
+          v.setAttribute('height', Math.max(8, Math.min(mh - 1, (scroll.clientHeight / H) * mh)));
+        }
+        scroll.addEventListener('scroll', miniView, { passive: true });
+        let dragging = false;
+        const miniGo = (e) => {
+          const r = mini.getBoundingClientRect();
+          const f = (e.clientY - r.top) / r.height;
+          scroll.scrollTop = f * river.offsetHeight - scroll.clientHeight / 2;
+        };
+        mini.addEventListener('pointerdown', (e) => { dragging = true; mini.setPointerCapture(e.pointerId); miniGo(e); });
+        mini.addEventListener('pointermove', (e) => { if (dragging) miniGo(e); });
+        mini.addEventListener('pointerup', () => { dragging = false; });
+
+        /* ================= interactions ================= */
+        function select(sha, opts) {
+          S.sel = sha;
+          S.landed = null;
+          S.hintOn = false;
+          if (!sha) S.card = null;
+          else if (!S.card || S.card.sha !== sha) {
+            S.card = { sha, detail: S.details.get(sha) || null, compare: null, files: new Map(), back: new Map() };
+            const c = find(sha);
+            if (c) void loadCard(c);
+          }
+          render();
+          if (opts && opts.center) center(sha);
+          else if (sha) keepInView(sha);
+        }
+        function center(sha) { const r = S.rmap.get(sha); if (r) scroll.scrollTop = r.cy - scroll.clientHeight * 0.32; }
+        function keepInView(sha) {
+          const r = S.rmap.get(sha);
+          if (!r) return;
+          if (r.cy < scroll.scrollTop + 40) scroll.scrollTop = r.cy - 60;
+          else if (r.cy > scroll.scrollTop + scroll.clientHeight - 60) scroll.scrollTop = r.cy - scroll.clientHeight + 120;
+        }
+        // Open the day and the fold a commit is in, so it has a row of its own.
+        function reveal(sha) {
+          const c = find(sha);
+          if (!c) return false;
+          const d = S.data.days.find((x) => x.key === c.day);
+          if (d) S.dayFold.set(d.key, false);
+          if (c.kind === 'user') S.showBranch = true;
+          return true;
+        }
+        rowsEl.addEventListener('click', (e) => {
+          const el = e.target.closest('.row');
+          if (!el || S.busy) return;
+          const r = S.rows[+el.dataset.i];
+          hideToast();
+          if (r.type === 'more') { void loadEarlier(); return; }
+          if (r.type === 'dayfold') { S.dayFold.set(r.day.key, false); keepAnchor(() => render(), r); return; }
+          if (r.type === 'dayhead') { S.dayFold.set(r.day.key, true); const s = S.sel && find(S.sel); if (s && s.day === r.day.key) select(null); keepAnchor(() => render(), r); return; }
+          if (r.type === 'cluster') { r.items.forEach((c) => S.openClusters.add(c.sha)); keepAnchor(() => render(), r); return; }
+          if (r.item && PICK.has(r.type)) {
+            if (S.sel === r.item.sha) {
+              // A second click on the selected node rewinds; a double-click is one click, not two.
+              if (e.detail > 1 || performance.now() - S.selAt < 450) return;
+              const b = card.querySelector('[data-act="rewind"]');
+              if (b && !b.disabled) void startRewind(r.item);
+            } else {
+              S.selAt = performance.now();
+              select(r.item.sha);
+            }
+          }
+          e.stopPropagation();
+        });
+        // a fold or unfold keeps the row under the pointer where it was
+        function keepAnchor(fn, r) {
+          const before = r.y - scroll.scrollTop;
+          const key = r.day ? r.day.key : null;
+          fn();
+          const again = S.rows.find((x) => (key ? x.day && x.day.key === key : x.item && r.items && x.item.sha === r.items[0].sha));
+          if (again) scroll.scrollTop = again.y - before;
+        }
+        card.addEventListener('click', (e) => {
+          const b = e.target.closest('[data-act]');
+          if (!b) return;
+          const c = S.sel && find(S.sel);
+          if (b.dataset.act === 'close') select(null);
+          if (b.dataset.act === 'rewind' && c) void startRewind(c);
+          if ((b.dataset.act === 'without' || b.dataset.act === 'anyway') && c) {
+            // The files ticked when the refusal came stay the choice.
+            const k = S.card.compare;
+            const chosen = S.card.chosen || [...k.write.map((x) => x.path), ...k.remove];
+            let docs = [];
+            try { docs = JSON.parse(b.dataset.docs || '[]'); } catch { docs = []; }
+            const keep = b.dataset.act === 'without' ? chosen.filter((p) => !docs.includes(p)) : chosen;
+            const all = k.write.length + k.remove.length;
+            if (!keep.length) {
+              S.card.refusal = { html: `<div class="refuse"><div class="note">Without ${esc(listNames(docs.map(base), 2))} there is nothing left to rewind.</div></div>`, replaces: false };
+              render();
+              return;
+            }
+            S.card.refusal = null;
+            render();
+            void startRewind(c, { paths: keep.length === all ? null : keep, anyway: b.dataset.act === 'anyway' });
+          }
+          e.stopPropagation();
+        });
+        card.addEventListener('change', (e) => {
+          const box = e.target.closest('input[data-path]');
+          if (!box) return;
+          box.closest('.nr').classList.toggle('off', !box.checked);
+          const all = $$('#card input[data-path]'), on = all.filter((b) => b.checked).length;
+          const c = find(S.sel);
+          const btn = card.querySelector('.rw[data-act="rewind"]');
+          if (!btn || !c) return;
+          btn.disabled = on === 0;
+          card.querySelector('.rwl').textContent = on === all.length ? `Rewind to ${when(c)}` : on === 0 ? 'Choose a file to rewind' : `Rewind ${plural(on, 'file')} to ${when(c)}`;
+        });
+        scroll.addEventListener('click', (e) => {
+          if (S.busy || e.target.closest('.row') || e.target.closest('#card')) return;
+          if (S.sel) select(null);
+          hideToast();
+        });
+        document.addEventListener('keydown', (e) => {
+          if (!S.data || S.busy || (e.target && e.target.closest && e.target.closest('input'))) return;
+          const picks = S.rows.filter((r) => r.item && PICK.has(r.type));
+          const i = picks.findIndex((r) => r.item.sha === S.sel);
+          if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && e.altKey) {
+            // ⌥↑ ⌥↓: the next run or event, skipping timer commits
+            e.preventDefault();
+            const step = e.key === 'ArrowDown' ? 1 : -1;
+            let j = i < 0 ? picks.length : i;
+            do { j += step; } while (j >= 0 && j < picks.length && picks[j].type === 'timer');
+            if (picks[j]) select(picks[j].item.sha);
+          } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            let j = i < 0 ? picks.length - 1 : i + (e.key === 'ArrowDown' ? 1 : -1);
+            j = Math.max(0, Math.min(picks.length - 1, j));
+            if (picks[j]) select(picks[j].item.sha);
+          } else if (e.key === 'Escape') { select(null); hideToast(); }
+          else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && S.sel) { const b = card.querySelector('[data-act="rewind"]'); if (b && !b.disabled) void startRewind(find(S.sel)); }
+          else if (e.key === 'End') { e.preventDefault(); scroll.scrollTop = scroll.scrollHeight; }
+          else if (e.key === 'Home') { e.preventDefault(); scroll.scrollTop = 0; }
+        });
+        $$('#zoom button').forEach((b) => b.addEventListener('click', () => {
+          if (!S.data) return;
+          const anchor = S.sel || null;
+          S.zoom = b.dataset.z;
+          S.dayFold = new Map();
+          S.openClusters = new Set();
+          if (anchor && S.zoom !== 'days') reveal(anchor);
+          render();
+          if (anchor && S.rmap.get(anchor) && S.rmap.get(anchor).item) center(anchor);
+          else scroll.scrollTop = scroll.scrollHeight;
+        }));
+        $('#rb-branch').addEventListener('click', () => {
+          if (!S.data || !S.data.users.length) return;
+          S.showBranch = !S.showBranch;
+          const s = S.sel && find(S.sel);
+          if (!S.showBranch && s && s.kind === 'user') select(null);
+          else render();
+        });
+        $('#rb-now').addEventListener('click', () => { scroll.scrollTop = scroll.scrollHeight; });
+        $('#rb-start').addEventListener('click', () => { scroll.scrollTop = 0; });
+        let rz;
+        window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (S.data) render(); else drawMini(); }, 60); });
+        setInterval(() => { const n = $('#now-time'); if (n) n.textContent = hm(Date.now()); }, 30_000);
+
+        /* ================= the graph from the shell ================= */
+        async function loadGraph(opts) {
+          const keep = !opts || opts.keep !== false;
+          const atBottom = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 80;
+          const g = await ask({ type: 'history', action: 'graph' });
+          if (!g || g.error) { showEmpty('error', g); return; }
+          if (S.graph && keep && S.graph.extra) {
+            // Older pages already read stay.
+            const have = new Set(g.commits.map((c) => c.sha));
+            g.commits = g.commits.concat(S.graph.extra.filter((c) => !have.has(c.sha)));
+            g.extra = S.graph.extra;
+            g.more = S.graph.extraMore;
+            g.extraMore = S.graph.extraMore;
+          }
+          S.graph = g;
+          S.compares.clear();
+          if (g.state === 'none' || !g.tip) { showEmpty(g.state === 'none' ? g.reason : g.state === 'paused' ? 'waiting' : 'begins', g); return; }
+          $('#empty').hidden = true;
+          scroll.hidden = false;
+          build();
+          const first = !S.drawn;
+          S.drawn = true;
+          if (S.sel && !find(S.sel)) select(null);
+          if (S.card && S.sel && !S.busy) {
+            // The tip moved: what a rewind would do is asked again.
+            S.card.compare = null;
+            S.card.refusal = null;
+            const c = find(S.sel);
+            if (c) void loadCard(c);
+          }
+          render();
+          if (first) {
+            if (S.at && reveal(S.at)) { const c = find(S.at); S.at = null; select(c.sha, { center: true }); }
+            else scroll.scrollTop = scroll.scrollHeight;
+          } else if (atBottom) scroll.scrollTop = scroll.scrollHeight;
+        }
+        async function loadEarlier() {
+          if (S.loading || !S.graph || !S.graph.more) return;
+          S.loading = true;
+          const oldest = S.graph.commits[S.graph.commits.length - 1];
+          const g = await ask({ type: 'history', action: 'graph', before: oldest.sha });
+          S.loading = false;
+          if (!g || g.error) return;
+          const have = new Set(S.graph.commits.map((c) => c.sha));
+          const extra = g.commits.filter((c) => !have.has(c.sha));
+          S.graph.commits = S.graph.commits.concat(extra);
+          S.graph.extra = (S.graph.extra || []).concat(extra);
+          S.graph.more = g.more && extra.length > 0;
+          S.graph.extraMore = S.graph.more;
+          const top = S.rows[1];
+          build();
+          if (top) keepAnchor(() => render(), top);
+          else render();
+        }
+        let refetch = null;
+        const refetchSoon = () => { clearTimeout(refetch); refetch = setTimeout(() => void loadGraph({ keep: true }), 250); };
+
+        if (shell) {
+          shell.on('history', (detail) => {
+            if (!detail) return;
+            if (detail.kind === 'commit' && S.graph && S.graph.state !== 'none' && S.graph.tip) {
+              // The record grew: its new commits go at the tip.
+              const have = new Set(S.graph.commits.map((c) => c.sha));
+              const fresh = (detail.commits || []).filter((c) => !have.has(c.sha));
+              if (!fresh.length) return;
+              if (S.busy) { refetchSoon(); return; }
+              const atBottom = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 80;
+              S.graph.commits = fresh.concat(S.graph.commits);
+              S.graph.tip = fresh[0].sha;
+              S.graph.total = (S.graph.total || 0) + fresh.length;
+              S.compares.clear();
+              build();
+              if (S.card && S.sel) { S.card.compare = null; const c = find(S.sel); if (c) void loadCard(c); }
+              render();
+              if (atBottom) scroll.scrollTop = scroll.scrollHeight;
+            } else if (detail.kind === 'commit' || detail.kind === 'refs') refetchSoon();
+            else if (detail.kind === 'state' && S.graph) {
+              S.graph.state = detail.state;
+              S.graph.reason = detail.reason;
+              if (!S.graph.tip || S.graph.state === 'none') { refetchSoon(); return; }
+              S.compares.clear();
+              if (S.card && S.sel && !S.busy) { S.card.compare = null; const c = find(S.sel); if (c) void loadCard(c); }
+              render();
+            } else if (detail.kind === 'focus' && detail.at && S.data) {
+              if (reveal(detail.at)) select(find(detail.at).sha, { center: true });
+            }
+          });
+          shell.on('rewind', (detail) => { if (detail) onStep(detail); });
+        }
+
+        /* ================= no record ================= */
+        // Each reason is the graph's {state: 'none', reason} (or no commit yet), said in the record's own terms.
+        function emptyHTML(v, g) {
+          const bed = (main) => `<svg width="70" height="${main ? 210 : 170}" viewBox="0 0 70 ${main ? 210 : 170}">
+              <line class="riv dot" x1="22" y1="12" x2="22" y2="${main ? 192 : 152}"/>
+              <circle cx="22" cy="12" r="4.5" fill="none" stroke="rgba(157,184,214,0.55)" stroke-width="1.5"/>
+              <circle cx="22" cy="${main ? 196 : 156}" r="6.5" fill="#2b2a2d" stroke="rgba(157,184,214,0.8)" stroke-width="1.5" stroke-dasharray="2.6 2.2"/>
+              ${main ? `<line class="trib" x1="50" y1="40" x2="50" y2="150"/>${[40, 95, 150].map((y) => `<rect x="44.5" y="${y - 5.5}" width="11" height="11" rx="3" fill="#2b2a2d" stroke="#d8d6d1" stroke-width="1.6"/>`).join('')}` : ''}
+            </svg>`;
+          const app = capital((g && g.app) || 'the app');
+          const doc = g && g.document ? base(g.document) : null;
+          const prefix = app.toUpperCase();
+          const users = g && g.commits ? g.commits.filter((c) => c.line !== 'record').slice(0, 3).reverse() : [];
+          const V = {
+            unsaved: { main: false, title: 'Not saved yet', body: `<p>${doc ? `<b>${esc(doc)}</b>` : 'This document'} is not in a folder yet, so there is nothing to record. Save it in a folder of its own, like ~/Projects/week-4, and the record begins at once: its first commit lands as the window moves onto the folder, and from then on every cell run and every minute something changes.</p><p>Each will be a point on this line, and you can go back to any of them.</p>`, foot: 'the record follows the git repository the document’s folder is in, and makes one where there is none' },
+            refused: { main: false, title: 'No record here', body: `<p>${doc ? `<b>${esc(doc)}</b>` : 'This document'} has no record: ${esc((g && g.detail) || 'its folder is not one the record keeps')}.</p><p>In a folder of its own, like ~/Documents/week-3, it is recorded from the moment it opens.</p>`, foot: 'never the home folder or its standard folders, a cloud-synced root, a temporary folder, or where credentials are kept' },
+            off: { main: false, title: 'The record is off', body: `<p>Autosave is off for ${esc(app)}, so nothing is being recorded${doc ? ` for <b>${esc(doc)}</b>` : ''}, and there is nothing to go back to.</p>`, foot: `"autosave": true in the app’s config turns it on · ${esc(prefix)}_AUTOSAVE=0 turns it off for a test` },
+            'no-git': { main: false, title: 'No git on this Mac', body: `<p>The record is kept with git, and ${esc(app)} found none. On a Mac, the developer tools bring it: <b>xcode-select --install</b> in a terminal, then open the document again.</p>`, foot: 'the record looks for git in the app’s PATH, Homebrew’s folders and /usr/bin' },
+            waiting: { main: users.length > 0, title: 'Waiting to begin', body: `<p><b>${esc(g && g.project ? g.project.name : 'This project')}</b> has no record yet, and ${esc((g && g.reason) || 'git is at work')}, so its first commit waits. It lands when that ends${users.length ? ', beside your branch, tied to it wherever they hold the same files' : ''}.</p>${users.length ? `<ul class="ucs">${users.map((u) => `<li><span class="t">${esc(dayInfo(dayKey(Date.parse(u.time))).short)}</span><span class="m">${esc(u.subject)}</span></li>`).join('')}</ul>` : ''}`, foot: `${esc(g && g.project ? g.project.branch : 'claerbout-autosave')}: no commits yet · paused while git is at work` },
+            begins: { main: users.length > 0, title: 'The record begins', body: `<p><b>${esc(g && g.project ? g.project.name : 'This project')}</b> has no record commit yet. The first lands when a window moves onto the project, then every cell run and every minute something changes.</p>`, foot: `${esc(g && g.project ? g.project.branch : 'claerbout-autosave')}: no commits yet` },
+            error: { main: false, title: 'The history could not be read', body: `<p>${esc((g && g.error) || 'The shell did not answer.')}</p><p>The record itself is untouched; the log has more.</p>`, foot: shell ? 'View › Reload tries again' : 'this page is the shell’s own: open it from the app, View › History…' },
+          }[v] || null;
+          const view = V || { main: false, title: 'No record here', body: `<p>${esc(String(v))}</p>`, foot: '' };
+          return `<div class="em"><div class="bed">${bed(view.main)}</div><div><h2>${view.title}</h2>${view.body}<div class="foot">${view.foot}</div></div></div>`;
+        }
+        function showEmpty(v, g) {
+          S.data = null;
+          scroll.hidden = true;
+          mini.hidden = true;
+          card.hidden = true;
+          const e = $('#empty');
+          e.hidden = false;
+          e.innerHTML = emptyHTML(v, g);
+          $('#t-path').textContent = g && g.project ? g.project.display : g && g.document ? base(g.document) : '';
+          $('#t-meta').textContent = v === 'off' || v === 'no-git' ? 'record off' : v === 'unsaved' || v === 'refused' ? 'no record' : g && g.project ? `no commits yet · ${g.project.branch}` : '';
+          if (g && !g.error) { S.graph = g; paintHere(); paintRec(); }
+          $$('#zoom button').forEach((b) => { b.disabled = true; b.classList.remove('on'); });
+          $('#rb-branch').disabled = true;
+        }
+
+        if (!shell) showEmpty('error', null);
+        else void loadGraph({ keep: false });
+      })();
+    </script>
+  </body>
+</html>

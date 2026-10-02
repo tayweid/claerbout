@@ -304,6 +304,147 @@ machine (on a Mac, without the developer tools) the record is off and the
 log says so. The tests (`npm run test:autosave`) run real git in
 temporary repositories under `os.tmpdir()`.
 
+## The history view
+
+The record as a path, with a rewind (`history.js`, `history/history.html`;
+the design is Knuth's `docs/mockups/history.md`, the look
+`history-recommended.html`). The record runs down the window as a river,
+oldest at the top and now at the mouth: cell runs bold (a red ring when the
+run raised), timer commits faint and folded three or more to a line, earlier
+days folded to one reach each; the user's own branches are tributaries
+beside it, tied to the record where they hold the same files. Click a node
+and a card beside it says what that commit changed (the document's cells lit
+in a strip, the changed lines, a figure drawn) and what a rewind would
+change against now, file by file, with a box to leave a file out; click the
+node again, or the card's button, to rewind.
+
+- **The window.** The shell's own page, served at
+  `<scheme>://app/_claerbout/history.html` from the `history/` folder
+  beside `main.js` (shipped in `files` and copied by `package.mjs`), checked
+  before the app's page folder, so no app's page shadows it or is reached
+  through it; the scheme is handled in every mode, so it works beside an
+  engine's pages too. One window per project, with its own remembered size
+  (`historySize`) and a hidden title bar in the suite's frame. It is opened
+  by **View › History…** (⇧⌘H) for the focused window's project, or by a
+  page's `history` request (`{type: 'history'}` or `{type: 'history',
+  action: 'open', at?}`, answered `{opened: true}`), and a second open
+  brings it forward with `history {kind: 'focus', at}`. It is never given a
+  document, so the record opens no session for it. A window with no project
+  still gets one, which says why: `unsaved` (no document path), `refused`
+  (the folder rule, in words), `off` (the config or `<PREFIX>_AUTOSAVE=0`),
+  `no-git`.
+- **Its requests,** answered only from a History window and always for
+  that window's project (the page never names a folder; a document page is
+  answered `null`, and the History page cannot read or write files):
+  - `history {action: 'graph', before?, limit?}`: `{state: 'on' | 'paused'
+    | 'none', reason, detail?, project: {root, name, display, branch}, app,
+    tip, head: {branch, sha}, branches: [{name, tip, head}], commits, more,
+    total, windows, others}`. The commits come from one `git log
+    --date-order --parents --source --numstat -z` over `--branches` with the
+    records excluded (`--exclude=claerbout-autosave
+    --exclude='claerbout-autosave-*'`) and this working tree's record by
+    name: not `--all`, which would pull in `refs/stash`, remotes and other
+    worktrees' records. Newest first, at most 2000 (`before`, a sha, pages
+    back in time). Each is `{sha, parents, line ('record' or the branch it
+    was reached by), refs, time, subject, files, plus, minus, changed (the
+    first 20 paths)}`; a record commit has its message parsed (`app`,
+    `trigger`: `run` with `cells` and `error`, `timer`, `open`, `close`,
+    `rewind-from` with `from`, `rewind-to` with `target` and, for a partial
+    one, `partial` and `paths`, or `notice`), and a user commit its `author`
+    and its `tie`: the newest record commit at or before it that holds every
+    file it holds, byte for byte (`{sha, exact: true}`), else the nearest of
+    200 (`{sha, exact: false, differs}`), else null; cached by sha for the
+    launch.
+  - `history {action: 'commit', sha}`: `{sha, parents, time, subject,
+    author, files: [{path, status, plus, minus, binary, patch?}]}` against
+    its first parent (the empty tree for a root), from `diff-tree` with no
+    external diff and no textconv; a patch is capped at 400 lines a file and
+    1 MB in all.
+  - `history {action: 'blob', sha, path}`: `{text}` (UTF-8, at most 1 MB),
+    `{binary: true, size}`, `{large: true, size}` or `{missing: true}`. The
+    page shows an SVG as an image, so nothing in a figure runs.
+  - `history {action: 'compare', sha, paths?}`: what a rewind would do now,
+    on the project's job queue like a commit: `{tip, now (the tree of a
+    fresh fill of the working tree, not committed, whose files the page can
+    read), target, onRecord, unrecorded, write: [{path, status}], remove,
+    skipped: [{path, why}], kept, same, untracked, untrackedGone, others,
+    blocked}`.
+  - `rewind {sha, tip, paths?, anyway?}`: the rewind, below.
+
+  Cells, `values.json` names and words written are the page's, worked out
+  from blob text (a percent-format file split on its `# %%` lines); the
+  shell knows git, not the apps' formats.
+- **The rewind** is a step forward that reproduces an older state, never a
+  reset: the record only grows. It runs as one job on the project's queue,
+  so the record's timer is dropped meanwhile. Refused first: `{refused:
+  'moved', tip}` when the record's tip is not the `tip` the card was drawn
+  against (a timer can commit between the card and the click; the page asks
+  again and sends it once more when nothing else changed); `{refused:
+  'paused', reason}` under the record's guards (a merge, rebase,
+  cherry-pick or revert in progress, `index.lock`, the record's branch
+  checked out or being rebased in any worktree, or a symbolic ref); and
+  `{refused: 'other-app', app, documents}` when another app's windows hold
+  a file it would write or remove, unless the request says `anyway`.
+  Nothing to write or remove is `{same: true}`. Then:
+  - **Save.** Every one of this shell's windows on the project hears `save
+    {id, reason: 'rewind'}`, at once, and has 3 seconds to answer `{type:
+    'saved', id, ok?, error?}`; one that answers `ok: false` refuses the
+    rewind (`{refused: 'unsaved', path}`), and one that does not answer is
+    passed over (the apps do not answer yet) and logged.
+  1. **Record now:** `<app>: rewind from <tip>` through the record's own
+     commit path, skipped when the working tree equals the tip.
+  2. **Write the target's files.** The set is `diff-tree --raw` between
+     the tip (after step 1) and the target: `A`, `M` and `T` paths are
+     written through a throwaway index (`read-tree <target>`, then
+     `checkout-index -f` on those paths only, never `-a`, so files that did
+     not change keep their mtimes), and a `D` path is removed (a file or
+     link, never what a link points at; its folders while empty, never past
+     the root) only when the target is on the record and the record's tip
+     the card was drawn against held it: nothing the record never held is
+     removed, and a commit on a user branch writes the files it holds and
+     removes nothing it lacks. Left alone: `untracked/` and
+     `.claerbout/untracked.json` (never written or removed), a gitlink, and
+     an `A` path where the working tree already has something (it can only
+     be a file the record does not keep, ignored or kept out as a secret).
+  3. **Record the rewind:** `<app>: rewind to <target>` (the full sha; for
+     a partial rewind its paths in brackets, `(a.py, b.json)`, or `(3
+     files)` past two), always, even when its tree equals the tip's. The
+     record prepares again first, so a target whose `.gitignore` lacks
+     `/untracked/` gets the line back before the fill.
+
+  Then every one of this shell's windows on the project hears `reload {id,
+  paths, reason: 'rewind', to}`, `paths` every file written or removed
+  (absolute), and re-reads its document if its path is among them. Answer:
+  `{ok: true, from, to, target, written, removed, skipped}`, `from` null
+  when step 1 was skipped; a git failure in step 2 or 3 is `{refused:
+  'failed', detail}`, and the next commit records whatever the folder then
+  holds. The user's HEAD, branch and index are never touched: the
+  throwaway index is the only index, the record's branch the only ref.
+  Undo is one more rewind, to the "rewind from" commit.
+- **Its events.** To the History page: `rewind {step: 'save' |
+  'record-from' | 'write' | 'record-to' | 'reload', state: 'doing' |
+  'done', detail?}` as the rewind goes, and `history {kind: 'commit',
+  commits}` (the record grew), `{kind: 'refs', branches, head}` (a branch
+  or HEAD moved), `{kind: 'state', state, reason}` (paused, or recording
+  again) and `{kind: 'focus', at}`. Every two seconds the shell looks at
+  each project a window of its is on: the record's tip (the loose ref file,
+  read; `git rev-parse` for a packed one), and with a History window open
+  the branches, HEAD and the guards.
+- **Two apps on one project.** Each shell writes which documents it has
+  open on which project to a folder every Claerbout app shares,
+  `~/Library/Application Support/Claerbout/presence/` (one file per app and
+  project, `{app, pid, root, documents}`, removed when the last window
+  leaves and at quit; a file whose pid is gone is ignored;
+  `CLAERBOUT_PRESENCE_DIR` for a test). A rewind reads them for `others`
+  and `other-app`. When the two-second look finds another app's "rewind
+  to" on the record, this shell's windows on the project hear `reload {id,
+  paths, reason: 'rewind', to, app}`.
+
+The tests (`npm run test:history`) run real git in temporary repositories
+under `os.tmpdir()`: the graph with the record, a user branch and a fork,
+the ties and paging; a commit's detail and a blob; and the rewind, its
+three steps and its refusals.
+
 ## The protocol
 
 The preload exposes `window.claerbout.request(message) → Promise`,
@@ -340,20 +481,30 @@ and mtime, is none. A `path` is taken only when it is an absolute path to
 an existing regular file (a refusal is logged once). A page opened by
 path never needs to. Answered `{path}`), `autosave {trigger}` (something
 happened in the page worth a commit on the record, `cell run [4]`; a
-notice).
+notice), `history` and `history {action: 'open', at?}` (the History window
+for this window's project, made or brought forward; answered `{opened:
+true}`; see "The history view"), `saved {id, ok?, error?}` (the answer to a
+`save` event). A History window has requests of its own (above).
 
 A request the shell does not know is logged and answered `null`.
 
 Events: `setup {kind: 'progress' | 'failed', text}` on the setup page;
-`update {state, …}` (above).
+`update {state, …}` (above); `save {id, reason: 'rewind'}` (write the open
+document now, and answer `saved`) and `reload {id, paths, reason:
+'rewind', to, app?}` (re-read the document from disk if its path is in
+`paths`: a rewind wrote or removed it), which the apps' pages answer from
+a later version of each; and to the History page, `history` and `rewind`
+(above).
 
 ## Testing here
 
 `npm test` runs the autosave tests (`test/autosave.test.mjs`, real git in
-temporary repositories), the smoke test on `test/fixture`, a page with no
-Python that reads its document through the shell and writes a copy beside
-it (and, the fixture keeping the record, checks its `session open`
-commit), and then the update test: the fixture built twice under two
+temporary repositories), the history view's (`test/history.test.mjs`,
+likewise), the smoke test on `test/fixture`, a page with no Python that
+reads its document through the shell and writes a copy beside it (and, the
+fixture keeping the record, checks its `session open` commit, then opens
+the History window and checks that its page gets a graph with that commit
+and draws it), and then the update test: the fixture built twice under two
 build ids (`CLAERBOUT_BUILD`), the first installed and updating itself to
 the second from a site folder. `npm run fixture:build` packages it. All
 need macOS.

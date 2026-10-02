@@ -73,6 +73,9 @@ const env = {
   CLAERBOUT_UV_DIR: path.join(work, 'uv-claerbout'),
   [`${PREFIX}_CHOOSE`]: mode,
   [`${PREFIX}_PORT`]: port,
+  // Which documents this app has open on which project, for the history
+  // view's rewind (history.js): a throwaway folder, not the shared one.
+  CLAERBOUT_PRESENCE_DIR: path.join(work, 'presence'),
   ...(updating ? { [`${PREFIX}_SITE`]: siteDir } : {}),
 };
 const executable = bundle ? path.join(bundle, 'Contents', 'MacOS', NAME) : null;
@@ -305,7 +308,7 @@ if (smoke.run) {
 // and its claerbout-autosave branch has the commits the config's
 // `smoke.autosave` names ("<app>: session open", and for an app whose run
 // commits, "<app>: cell run [1]"). The user's side of that repository is
-// untouched: HEAD is still unborn.
+// untouched: HEAD is still unborn. Then the history view's graph.
 if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.length > 0) {
   const folder = path.dirname(doc);
   const recorded = () => {
@@ -331,6 +334,30 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
   const head = spawnSync('git', ['-C', folder, 'rev-parse', '--verify', '-q', 'HEAD'], { encoding: 'utf8' });
   if (head.status === 0) await fail(`the autosave record touched the user's HEAD (${head.stdout.trim()})`);
   console.log(`smoke (${NAME}, ${mode}): autosave record: ${subjects.join(' | ')}`);
+
+  // The history view (history.js, history/history.html): the page asks
+  // for its project's History window, which the shell serves itself at
+  // <scheme>://app/_claerbout/history.html; that window's page asks for
+  // the graph and gets the record with its session-open commit, and draws
+  // it. The document page itself is not given the graph.
+  const opened = await page.evaluate(() => window.claerbout.request({ type: 'history' }));
+  if (opened?.opened !== true) await fail(`the history request was answered ${JSON.stringify(opened)}`);
+  const refused = await page.evaluate(() => window.claerbout.request({ type: 'history', action: 'graph' }));
+  if (refused !== null) await fail(`a document page was given the graph (${JSON.stringify(refused).slice(0, 80)})`);
+  let viewer = null;
+  for (let i = 0; i < 60 && !viewer; i++) {
+    viewer = app.windows().find((window) => window.url().includes('/_claerbout/history.html')) ?? null;
+    if (!viewer) await page.waitForTimeout(250);
+  }
+  if (!viewer) await fail('the history request opened no History window');
+  const graph = await viewer.evaluate(() => window.claerbout.request({ type: 'history', action: 'graph' }));
+  const sessionOpen = `${NAME.toLowerCase()}: session open`;
+  const opening = graph?.commits?.find((commit) => commit.line === 'record' && commit.subject === sessionOpen);
+  if (graph?.state !== 'on' || !opening || opening.trigger !== 'open' || graph.project?.branch !== 'claerbout-autosave') {
+    await fail(`the History page's graph has no "${sessionOpen}" commit on the record (${JSON.stringify(graph).slice(0, 300)})`);
+  }
+  await viewer.waitForSelector('#rows .row.t-open', { timeout: 15_000 }).catch(() => fail('the History page drew no session-open node'));
+  console.log(`smoke (${NAME}, ${mode}): history: ${graph.commits.length} ${graph.commits.length === 1 ? 'commit' : 'commits'}, tip ${graph.tip.slice(0, 10)}`);
 }
 
 await app.close();

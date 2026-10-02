@@ -11,6 +11,8 @@
     "preload.js",
     "update.js",
     "autosave.js",
+    "history.js",
+    "history/",
     "complete.sh",
     "launcher.swift",
     "package.mjs",
@@ -19,8 +21,9 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test test/autosave.test.mjs && node smoke.mjs --config test/fixture/app.json browser && node test/update.mjs",
+    "test": "node --test test/autosave.test.mjs && node --test test/history.test.mjs && node smoke.mjs --config test/fixture/app.json browser && node test/update.mjs",
     "test:autosave": "node --test test/autosave.test.mjs",
+    "test:history": "node --test test/history.test.mjs",
     "test:update": "node test/update.mjs",
     "fixture": "CLAERBOUT_APP=test/fixture/app.json electron .",
     "fixture:build": "node package.mjs --config test/fixture/app.json --install /tmp/Fixture.app"

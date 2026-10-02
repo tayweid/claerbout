@@ -21,7 +21,7 @@
 
 const { app, BrowserWindow, Menu, dialog, ipcMain, net, protocol, screen, session, shell } = require('electron');
 const { execFile, spawn } = require('node:child_process');
-const { createHash } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
@@ -444,14 +444,27 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
+/** The shell's own pages (the history view), in its own folder. */
+const shellPages = path.join(__dirname, 'history');
+const SHELL_PREFIX = '/_claerbout/';
+
 /** <scheme>://app/<path> → the bundled page. What the engine serves over
- *  HTTP, for the mode with no engine. */
+ *  HTTP, for the mode with no engine. /_claerbout/ is the shell's own
+ *  pages, from the history/ folder beside this file, checked before the
+ *  app's page folder, so no app's page can shadow them or be reached
+ *  through them. */
 async function servePage(request) {
-  let relative = decodeURIComponent(new URL(request.url).pathname);
-  if (!relative || relative === '/') relative = '/index.html';
-  const root = path.resolve(webRoot);
-  const file = path.resolve(root, `.${relative}`);
   const notFound = () => new Response('not found', { status: 404, headers: { 'Content-Type': 'text/plain' } });
+  let relative;
+  try {
+    relative = decodeURIComponent(new URL(request.url).pathname);
+  } catch {
+    return notFound();
+  }
+  if (!relative || relative === '/') relative = '/index.html';
+  const own = relative.startsWith(SHELL_PREFIX);
+  const root = path.resolve(own ? shellPages : webRoot);
+  const file = path.resolve(root, `.${own ? relative.slice(SHELL_PREFIX.length - 1) : relative}`);
   if (!file.startsWith(root + path.sep)) return notFound();
   let data;
   try {
@@ -685,7 +698,7 @@ function isOwnURL(url) {
 function setDocument(window, file) {
   documents.set(window, file);
   if (isMac) window.setRepresentedFilename(file ?? '');
-  void autosave.setDocument(window, file);
+  void autosave.setDocument(window, file).then(syncPresence);
 }
 
 /** The window's title bar, from the config: the native one (`default`),
@@ -762,7 +775,7 @@ function openWindow(url, document = null) {
   window.on('closed', () => {
     documents.delete(window);
     origins.delete(window);
-    void autosave.closed(window);
+    void autosave.closed(window).then(syncPresence);
   });
   load(window, url);
   return window;
@@ -905,6 +918,361 @@ async function dropDocument(window, file) {
   }
 }
 
+// MARK: - The history view
+
+/** The record as a path (history.js, history/history.html; Knuth's
+ *  docs/mockups/history.md): the shell's own page, served at
+ *  <scheme>://app/_claerbout/history.html, one window per project, opened
+ *  from View › History… or a page's `history` request. Its requests are
+ *  answered by answerHistory, always for that window's project: the page
+ *  never names a folder, a document page cannot ask for a graph, and the
+ *  history page cannot read or write files. */
+const history = require('./history.js');
+const appName = NAME.toLowerCase();
+/** Where every Claerbout app says which documents it has open on which
+ *  project, so a rewind can name another app's windows (history.js,
+ *  presence). CLAERBOUT_PRESENCE_DIR is for a test's throwaway folder. */
+const presence = history.presence(process.env.CLAERBOUT_PRESENCE_DIR || path.join(app.getPath('appData'), 'Claerbout', 'presence'));
+/** History window → {key, root, reason, detail, document}. */
+const historyWindows = new Map();
+/** Ties, cached by sha for the launch: root → Map. */
+const ties = new Map();
+/** How long a document page has to answer `save` before a rewind goes on
+ *  without it (the apps' pages do not answer yet). */
+const SAVE_WAIT = 3000;
+/** Saves a rewind asked for: id → {window, resolve}. */
+const saves = new Map();
+
+const tilde = (file) => (file === home || file.startsWith(home + path.sep) ? `~${file.slice(home.length)}` : file);
+
+/** This shell's document windows on a project. */
+function openOn(root) {
+  if (!autosave.enabled) return [];
+  return [...autosave.windows].filter(([window, on]) => on === root && !window.isDestroyed()).map(([window]) => window);
+}
+
+/** The History windows on a project. */
+function viewersOf(root) {
+  return [...historyWindows].filter(([window, entry]) => entry.root === root && !window.isDestroyed()).map(([window]) => window);
+}
+
+function tell(windows, name, detail) {
+  for (const window of windows) if (!window.isDestroyed()) window.webContents.send('claerbout:event', name, detail);
+}
+
+/** The project a document window is on, or why it has none: 'unsaved'
+ *  (no document path), 'refused' (a folder the record refuses, with the
+ *  rule in `detail`), 'off' (the config or <PREFIX>_AUTOSAVE=0), 'no-git'. */
+async function historyTarget(window) {
+  const file = documents.get(window) ?? null;
+  if (!autosave.enabled) return { root: null, reason: autosave.reason ?? 'off', document: file };
+  const root = await autosave.rootOf(window);
+  if (root) return { root, document: file };
+  if (!file) return { root: null, reason: 'unsaved', document: null };
+  return { root: null, reason: 'refused', detail: autosave.why(path.dirname(file)), document: file };
+}
+
+/** The History window for a document window's project, made or brought
+ *  forward (with `history {kind: 'focus', at}` when it was open). It is
+ *  never given a document, so the record opens no session for it. */
+async function openHistory(source, at = null) {
+  const wanted = typeof at === 'string' && /^[0-9a-f]{4,64}$/.test(at) ? at : null;
+  const front = (window) => {
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+    if (wanted) window.webContents.send('claerbout:event', 'history', { kind: 'focus', at: wanted });
+    return window;
+  };
+  if (source && historyWindows.has(source)) return front(source);
+  const target = source && !source.isDestroyed() ? await historyTarget(source) : { root: null, reason: 'unsaved', document: null };
+  const key = target.root ?? `none ${target.reason} ${target.document ?? ''}`;
+  for (const [window, entry] of historyWindows) if (entry.key === key && !window.isDestroyed()) return front(window);
+  const size = readPreferences().historySize;
+  const window = new BrowserWindow({
+    width: size?.[0] ?? 1100,
+    height: size?.[1] ?? 760,
+    minWidth: 560,
+    minHeight: 420,
+    backgroundColor: '#18181a',
+    // The page draws its own bar, in the suite's frame, with the lights in it.
+    ...(isMac ? { titleBarStyle: 'hiddenInset', titleBarOverlay: true, trafficLightPosition: { x: 16, y: 15 } } : {}),
+    title: target.root ? `History — ${path.basename(target.root)}` : 'History',
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      sandbox: true,
+      nodeIntegration: false,
+      spellcheck: false,
+    },
+  });
+  if (source && !source.isDestroyed()) {
+    const [x, y] = source.getPosition();
+    window.setPosition(x + 22, y + 22);
+  }
+  historyWindows.set(window, { ...target, key });
+  const contents = window.webContents;
+  // The page goes nowhere: links out open in the default browser.
+  contents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  contents.on('will-navigate', (event, url) => {
+    event.preventDefault();
+    if (/^https?:/i.test(url)) void shell.openExternal(url);
+  });
+  window.once('ready-to-show', () => window.show());
+  window.on('close', () => {
+    if (!window.isMaximized() && !window.isFullScreen()) writePreference('historySize', window.getSize());
+  });
+  window.on('closed', () => {
+    historyWindows.delete(window);
+    origins.delete(window);
+  });
+  const url = new URL(`${appOrigin}${SHELL_PREFIX}history.html`);
+  if (wanted) url.searchParams.set('at', wanted);
+  load(window, url.toString());
+  log(`history: opened for ${target.root ?? `no record (${target.reason})`}`);
+  return window;
+}
+
+/** The project a History window is on, or null. */
+function projectFor(entry) {
+  return entry?.root && autosave.enabled ? (autosave.projects.get(entry.root) ?? null) : null;
+}
+
+/** `history {action: 'graph', before?, limit?}`: the graph, with the
+ *  record's state and why there is none. */
+async function historyGraph(entry, message) {
+  const shape = { app: appName, project: null, tip: null, head: null, branches: [], commits: [], more: false, total: 0, windows: [], others: [] };
+  const project = projectFor(entry);
+  if (!project) return { ...shape, state: 'none', reason: entry?.reason ?? 'refused', detail: entry?.detail ?? null, document: entry?.document ?? null };
+  if (!ties.has(project.root)) ties.set(project.root, new Map());
+  const reason = await project.blocked();
+  const answer = await history.graph(project, {
+    before: message.before ?? null,
+    limit: Number.isInteger(message.limit) ? message.limit : history.LIMIT,
+    ties: ties.get(project.root),
+  });
+  return {
+    ...shape,
+    ...answer,
+    state: reason ? 'paused' : 'on',
+    reason,
+    project: { root: project.root, name: path.basename(project.root), display: tilde(project.root), branch: project.branchName },
+    windows: openOn(project.root).map((window) => documents.get(window)).filter(Boolean),
+    others: presence.others(project.root, appName),
+  };
+}
+
+/** Ask a document window to write its open document, for a rewind:
+ *  `save {id, reason}`, answered `{type: 'saved', id, ok?, error?}`.
+ *  {answered: false} after SAVE_WAIT. */
+function askToSave(target) {
+  return new Promise((resolve) => {
+    if (target.isDestroyed()) {
+      resolve({ answered: false });
+      return;
+    }
+    const id = randomUUID();
+    const timer = setTimeout(() => {
+      saves.delete(id);
+      resolve({ answered: false });
+    }, SAVE_WAIT);
+    saves.set(id, {
+      window: target,
+      resolve: (answer) => {
+        clearTimeout(timer);
+        saves.delete(id);
+        resolve({ answered: true, ...answer });
+      },
+    });
+    target.webContents.send('claerbout:event', 'save', { id, reason: 'rewind' });
+  });
+}
+
+/** Every one of this shell's windows on the project asked to save, at
+ *  once, each for at most SAVE_WAIT: null to go on, or {path} for a
+ *  window that answered it could not. A window that does not answer is
+ *  passed over (the apps do not answer yet), and the log says so. */
+async function saveAll(windows) {
+  const answers = await Promise.all(windows.map(askToSave));
+  for (const [i, answer] of answers.entries()) {
+    if (answer.answered && answer.ok === false) return { path: documents.get(windows[i]) ?? null, ...(answer.error ? { error: answer.error } : {}) };
+  }
+  const silent = answers.filter((answer) => !answer.answered).length;
+  if (silent > 0) log(`history: ${silent} ${silent === 1 ? 'window' : 'windows'} did not answer save within ${SAVE_WAIT / 1000} s; the rewind went on`);
+  return null;
+}
+
+/** `rewind {sha, tip, paths?, anyway?}` (history.js, rewind): the steps
+ *  as `rewind {step, state, detail?}` events to the History windows on
+ *  the project, then `reload {id, paths, reason, to}` to this shell's
+ *  windows on it, with every path written or removed. */
+async function historyRewind(entry, message) {
+  const project = projectFor(entry);
+  if (!project) return { refused: 'failed', detail: 'there is no record here' };
+  const root = project.root;
+  const viewers = () => viewersOf(root);
+  const result = await history.rewind(
+    project,
+    { sha: message.sha, tip: message.tip ?? null, paths: Array.isArray(message.paths) ? message.paths : null, anyway: message.anyway === true },
+    {
+      save: () => saveAll(openOn(root)),
+      onStep: (step, state, detail) => tell(viewers(), 'rewind', { step, state, ...(detail ? { detail } : {}) }),
+      others: () => presence.others(root, appName),
+    },
+  );
+  if (result?.ok) {
+    tell(viewers(), 'rewind', { step: 'reload', state: 'doing' });
+    const paths = [...result.written, ...result.removed].map((file) => path.join(root, ...file.split('/')));
+    tell(openOn(root), 'reload', { id: randomUUID(), paths, reason: 'rewind', to: result.target });
+    tell(viewers(), 'rewind', { step: 'reload', state: 'done' });
+    log(`history: rewound ${root} to ${result.target.slice(0, 10)}: ${result.written.length} written, ${result.removed.length} removed`);
+    void watchProjects();
+  } else if (result) {
+    log(`history: no rewind of ${root}: ${result.same ? 'nothing to change' : `${result.refused}${result.reason || result.detail ? ` (${result.reason ?? result.detail})` : ''}`}`);
+  }
+  return result;
+}
+
+/** A History window's requests: `history {action: 'graph' | 'commit' |
+ *  'blob' | 'compare'}` and `rewind`, for its own project only. */
+async function answerHistory(window, message) {
+  const entry = historyWindows.get(window);
+  const type = message?.type;
+  try {
+    if (type === 'history') {
+      const project = projectFor(entry);
+      switch (message.action) {
+        case 'graph':
+          return await historyGraph(entry, message);
+        case 'commit':
+          return project ? await history.commitDetail(project, message.sha) : null;
+        case 'blob':
+          return project ? await history.blob(project, message.sha, message.path) : null;
+        case 'compare':
+          return project
+            ? await history.compare(project, message.sha, {
+                paths: Array.isArray(message.paths) ? message.paths : null,
+                others: () => presence.others(project.root, appName),
+              })
+            : null;
+        case undefined:
+        case 'open':
+          await openHistory(window);
+          return { opened: true };
+        default:
+          return null;
+      }
+    }
+    if (type === 'rewind') return await historyRewind(entry, message);
+    if (type === 'error') {
+      log(`history page error: ${message.message ?? '?'}`);
+      return null;
+    }
+  } catch (error) {
+    return { error: error.message };
+  }
+  log(`unknown history message: ${type}`);
+  return null;
+}
+
+// What the shell last saw of each project: root → {tip, refs, state}.
+const seen = new Map();
+let watching = false;
+
+/**
+ * Every two seconds, every project with a window of this shell's on it:
+ * the record's tip (a loose ref file, read; git for a packed one). When
+ * it moved, the History windows on the project hear `history {kind:
+ * 'commit', commits}`, and a "rewind to" another app made has this
+ * shell's windows on the project told to `reload`. With a History window
+ * open, its user branches and HEAD (`history {kind: 'refs'}`) and the
+ * record's guards (`history {kind: 'state'}`) too.
+ */
+async function watchProjects() {
+  if (watching || !autosave.enabled) return;
+  watching = true;
+  try {
+    for (const [root, project] of autosave.projects) {
+      const viewers = viewersOf(root);
+      if (project.windows.size === 0 && viewers.length === 0) {
+        seen.delete(root);
+        continue;
+      }
+      const last = seen.get(root) ?? {};
+      const next = { ...last };
+      try {
+        next.tip = await history.recordTip(project);
+        if ('tip' in last && next.tip && next.tip !== last.tip) {
+          const commits = await history.recordSince(project, last.tip, next.tip);
+          if (commits.length > 0) tell(viewers, 'history', { kind: 'commit', commits });
+          for (const commit of commits) {
+            if (commit.trigger !== 'rewind-to' || commit.app === appName) continue;
+            const paths = (await history.touched(project, commit.sha)).map((file) => path.join(root, ...file.split('/')));
+            tell(openOn(root), 'reload', { id: commit.sha, paths, reason: 'rewind', to: commit.target, app: commit.app });
+            log(`history: ${commit.app} rewound ${root}; this app's windows on it reload`);
+          }
+        }
+        if (viewers.length > 0) {
+          const now = await history.refs(project);
+          if ('refs' in last && now.signature !== last.refs) tell(viewers, 'history', { kind: 'refs', branches: now.branches, head: now.head });
+          next.refs = now.signature;
+          const reason = await project.blocked();
+          if ('state' in last && reason !== last.state) tell(viewers, 'history', { kind: 'state', state: reason ? 'paused' : 'on', reason });
+          next.state = reason;
+        } else {
+          delete next.refs;
+          delete next.state;
+        }
+        delete next.failed;
+      } catch (error) {
+        if (last.failed !== error.message) log(`history: ${error.message} (${root})`);
+        next.failed = error.message;
+      }
+      seen.set(root, next);
+    }
+  } finally {
+    watching = false;
+  }
+}
+
+/** The projects this app has said it is on (presence files). */
+const present = new Set();
+
+/** This app's presence on each project it has windows on, rewritten when
+ *  a window's document changes or it closes; removed when the last goes. */
+function syncPresence() {
+  if (!autosave.enabled) return;
+  try {
+    const byRoot = new Map();
+    for (const [window, root] of autosave.windows) {
+      const file = documents.get(window);
+      if (file) byRoot.set(root, [...(byRoot.get(root) ?? []), file]);
+    }
+    for (const root of new Set([...present, ...byRoot.keys()])) {
+      presence.write(appName, root, byRoot.get(root) ?? []);
+      if (byRoot.has(root)) present.add(root);
+      else present.delete(root);
+    }
+  } catch (error) {
+    log(`history: presence not written: ${error.message}`);
+  }
+}
+
+function clearPresence() {
+  for (const root of present) {
+    try {
+      presence.remove(appName, root);
+    } catch {
+      // Gone already.
+    }
+  }
+  present.clear();
+}
+
 // MARK: - Requests from the page (src/shell.ts)
 
 async function answer(window, message) {
@@ -986,6 +1354,20 @@ async function answer(window, message) {
       // changed, and only when the window is on a project.
       void autosave.notice(window, message.trigger);
       return null;
+    case 'history':
+      // The History window for this window's project, made or brought
+      // forward: {at?} selects a commit. Only `open` (or no action) from a
+      // document page; the graph is the History window's alone.
+      if (message.action !== undefined && message.action !== 'open') return null;
+      await openHistory(window, typeof message.at === 'string' ? message.at : null);
+      return { opened: true };
+    case 'saved': {
+      // A page's answer to `save` (a rewind asked it to write its open
+      // document first): {id, ok?, error?}; ok: false refuses the rewind.
+      const pending = saves.get(message.id);
+      if (pending && pending.window === window) pending.resolve({ ok: message.ok !== false, ...(typeof message.error === 'string' ? { error: message.error } : {}) });
+      return null;
+    }
     case 'update': {
       // {action: 'install'} starts the install (the page follows it by
       // `update` events); anything else is a check, answered in full.
@@ -1016,7 +1398,7 @@ ipcMain.handle('claerbout:request', async (event, message) => {
     log(`refused a shell request from ${event.senderFrame?.url ?? 'an unknown frame'}`);
     return null;
   }
-  return answer(window, message);
+  return historyWindows.has(window) ? answerHistory(window, message) : answer(window, message);
 });
 
 // MARK: - Menu
@@ -1208,6 +1590,9 @@ function buildMenu() {
     {
       label: 'View',
       submenu: [
+        // ⌘Y is redo in both apps and ⌥⌘H is Hide Others.
+        { label: 'History…', accelerator: 'CmdOrCtrl+Shift+H', click: (_item, window) => void openHistory(window ?? BrowserWindow.getFocusedWindow() ?? null) },
+        { type: 'separator' },
         { role: 'reload' },
         { role: 'toggleDevTools' },
         { type: 'separator' },
@@ -1312,6 +1697,7 @@ if (!app.requestSingleInstanceLock()) {
   // under way goes through at once.
   let stopped = false;
   app.on('before-quit', (event) => {
+    clearPresence();
     if (stopped || (!engine.isRunning && !autosave.enabled)) return;
     event.preventDefault();
     stopped = true;
@@ -1322,6 +1708,7 @@ if (!app.requestSingleInstanceLock()) {
     protocol.handle(scheme, servePage);
     grantPermissions();
     buildMenu();
+    if (autosave.enabled) setInterval(() => void watchProjects(), 2000);
     // What the last update left behind, then a quiet look at the site:
     // only an installed app, and the pages hear of a new build.
     updater.clean();
