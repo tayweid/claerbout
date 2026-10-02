@@ -26,7 +26,7 @@ install line does the same before moving the app into place.
 ## Using it from an app
 
 ```
-npm install https://github.com/tayweid/claerbout/archive/refs/tags/v0.1.0.tar.gz
+npm install https://github.com/tayweid/claerbout/archive/refs/tags/v0.2.0.tar.gz
 ```
 
 Pin a tag: Electron's version is pinned here, and a sibling clone needs an
