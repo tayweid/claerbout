@@ -81,14 +81,18 @@
       svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; flex: 0 0 auto; }
       #title {
         flex: 1; min-width: 0; height: 30px; border-radius: 8px; background: var(--pill);
-        display: flex; align-items: center; gap: 10px; padding: 0 12px;
+        display: flex; align-items: center; gap: 10px; padding: 0 12px; overflow: hidden;
       }
       #title .ico { color: var(--frame-ink-soft); display: inline-flex; }
       #title .name { font: 15px/1 var(--serif); letter-spacing: 0.06em; color: var(--frame-ink); white-space: nowrap; }
-      /* the project's name whole, its parent folder dimmed and cut from its start (fitPath) */
-      #title .path { color: var(--frame-ink-soft); font: 12px var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-      #title .path .nm { color: var(--frame-ink); }
-      #title .meta { margin-left: auto; color: var(--frame-ink-soft); font: 11.5px var(--mono); white-space: nowrap; padding-left: 10px; }
+      /* the project's name whole, its parent folder dimmed and cut from its start, and the meta
+         giving way before either (fitPath, which also keeps the bar wide enough for the name) */
+      #title .path { display: flex; min-width: 0; color: var(--frame-ink-soft); font: 12px var(--sans); white-space: nowrap; overflow: hidden; }
+      #title .path .par { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+      #title .path .nm { flex: none; color: var(--frame-ink); }
+      #title .meta { margin-left: auto; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--frame-ink-soft); font: 11.5px var(--mono); white-space: nowrap; padding-left: 10px; }
+      /* while fitPath measures, nothing shrinks: what does not fit runs past the bar's end */
+      #title.fitting .path, #title.fitting .par, #title.fitting .meta { flex: none; min-width: auto; }
       #zoom { display: flex; height: 30px; padding: 3px; gap: 2px; border-radius: 8px; background: var(--pill); flex: 0 0 auto; }
       #zoom button { border: 0; border-radius: 6px; background: transparent; color: var(--frame-ink-soft); font: 12px var(--sans); padding: 0 10px; cursor: pointer; }
       #zoom button:hover { color: var(--frame-ink); }
@@ -854,7 +858,7 @@
           const g = S.graph, D = S.data;
           setPath(g.project ? g.project.display : '');
           const n = D.records.filter((c) => c.day === today()).length;
-          $('#t-meta').textContent = `${plural(g.total || D.records.length, 'commit')}${n ? ` · ${n} today` : ''} · ${g.project ? g.project.branch : ''}`;
+          setMeta(`${plural(g.total || D.records.length, 'commit')}${n ? ` · ${n} today` : ''}`, g.project ? g.project.branch : '');
           paintHere();
           $$('#zoom button').forEach((b) => { b.disabled = false; b.classList.toggle('on', b.dataset.z === S.zoom); });
           const rb = $('#rb-branch');
@@ -871,26 +875,64 @@
           const el = $('#t-path');
           const cut = display.lastIndexOf('/');
           el.innerHTML = cut > 0 ? `<span class="par">${esc(display.slice(0, cut + 1))}</span><span class="nm">${esc(display.slice(cut + 1))}</span>` : `<span class="nm">${esc(display)}</span>`;
+          el.title = display;
           const par = el.querySelector('.par');
           if (par) par.dataset.full = par.textContent;
         }
-        // Where the bar is short, the folder is cut from its start, so the project's name is the last thing lost.
+        // The bar's counts, and the record's branch after them: the branch is the first to go.
+        function setMeta(text, branch) {
+          const el = $('#t-meta');
+          el.dataset.short = text;
+          el.dataset.full = branch ? [text, branch].filter(Boolean).join(' · ') : text;
+          el.textContent = el.dataset.full;
+        }
+        // Where the bar is short, things give way in turn so the project's name is the last thing
+        // lost: the record's branch; then the folder the project is in, cut from its start; then
+        // the counts; then the folder altogether. The bar itself keeps room for the icon, "History"
+        // and the name, so the pills beside it give way first. Measured with nothing shrinking, in
+        // fractions of a pixel: text that overflows its box by less than one still ends in an
+        // ellipsis, and cuts the name.
         function fitPath() {
-          const el = $('#t-path'), par = el.querySelector('.par');
-          if (!par) return;
-          const full = par.dataset.full;
-          par.textContent = full;
-          par.hidden = false;
-          if (el.scrollWidth <= el.clientWidth) return;
-          let lo = 1, hi = full.length;
-          while (lo < hi) {
-            const mid = (lo + hi) >> 1;
-            par.textContent = '…' + full.slice(mid);
-            if (el.scrollWidth <= el.clientWidth) hi = mid;
-            else lo = mid + 1;
+          const title = $('#title'), el = $('#t-path'), par = el.querySelector('.par'), meta = $('#t-meta');
+          const full = par ? par.dataset.full : '';
+          title.classList.add('fitting');
+          const end = () => title.getBoundingClientRect().right - parseFloat(getComputedStyle(title).paddingRight);
+          const fits = () => {
+            const last = getComputedStyle(meta).display === 'none' ? el : meta;
+            return last.getBoundingClientRect().right <= end() + 0.01;
+          };
+          if (par) par.hidden = true;
+          meta.hidden = true;
+          title.style.minWidth = '';
+          title.style.minWidth = Math.ceil(el.getBoundingClientRect().right - title.getBoundingClientRect().left + parseFloat(getComputedStyle(title).paddingRight)) + 'px';
+          // Each stage: the meta shown (null: none), and whether the folder may be cut.
+          const metas = [...new Set([meta.dataset.full || '', meta.dataset.short || ''])].filter(Boolean);
+          const stages = [...(metas.length > 1 ? [[metas[0], false]] : []), [metas.length ? metas[metas.length - 1] : null, true], ...(metas.length ? [[null, true]] : [])];
+          let fitted = false;
+          for (const [text, cut] of stages) {
+            meta.hidden = text === null;
+            if (text !== null) meta.textContent = text;
+            if (!par) { if ((fitted = fits())) break; continue; }
+            par.hidden = false;
+            par.textContent = full;
+            if ((fitted = fits())) break;
+            if (!cut) continue;
+            // Cut from its start, as little as fits; at the most, '…/'.
+            par.textContent = '…' + full.slice(full.length - 1);
+            if (!fits()) continue;
+            let lo = 1, hi = full.length - 1;
+            while (lo < hi) {
+              const mid = (lo + hi) >> 1;
+              par.textContent = '…' + full.slice(mid);
+              if (fits()) hi = mid;
+              else lo = mid + 1;
+            }
+            par.textContent = '…' + full.slice(lo);
+            fitted = true;
+            break;
           }
-          par.textContent = '…' + full.slice(lo);
-          if (el.scrollWidth > el.clientWidth) par.hidden = true;
+          if (!fitted && par) par.hidden = true;
+          title.classList.remove('fitting');
         }
         function paintHere() {
           const g = S.graph;
@@ -1020,11 +1062,15 @@
         const svgImg = (text) => `<span class="thumb"><img alt="" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(text)}"></span>`;
 
         /* ---------- the card's content, worked out once per selection ---------- */
-        // S.card: {sha, detail, compare, extra: path → html bits, notice, refusal, steps}
+        // S.card: {sha, detail, compare, files and back: path → html bits, notice, refusal, chosen,
+        // off: the paths unticked, so a card drawn again (a figure worked out, the record moved on)
+        // keeps the choice}
         async function loadCard(c) {
           const sha = c.sha;
           const stillHere = () => S.card && S.card.sha === sha;
-          S.card = { sha, detail: S.details.get(sha) || null, compare: null, files: new Map(), back: new Map(), notice: S.card && S.card.sha === sha ? S.card.notice : null };
+          const same = S.card && S.card.sha === sha;
+          // The files unticked stay unticked when the card is asked again (the record moved on).
+          S.card = { sha, detail: S.details.get(sha) || null, compare: null, files: new Map(), back: new Map(), notice: same ? S.card.notice : null, off: same && S.card.off ? S.card.off : new Set() };
           const detailP = S.details.has(sha) ? Promise.resolve(S.details.get(sha)) : ask({ type: 'history', action: 'commit', sha }).then((d) => { if (d && !d.error) S.details.set(sha, d); return d; });
           const compareP = compareFor(sha);
           const [detail, compare] = await Promise.all([detailP, compareP]);
@@ -1205,7 +1251,8 @@
           else note = `goes back to ${t}`;
           const thumb = bits && bits.thumb && !removed ? `<div class="thumbrow">${bits.thumb}</div>` : '';
           const disabled = k.blocked || S.graph.state === 'paused' ? ' disabled' : '';
-          return `<label class="nr${warn ? ' warn' : ''}"><input type="checkbox" checked data-path="${esc(entry.path)}"${disabled}><span class="nb"><span class="fp">${esc(entry.path)}</span>${win}<span class="nn">${esc(note)}</span>${strip}${thumb}</span></label>`;
+          const off = S.card.off.has(entry.path);
+          return `<label class="nr${warn ? ' warn' : ''}${off ? ' off' : ''}"><input type="checkbox"${off ? '' : ' checked'} data-path="${esc(entry.path)}"${disabled}><span class="nb"><span class="fp">${esc(entry.path)}</span>${win}<span class="nn">${esc(note)}</span>${strip}${thumb}</span></label>`;
         }
         // A document's path inside the project, as the record names it.
         function relative(file) {
@@ -1261,10 +1308,9 @@
           if (!k) return `<div class="sec"><div class="sl">Rewinding here</div><div class="fn">Comparing with now…</div></div>`;
           if (k.error) return `<div class="sec"><div class="sl">Rewinding here</div><div class="fn">${esc(k.error)}</div></div>`;
           if (k.invalid) {
-            // A path no rewind writes (the record never makes one): the whole commit is refused.
-            return `<div class="sec"><div class="sl">Rewinding here</div><div class="other"><b>No rewind to this commit.</b> It holds <span class="eq">${esc(k.invalid.path)}</span>: ${esc(k.invalid.why)}. The record never writes such a path, so this commit was made some other way, and none of it is written into the folder.</div></div>`;
+            // A path no rewind writes, or a file the repository does not have: the whole commit is refused.
+            return `<div class="sec"><div class="sl">Rewinding here</div><div class="other">${invalidHTML(k.invalid)} None of it is written into the folder.</div></div>`;
           }
-          const t = when(c);
           const paused = k.blocked || (g.state === 'paused' ? g.reason : null);
           const after = (() => { const anchor = c.kind === 'user' ? c.tie && find(c.tie.sha) : c; return anchor && anchor.i != null ? S.data.records.length - 1 - anchor.i : null; })();
           const back = c.day === today() ? `${spanWords(Date.now() - c.t)} back` : dayInfo(c.day).short;
@@ -1282,25 +1328,12 @@
               ? `<div class="same">${esc(listNames(k.kept.map(base), 2))} ${k.kept.length === 1 ? 'is' : 'are'} new since the record last committed, so ${k.kept.length === 1 ? 'it stays' : 'they stay'}.</div>`
               : `<div class="same">${k.kept.length > 2 ? plural(k.kept.length, 'file') : esc(k.kept.join(' and '))} ${k.kept.length === 1 ? 'is' : 'are'} not in this commit, so ${k.kept.length === 1 ? 'it stays' : 'they stay'} as now.</div>`
             : '';
-          const touchedSet = new Set(entries.map(([e]) => e.path));
-          const held = (k.others || []).map((o) => ({ app: o.app, docs: o.documents.map(relative).filter((p) => touchedSet.has(p)) })).filter((o) => o.docs.length);
-          const otherH = held.length
-            ? `<div class="other"><b>${esc(listNames(held[0].docs.map(base)))} ${held[0].docs.length === 1 ? 'is' : 'are'} open in ${esc(capital(held[0].app))}</b>, a separate app, so it is not saved first. Close it there or untick it; rewound anyway, ${esc(capital(held[0].app))} reloads it when it sees the rewind.</div>`
-            : '';
           const same = k.same > 0 ? `${plural(k.same, 'other file is', 'other files are')} the same at both moments.` : '';
-          // This app's windows on the project: each is asked to save first; only the ones whose
-          // documents the rewind writes or removes reload.
-          const ownPaths = (g.windows || []).map(relative);
-          const reloading = ownPaths.filter((p) => touchedSet.has(p)).map(base);
-          const untouched = ownPaths.filter((p) => !touchedSet.has(p)).map(base);
-          const isAre = (names) => (names.length === 1 ? 'is' : 'are');
-          const windowsSay =
-            (reloading.length ? `${esc(listNames(reloading, 2))} ${isAre(reloading)} saved first and ${reloading.length === 1 ? 'reloads' : 'reload'}. ` : '') +
-            (untouched.length ? `${esc(listNames(untouched, 2))} ${isAre(untouched)} saved first; ${untouched.length === 1 ? 'it is' : 'they are'} not rewound. ` : '');
-          const head = g.head && g.head.branch ? `${esc(g.head.branch)} stays where it is, and ` : '';
+          const chosen = chosenSet(k);
+          const say = choiceSay(k, chosen);
           const refusal = S.card.refusal;
-          const button = `<div class="act foot"><button class="rw" type="button" data-act="rewind">${BACK}<span class="rwl">Rewind to ${esc(t)}</span></button><span class="kbd">or click the node again · ⌘↩</span></div>
-               <p class="fine">${windowsSay}Now is recorded first, so this can be undone; ${head}HEAD and the index are not touched (git status lists the rewound files as changed). A kernel’s memory is not rewound: cells come back stale.</p>`;
+          const button = `<div class="act foot"><button class="rw" type="button" data-act="rewind"${chosen.size ? '' : ' disabled'}>${BACK}<span class="rwl">${esc(rewindLabel(c, chosen.size, entries.length))}</span></button><span class="kbd">or click the node again · ⌘↩</span></div>
+               <p class="fine rwfine">${say.fine}</p>`;
           const action = paused
             ? `<div class="act foot"><button class="rw" type="button" disabled>${BACK}<span class="rwl">Rewind waits</span></button></div>
                <p class="why"><b>The record is paused:</b> ${esc(paused)}, and git’s work comes first. Nothing is recorded or rewound until it ends.</p>`
@@ -1308,7 +1341,60 @@
               ? refusal.html + (refusal.replaces ? '' : button)
               : button;
           return `<div class="sec"><div class="sl">Rewinding here<span>${back}${after ? ' · ' + plural(after, 'commit') + ' since' : ''}</span></div>${rowsH}${man}
-            <div class="same">${same}</div>${kept}${skippedHTML(k)}${otherH}</div>${action}`;
+            <div class="same">${same}</div>${kept}${skippedHTML(k)}<div class="held">${refusal && refusal.replaces ? '' : say.held}</div></div>${action}`;
+        }
+        // A commit no rewind writes, in words: what it holds, and how such a commit comes about.
+        function invalidHTML(v) {
+          const what = v.path ? `It holds <span class="eq">${esc(v.path)}</span>: ${esc(v.why || 'a path no rewind writes')}.` : `${esc(capital(v.why || 'it holds a path no rewind writes'))}.`;
+          const how = v.absent
+            ? 'A partial clone fetches a file only when it is asked for, and the record never asks.'
+            : 'The record never makes such a commit, so this one was made some other way.';
+          return `<b>No rewind to this commit.</b> ${what} ${how}`;
+        }
+        // Every path a rewind to this card's commit would write or remove, and those ticked.
+        const rewindPaths = (k) => [...k.write.map((x) => x.path), ...k.remove];
+        const chosenSet = (k) => new Set(rewindPaths(k).filter((p) => !S.card.off.has(p)));
+        function rewindLabel(c, on, all) {
+          return on === all ? `Rewind to ${when(c)}` : on === 0 ? 'Choose a file to rewind' : `Rewind ${plural(on, 'file')} to ${when(c)}`;
+        }
+        // What the card says that follows the files ticked: another app's document matters only
+        // while it is ticked, and of this app's windows, only those whose documents are rewound reload.
+        function choiceSay(k, chosen) {
+          const g = S.graph;
+          const held = (k.others || g.others || []).map((o) => ({ app: o.app, docs: o.documents.map(relative).filter((p) => chosen.has(p)) })).filter((o) => o.docs.length);
+          const heldH = held.length
+            ? `<div class="other"><b>${esc(listNames(held[0].docs.map(base)))} ${held[0].docs.length === 1 ? 'is' : 'are'} open in ${esc(capital(held[0].app))}</b>, a separate app, so ${held[0].docs.length === 1 ? 'it is' : 'they are'} not saved first. Close ${held[0].docs.length === 1 ? 'it' : 'them'} there or untick ${held[0].docs.length === 1 ? 'it' : 'them'}; rewound anyway, ${esc(capital(held[0].app))} reloads ${held[0].docs.length === 1 ? 'it' : 'them'} when it sees the rewind.</div>`
+            : '';
+          // This app's windows on the project: each is asked to save first.
+          const ownPaths = (g.windows || []).map(relative);
+          const reloading = ownPaths.filter((p) => chosen.has(p)).map(base);
+          const untouched = ownPaths.filter((p) => !chosen.has(p)).map(base);
+          const isAre = (names) => (names.length === 1 ? 'is' : 'are');
+          const windowsSay =
+            (reloading.length ? `${esc(listNames(reloading, 2))} ${isAre(reloading)} saved first and ${reloading.length === 1 ? 'reloads' : 'reload'}. ` : '') +
+            (untouched.length ? `${esc(listNames(untouched, 2))} ${isAre(untouched)} saved first; ${untouched.length === 1 ? 'it is' : 'they are'} not rewound. ` : '');
+          const head = g.head && g.head.branch ? `${esc(g.head.branch)} stays where it is, and ` : '';
+          return {
+            held: heldH,
+            fine: `${windowsSay}Now is recorded first, so this can be undone; ${head}HEAD and the index are not touched (git status lists the rewound files as changed). A kernel’s memory is not rewound: cells come back stale.`,
+          };
+        }
+        // A box ticked or unticked: the button, the amber box and the fine print say so at once.
+        function paintChoice() {
+          const c = S.sel && find(S.sel), k = S.card && S.card.compare;
+          if (!c || !k || k.error || k.invalid) return;
+          const chosen = chosenSet(k);
+          const btn = card.querySelector('.rw[data-act="rewind"]');
+          if (btn) {
+            btn.disabled = chosen.size === 0;
+            btn.querySelector('.rwl').textContent = rewindLabel(c, chosen.size, rewindPaths(k).length);
+          }
+          const say = choiceSay(k, chosen);
+          // An other-app refusal at the card's foot says it already, with what to do.
+          const held = card.querySelector('.held');
+          if (held) held.innerHTML = S.card.refusal && S.card.refusal.replaces ? '' : say.held;
+          const fine = card.querySelector('.rwfine');
+          if (fine) fine.innerHTML = say.fine;
         }
         function skippedHTML(k) {
           if (!k.skipped || !k.skipped.length) return '';
@@ -1317,20 +1403,20 @@
 
         /* ---------- rewind ---------- */
         function chosenPaths() {
-          const boxes = $$('#card input[data-path]');
-          const on = boxes.filter((b) => b.checked).map((b) => b.dataset.path);
-          return on.length === boxes.length ? null : on;
+          const k = S.card.compare, all = rewindPaths(k);
+          const on = all.filter((p) => !S.card.off.has(p));
+          return on.length === all.length ? null : on;
         }
         function stepsHTML(c, k, paths) {
           const g = S.graph;
           const app = capital(g.app);
           const own = (g.windows || []).map(base);
           const n = paths ? paths.length : k.write.length + k.remove.length;
-          const others = (g.others || []).filter((o) => o.documents.length);
           const target = c.sha;
-          // Only the documents this rewind writes or removes reload.
-          const rewinding = new Set(paths || [...k.write.map((x) => x.path), ...k.remove]);
+          // Only the documents this rewind writes or removes reload, here or in another app.
+          const rewinding = new Set(paths || rewindPaths(k));
           const reloading = (g.windows || []).map(relative).filter((p) => rewinding.has(p)).map(base);
+          const others = (k.others || g.others || []).filter((o) => o.documents.some((file) => rewinding.has(relative(file))));
           const labels = {
             save: own.length ? `Save ${esc(listNames(own, 2))} in ${esc(app)}` : `No ${esc(app)} window on this project to save`,
             'record-from': `Record now: <span class="sha">${esc(g.app)}: rewind from ${short(k.tip)}</span>`,
@@ -1374,13 +1460,12 @@
           const options = opts || {};
           const paths = options.paths !== undefined ? options.paths : chosenPaths();
           if (paths && !paths.length) return;
-          S.card.chosen = paths || [...k.write.map((x) => x.path), ...k.remove];
+          S.card.chosen = paths || rewindPaths(k);
+          S.card.off = new Set(rewindPaths(k).filter((p) => !S.card.chosen.includes(p)));
           if (S.card.refusal || S.card.notice) {
             S.card.refusal = null;
             S.card.notice = null;
             render();
-            // The boxes as they were chosen, again.
-            $$('#card input[data-path]').forEach((b) => { b.checked = S.card.chosen.includes(b.dataset.path); b.closest('.nr').classList.toggle('off', !b.checked); });
           }
           setBusy(true);
           S.hintOn = false;
@@ -1396,7 +1481,6 @@
           else card.appendChild(steps);
           fitCard();
           showSteps();
-          card.querySelectorAll('img').forEach((img) => { if (!img.complete) img.addEventListener('load', showSteps, { once: true }); });
           const before = S.graph.tip;
           const result = await ask({ type: 'rewind', sha: c.sha, tip: k.tip, ...(paths ? { paths } : {}), ...(options.anyway ? { anyway: true } : {}) });
           setBusy(false);
@@ -1437,7 +1521,8 @@
           }
           S.card.refusal = { html: refusalHTML(result, ctx), replaces: !!(result && result.refused === 'other-app') };
           render();
-          // The refusal, and what can be done about it, in sight at the card's foot.
+          // The refusal, and what can be done about it, in sight at the card's foot (again as each
+          // figure above it finishes drawing: the card's load listener).
           card.scrollTop = card.scrollHeight;
         }
         function refusalHTML(result, ctx) {
@@ -1454,7 +1539,7 @@
             case 'paused':
               return block(`<p class="why"><b>The record is paused:</b> ${esc(result.reason)}. Nothing has been written.</p>`);
             case 'invalid':
-              return block(`<div class="other"><b>No rewind to this commit.</b> ${result.path ? `It holds <span class="eq">${esc(result.path)}</span>: ` : ''}${esc(result.why || 'a path no rewind writes')}. The record never writes such a path, so this commit was made some other way. Nothing has been recorded or written.</div>`);
+              return block(`<div class="other">${invalidHTML(result)} Nothing has been recorded or written.</div>`);
             case 'unsaved':
               return block(`<div class="other"><b>${esc(base(result.path || 'A document'))} could not be saved${result.error ? `: ${esc(result.error)}` : ''}.</b> Nothing has been written.</div>`);
             case 'moved':
@@ -1554,7 +1639,7 @@
           S.hintOn = false;
           if (!sha) S.card = null;
           else if (!S.card || S.card.sha !== sha) {
-            S.card = { sha, detail: S.details.get(sha) || null, compare: null, files: new Map(), back: new Map() };
+            S.card = { sha, detail: S.details.get(sha) || null, compare: null, files: new Map(), back: new Map(), off: new Set() };
             const c = find(sha);
             if (c) void loadCard(c);
           }
@@ -1635,15 +1720,20 @@
         });
         card.addEventListener('change', (e) => {
           const box = e.target.closest('input[data-path]');
-          if (!box) return;
+          if (!box || !S.card) return;
+          if (box.checked) S.card.off.delete(box.dataset.path);
+          else S.card.off.add(box.dataset.path);
           box.closest('.nr').classList.toggle('off', !box.checked);
-          const all = $$('#card input[data-path]'), on = all.filter((b) => b.checked).length;
-          const c = find(S.sel);
-          const btn = card.querySelector('.rw[data-act="rewind"]');
-          if (!btn || !c) return;
-          btn.disabled = on === 0;
-          card.querySelector('.rwl').textContent = on === all.length ? `Rewind to ${when(c)}` : on === 0 ? 'Choose a file to rewind' : `Rewind ${plural(on, 'file')} to ${when(c)}`;
+          paintChoice();
         });
+        // A figure that finishes drawing after the card is laid out makes it taller: the card is
+        // fitted again, and what must be in sight stays so: a running rewind's steps, or a
+        // refusal's buttons at the card's foot. (load does not bubble: heard on the way down.)
+        card.addEventListener('load', () => {
+          fitCard();
+          if (S.busy) showSteps();
+          else if (S.card && S.card.refusal) card.scrollTop = card.scrollHeight;
+        }, true);
         scroll.addEventListener('click', (e) => {
           if (S.busy || e.target.closest('.row') || e.target.closest('#card')) return;
           if (S.sel) select(null);
@@ -1834,7 +1924,9 @@
           e.innerHTML = emptyHTML(v, g);
           placeBed();
           setPath(g && g.project ? g.project.display : g && g.document ? base(g.document) : '');
-          $('#t-meta').textContent = v === 'off' || v === 'no-git' ? 'record off' : v === 'unsaved' || v === 'refused' ? 'no record' : g && g.project ? `no commits yet · ${g.project.branch}` : '';
+          if (v === 'off' || v === 'no-git') setMeta('record off');
+          else if (v === 'unsaved' || v === 'refused') setMeta('no record');
+          else setMeta(g && g.project ? 'no commits yet' : '', g && g.project ? g.project.branch : '');
           if (g && !g.error) { S.graph = g; paintHere(); paintRec(); }
           fitPath();
           $$('#zoom button').forEach((b) => { b.disabled = true; b.classList.remove('on'); });

@@ -15,7 +15,8 @@
 // that cannot run, and a failure every tick said once; and from the third:
 // a document path in another letter case or in its firmlink form is judged
 // as the folder it opens, and the .gitignore line is anchored, so a folder
-// named untracked deeper down stays the user's.
+// named untracked deeper down stays the user's; and from the history view's
+// third pass: untracked/ stays out of a fill while .gitignore lacks the line.
 // Everything lives under os.tmpdir(); the user's git configuration is kept
 // out (GIT_CONFIG_GLOBAL points at an empty file), so the fallback
 // identity is what a bare machine gets.
@@ -1057,6 +1058,28 @@ test('the .gitignore line is anchored: a folder named untracked deeper down stay
   assert.equal((await project.commit('timer')).committed, true);
   assert.ok(!tree(dir).some((entry) => entry.startsWith('untracked/')));
   assert.deepEqual(JSON.parse(sh(dir, 'show', `${BRANCH}:.claerbout/untracked.json`)).files.map((entry) => entry.path), ['untracked/data.bin']);
+});
+
+test('while the manifest is kept, a fill leaves the top untracked/ out even when .gitignore lacks the line, and drops it from the kept index', async () => {
+  const dir = folder('no-line');
+  fs.mkdirSync(path.join(dir, 'tests', 'untracked'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'tests', 'untracked', 'fixture.txt'), 'deeper down\n');
+  fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 1\n');
+  const project = await projectAt(dir);
+  await project.prepare();
+  fs.writeFileSync(path.join(dir, 'untracked', 'big.bin'), 'big\n');
+  assert.equal((await project.commit('timer')).committed, true);
+  // Another tool (or another shell's rewind) writes .gitignore without the
+  // line, and an earlier build's fill had put untracked/ into the kept index.
+  fs.writeFileSync(path.join(dir, '.gitignore'), 'build/\n');
+  execFileSync(binary, ['update-index', '--add', 'untracked/big.bin'], { cwd: dir, env: { ...process.env, GIT_INDEX_FILE: project.index } });
+  fs.writeFileSync(path.join(dir, 'untracked', 'more.bin'), 'more\n');
+  fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 2\n');
+  assert.equal((await project.commit('timer')).committed, true);
+  const recorded = tree(dir);
+  assert.ok(!recorded.some((entry) => entry.startsWith('untracked/')), `untracked/ stayed out (${recorded.join(', ')})`);
+  assert.ok(recorded.includes('tests/untracked/fixture.txt'), 'a folder named untracked deeper down is recorded');
+  assert.deepEqual(JSON.parse(sh(dir, 'show', `${BRANCH}:.claerbout/untracked.json`)).files.map((entry) => entry.path), ['untracked/big.bin', 'untracked/more.bin'], 'and the manifest pins it');
 });
 
 /** Whether the volume the tests run on ignores letter case (a Mac's, as a rule). */

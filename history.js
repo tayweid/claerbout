@@ -20,26 +20,32 @@
 // holds it: nothing the record never held is removed, and a commit on a
 // user branch writes only the files it holds.
 //
-// Before anything is recorded or touched, every path the target holds is
-// checked twice: here (no empty, '.' or '..' name, not absolute, no .git
-// in any case or HFS+ spelling, nothing under another of its entries that
-// is a link or a nested repository) and by git itself (`read-tree` into
-// the throwaway index the write then uses). A target that fails either is
-// refused whole. On the disk, every removal and every write walks from the
-// project's root with lstat and never goes through a link; and paths are
-// compared as the volume compares them (Unicode form always, case on a
-// volume that ignores it, as macOS's does), so Untracked/ is untracked/.
+// Before anything is recorded or touched, the target is checked twice:
+// here (git can list its tree; no empty, '.' or '..' name, not absolute,
+// no .git in any case or HFS+ spelling, nothing under another of its
+// entries that is a link or a nested repository; and every file and link
+// it holds is in the repository as a blob, which a tree object under a
+// file's mode or a partial clone's unfetched blob is not) and by git itself
+// (`read-tree` into the throwaway index the write then uses). A target
+// that fails either is refused whole, and the card says so before the
+// click (compare makes both checks too). On the disk, every removal and
+// every write walks from the project's root with lstat and never goes
+// through a link; and paths are compared as the volume compares them
+// (Unicode form always, case on a volume that ignores it, as macOS's
+// does), so Untracked/ is untracked/. The top .gitignore is written by the
+// rewind itself, with the record's /untracked/ line in it, and renamed
+// into place, so another app's fill never finds one without the line.
 //
 // Every function takes the autosave Project for the window's project and
 // runs git through it (its environment, its guards, its job queue), so
 // all of this runs under node:test without Electron.
 'use strict';
 
-const { createHash } = require('node:crypto');
+const { createHash, randomBytes } = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
-const { BRANCH_NAME, MANIFEST_PATH, UNTRACKED, errorLine } = require('./autosave.js');
+const { BRANCH_NAME, MANIFEST_PATH, UNTRACKED, IGNORE_LINES, errorLine } = require('./autosave.js');
 
 const LIMIT = 2000;
 const MOST = 5000;
@@ -238,24 +244,55 @@ async function rawDiff(project, a, b) {
   return entries;
 }
 
-/** Every entry a tree holds, files, links and gitlinks: [{mode, path}]. */
+/** Every entry a tree holds, files, links and gitlinks: [{mode, object,
+ *  path}]. */
 async function entriesIn(project, tree) {
   return nul(ok(await project.git(['ls-tree', '-r', '-z', '--full-tree', tree]), 'ls-tree')).map((line) => {
     const tab = line.indexOf('\t');
-    return { mode: line.slice(0, line.indexOf(' ')), path: line.slice(tab + 1) };
+    const [mode, , object] = line.slice(0, tab).split(' ');
+    return { mode, object, path: line.slice(tab + 1) };
   });
 }
 
+/** What git keeps under each name: name → 'blob', 'tree', 'commit',
+ *  'tag' or 'missing'; one `cat-file --batch-check`. git never fetches a
+ *  partial clone's missing object here (GIT_NO_LAZY_FETCH, autosave.js),
+ *  so one that was never fetched is 'missing'. */
+async function objectTypes(project, names) {
+  const unique = [...new Set(names)];
+  const types = new Map();
+  if (unique.length === 0) return types;
+  const text = ok(await project.git(['cat-file', '--batch-check=%(objectname) %(objecttype)'], { input: `${unique.join('\n')}\n` }), 'cat-file --batch-check');
+  for (const line of text.split('\n')) {
+    const [name, type] = line.split(' ');
+    if (name && type) types.set(name, type);
+  }
+  return types;
+}
+
+/** {path: null, why} for a tree git cannot read, from git's own line. */
+const unreadable = (error) => ({ path: null, why: `git cannot read this commit's tree (${error.message.replace(/^git [a-z-]+: /, '')})` });
+
 /**
- * Why a tree is no tree a rewind writes, or null: every path it holds must
- * pass badPath, and none may lie under another of its entries that is a
- * symbolic link or a nested repository (compared as the volume compares
- * names, so `Sub`, a link, and `sub/x` collide on a volume that ignores
- * case). git's own check comes after (read-tree, in the rewind). {path,
- * why} for the first that fails: the whole rewind is refused.
+ * Why a tree is no tree a rewind writes, or null: git must be able to list
+ * it; every path it holds must pass badPath, and none may lie under
+ * another of its entries that is a symbolic link or a nested repository
+ * (compared as the volume compares names, so `Sub`, a link, and `sub/x`
+ * collide on a volume that ignores case); and every file and link it holds
+ * (but the record's own, which no rewind writes) must be in the repository
+ * as a blob. checkout-index finds out only as it writes, after it has
+ * removed the file it replaces, so a tree object under a file's mode, or a
+ * blob a partial clone never fetched (`absent`), would leave the folder
+ * half rewound. git's own check comes after (read-tree). {path, why,
+ * absent?} for the first that fails: the whole rewind is refused.
  */
 async function checkTree(project, tree, fold) {
-  const entries = await entriesIn(project, tree);
+  let entries;
+  try {
+    entries = await entriesIn(project, tree);
+  } catch (error) {
+    return unreadable(error);
+  }
   const leaves = new Set(entries.filter((entry) => entry.mode === '120000' || entry.mode === GITLINK).map((entry) => fold(entry.path)));
   for (const entry of entries) {
     const why = badPath(entry.path);
@@ -265,6 +302,14 @@ async function checkTree(project, tree, fold) {
       const lead = parts.slice(0, i).join('/');
       if (leaves.has(lead)) return { path: entry.path, why: `it lies under ${entry.path.split('/').slice(0, i).join('/')}, a symbolic link or a nested repository in that commit` };
     }
+  }
+  const files = entries.filter((entry) => entry.mode !== GITLINK && !recordOwn(entry.path, fold));
+  const types = await objectTypes(project, files.map((entry) => entry.object));
+  for (const entry of files) {
+    const type = types.get(entry.object) ?? 'missing';
+    if (type === 'blob') continue;
+    if (type === 'missing') return { path: entry.path, why: 'its contents are not in this repository', absent: true };
+    return { path: entry.path, why: `it is a ${type} in that commit, not a file` };
   }
   return null;
 }
@@ -674,7 +719,9 @@ function obstacle(root, file, { added, removing = null, fold = (name) => name, g
  * that becomes a file, is written once the removal clears it. `paths`,
  * when given, keeps the set to those (folded as the volume compares
  * them), and a removal left out keeps its way blocked. A target that
- * fails checkTree is {invalid: {path, why}} and nothing else. Answer:
+ * fails checkTree, or whose tree git cannot diff, is {invalid: {path,
+ * why, absent?}} and nothing else: checked whole, whatever `paths`
+ * keeps, so a choice of files never makes such a commit writable. Answer:
  * {write: [{path, status}], remove: [path], skipped: [{path, why}], kept:
  * [path] (removals the rules forbid), full (the set's size before
  * `paths`)}.
@@ -689,7 +736,13 @@ async function rewindSet(project, { base, target, held, onRecord, paths = null }
   const kept = [];
   const removals = [];
   const writes = [];
-  for (const entry of await rawDiff(project, base, target)) {
+  let diff;
+  try {
+    diff = await rawDiff(project, base, target);
+  } catch (error) {
+    return refused(unreadable(error));
+  }
+  for (const entry of diff) {
     const why = badPath(entry.path);
     if (why) return refused({ path: entry.path, why });
     if (recordOwn(entry.path, fold)) continue;
@@ -796,7 +849,8 @@ function relativeTo(root, file) {
  * What a rewind to `sha` would do now, on the project's job queue like a
  * commit: {tip, now, target, onRecord, unrecorded, write, remove, skipped,
  * kept, same, untracked, untrackedGone, others, blocked}, and `invalid`
- * ({path, why}, with nothing to write) for a target no rewind writes.
+ * ({path, why, absent?}, with nothing to write) for a target no rewind
+ * writes: the rewind's own checks, git's read-tree among them.
  * `now` is the tree of a fresh fill of the working tree (written, not
  * committed), so the page can read now's files from it; while a guard
  * holds, nothing is filled and `now` is the tip's tree. `others()` is
@@ -821,7 +875,14 @@ function compare(project, sha, { paths = null, others = () => [] } = {}) {
       }
       const targetTree = await treeOf(project, target);
       const onRecord = await onTheRecord(project, target, tip);
-      const set = await rewindSet(project, { base: now, target: targetTree, held: await pathsIn(project, tipTree), onRecord, paths });
+      let set = await rewindSet(project, { base: now, target: targetTree, held: await pathsIn(project, tipTree), onRecord, paths });
+      if (!set.invalid) {
+        // git's own check, as the rewind makes it, so the card never offers
+        // a rewind that a click would refuse: the throwaway index is dropped.
+        const read = await readTarget(project, target);
+        if (read.refused) set = { invalid: refusedByGit(read.refused) };
+        else await dropIndex(read.index);
+      }
       const answer = { tip, now, target, onRecord, others: others(), blocked: blocked ?? null };
       if (set.invalid) {
         return { ...answer, invalid: set.invalid, unrecorded: [], write: [], remove: [], skipped: [], kept: [], same: 0, untracked: false, untrackedGone: [] };
@@ -914,6 +975,14 @@ async function readTarget(project, target) {
   return { refused: errorLine(read.stderr) || `git read-tree failed (${read.status})` };
 }
 
+/** A target git's read-tree refused: {path, why}, with the path git's
+ *  line names, when it names one. */
+function refusedByGit(line) {
+  const named = line.match(/'([^']+)'/);
+  const said = line.replace(/^(error|fatal): /, '');
+  return named ? { path: named[1], why: `git refuses it (${said})` } : { path: null, why: `git refuses a path in it (${said})` };
+}
+
 async function dropIndex(index) {
   await fsp.rm(index, { force: true });
   await fsp.rm(`${index}.lock`, { force: true });
@@ -926,16 +995,78 @@ async function writeFiles(project, index, paths) {
   ok(await project.git(['checkout-index', '-f', '-z', '--stdin'], { env: { GIT_INDEX_FILE: index }, input: `${paths.join('\0')}\0` }), 'checkout-index');
 }
 
+/** Whether git's rules ignore untracked/ with `text` as the top
+ *  .gitignore: asked of git as prepare() asks it (check-ignore), in a
+ *  scratch folder of the shell's state that holds that .gitignore alone,
+ *  with the repository's own info/exclude and excludes file. */
+async function ignoresUntracked(project, text) {
+  await fsp.mkdir(project.stateDir, { recursive: true });
+  const scratch = await fsp.mkdtemp(path.join(project.stateDir, 'ignore-'));
+  try {
+    await fsp.writeFile(path.join(scratch, '.gitignore'), text);
+    const asked = await project.git(['-C', scratch, `--git-dir=${path.resolve(project.root, project.gitDir)}`, '--work-tree=.', 'check-ignore', '-q', `${UNTRACKED}/`]);
+    return asked.status === 0;
+  } finally {
+    await fsp.rm(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The top .gitignore, written by the rewind itself, never by
+ * checkout-index: the target's (in `tree`; none when null), with the
+ * record's /untracked/ line appended where prepare() would append it (the
+ * manifest kept, and the rules, that .gitignore among them, not ignoring
+ * untracked/ without it), written to a new file beside it and renamed over
+ * it. So the working tree never holds a .gitignore without the line, not
+ * for a moment: checkout-index would write the target's first and every
+ * other file after it, and another app's fill in that gap could take
+ * untracked/ into the record, which is never pruned. A rename replaces a
+ * link rather than following it. true when written; null when the target
+ * has none and the record needs no line (it is removed as any file is);
+ * or why it was left.
+ */
+async function writeIgnore(project, file, tree) {
+  let text = Buffer.alloc(0);
+  let mode = '100644';
+  if (tree) {
+    const listed = nul(ok(await project.git(['ls-tree', '-z', tree, '--', file], { env: { GIT_LITERAL_PATHSPECS: '1' } }), 'ls-tree'))[0];
+    if (!listed) throw new Error(`${file} is not in the target`);
+    const [entryMode, , object] = listed.slice(0, listed.indexOf('\t')).split(' ');
+    mode = entryMode;
+    const read = await project.git(['cat-file', 'blob', object], { encoding: 'buffer' });
+    if (read.status !== 0) throw new Error(`git cat-file: ${errorLine(read.stderr) || read.status}`);
+    text = read.stdout;
+  }
+  const line = project.manifest && !(await ignoresUntracked(project, text)) ? IGNORE_LINES : '';
+  if (!tree && !line) return null;
+  const full = path.join(project.root, file);
+  try {
+    if ((await fsp.lstat(full)).isDirectory()) return 'a folder is there now';
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  const lead = line && text.length > 0 && text[text.length - 1] !== 0x0a ? '\n' : '';
+  const staged = path.join(project.root, `.gitignore.claerbout-${process.pid}-${randomBytes(4).toString('hex')}`);
+  try {
+    await fsp.writeFile(staged, Buffer.concat([text, Buffer.from(lead + line)]), { flag: 'wx', mode: mode === '100755' ? 0o777 : 0o666 });
+    await fsp.rename(staged, full);
+  } finally {
+    await fsp.rm(staged, { force: true });
+  }
+  return true;
+}
+
 /**
  * The rewind, as one job on the project's queue (so the record's timer is
  * dropped while it runs): `{sha, tip, paths?, anyway?}`.
  *
  * Checks, before anything is recorded or touched: the record's tip must
  * still be `tip`, else {refused: 'moved', tip}; no guard may hold, else
- * {refused: 'paused', reason}; every path the target holds must pass
- * checkTree and git's own read-tree, else {refused: 'invalid', path?,
- * why}; another app's windows holding a file the rewind writes or removes
- * refuse it, {refused: 'other-app', app, documents}, unless `anyway`;
+ * {refused: 'paused', reason}; the target must pass checkTree (its paths,
+ * and every file and link a blob that is here) and git's own read-tree,
+ * else {refused: 'invalid', path, why, absent?}, `path` null when git
+ * names none; another app's windows holding a file the rewind writes or
+ * removes refuse it, {refused: 'other-app', app, documents}, unless `anyway`;
  * nothing to write or remove is {same: true}. Then `save()` asks this
  * shell's windows on the project to save: it answers {unsaved: {path,
  * error?}} when a window answered that it could not, which refuses the
@@ -947,11 +1078,12 @@ async function writeFiles(project, index, paths) {
  *    commit path, skipped when the working tree equals the tip.
  * 2. Write the target's files: the set again, against the tip after step
  *    1; removals first, then the writes (each path asked again whether
- *    anything is in its way), from the index read-tree made. The record's
+ *    anything is in its way), from the index read-tree made, but for the
+ *    top .gitignore, which writeIgnore writes with the record's line in it
+ *    (and which, when the set removes it, becomes that line alone), so the
+ *    working tree never holds one without the line. The record's
  *    `prepared` is cleared before anything is touched, and the record
- *    prepares again as soon as the step ends, whether it finished or not:
- *    a target's .gitignore without /untracked/ gets the line back at once,
- *    so no fill takes untracked/ in.
+ *    prepares again as soon as the step ends, whether it finished or not.
  * 3. Record the rewind: "<app>: rewind to <target>" (with its paths for a
  *    partial one), always.
  *
@@ -987,14 +1119,14 @@ function rewind(project, request, { save = async () => null, onStep = () => {}, 
       }
       const planned = await rewindSet(project, { base: now, target: targetTree, held, onRecord, paths });
       if (planned.invalid) return { refused: 'invalid', ...planned.invalid };
+      const read = await readTarget(project, target);
+      if (read.refused) return { refused: 'invalid', ...refusedByGit(read.refused) };
+      index = read.index;
       if (!request.anyway) {
         const holder = heldElsewhere(project, others(), planned);
         if (holder) return { refused: 'other-app', ...holder };
       }
       if (planned.write.length + planned.remove.length === 0) return { same: true };
-      const read = await readTarget(project, target);
-      if (read.refused) return { refused: 'invalid', why: `git refuses a path in it: ${read.refused}` };
-      index = read.index;
 
       step = 'save';
       onStep('save', 'doing');
@@ -1022,8 +1154,15 @@ function rewind(project, request, { save = async () => null, onStep = () => {}, 
         const base = await treeOf(project, (await project.tip()) ?? tip);
         set = await rewindSet(project, { base, target: targetTree, held, onRecord, paths });
         if (set.invalid) throw new Error(`${set.invalid.path}: ${set.invalid.why}`);
+        // The top .gitignore is never checkout-index's: writeIgnore keeps
+        // the record's line in it throughout.
+        const fold = foldFor(project.root);
+        const isIgnore = (file) => fold(file) === fold('.gitignore');
         for (const file of set.remove) {
-          const gone = await removePath(project.root, file);
+          // A .gitignore the target lacks becomes the record's line alone,
+          // when the record needs one, rather than going.
+          let gone = isIgnore(file) ? await writeIgnore(project, file, null) : null;
+          if (gone === null) gone = await removePath(project.root, file);
           if (gone === true) removed.push(file);
           else if (gone) set.skipped.push({ path: file, why: `${gone}, so it was not removed` });
         }
@@ -1034,10 +1173,19 @@ function rewind(project, request, { save = async () => null, onStep = () => {}, 
           if (why) set.skipped.push({ path: entry.path, why });
           else written.push(entry.path);
         }
-        await writeFiles(project, index, written);
+        // .gitignore first, as checkout-index would sort it, then the rest.
+        const ignore = written.find(isIgnore);
+        if (ignore) {
+          const left = await writeIgnore(project, ignore, targetTree);
+          if (left !== true) {
+            written.splice(written.indexOf(ignore), 1);
+            set.skipped.push({ path: ignore, why: left });
+          }
+        }
+        await writeFiles(project, index, written.filter((file) => file !== ignore));
       } finally {
-        // The target's .gitignore may lack the /untracked/ line: the record
-        // prepares now, not at the next fill, which may be another app's.
+        // Whatever the step did, the record prepares now, not at the next
+        // fill, which may be another app's.
         await project.prepare().catch(() => {
           project.prepared = false;
         });

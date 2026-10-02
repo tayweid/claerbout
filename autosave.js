@@ -40,7 +40,8 @@
 // already ignore untracked/) and .claerbout/untracked.json, never through
 // a symbolic link: a link (or anything else that is not a folder or a
 // file) at any of those names turns the manifest off for that project,
-// said once.
+// said once. While the manifest is kept, a fill leaves the top untracked/
+// out by pathspec as well, whatever .gitignore says at that moment.
 //
 // Triggers: a page's `autosave` notice ("cell run [4]"), a timer per open
 // project (a tick while a job runs is dropped), `session open` when the
@@ -121,6 +122,12 @@ const SECRET_FOLDERS = ['.env', '.aws', '.ssh', '.gnupg'];
 const SECRETS = [...SECRET_FILES, ...SECRET_FOLDERS.map((name) => `${name}/`)];
 const IDENTITY = { name: 'Claerbout Autosave', email: 'autosave@claerbout.local' };
 const UNTRACKED = 'untracked';
+/** What the record appends to .gitignore (prepare(), and a rewind that
+ *  writes a .gitignore itself, history.js). Anchored: an unanchored
+ *  untracked/ would ignore every folder of that name at any depth
+ *  (tests/untracked/), in the user's own git as well as the record's,
+ *  while the manifest covers only the top one. */
+const IGNORE_LINES = `# Claerbout: large data, caches and scratch, pinned by .claerbout/untracked.json\n/${UNTRACKED}/\n`;
 const MANIFEST = path.join('.claerbout', 'untracked.json');
 const MANIFEST_PATH = MANIFEST.split(path.sep).join('/');
 const DEFAULT_INTERVAL_MS = 60 * 1000;
@@ -702,6 +709,8 @@ class Project {
     this.prepared = false;
     /** untracked/ and .claerbout/ are folders: the manifest is kept. */
     this.manifest = true;
+    /** core.ignorecase, asked once (caseless()). */
+    this.ignoreCase = null;
     /** One git job at a time per project, and how many are queued. */
     this.queue = Promise.resolve();
     this.pending = 0;
@@ -798,10 +807,7 @@ class Project {
       this.prepared = true;
       return;
     }
-    // Anchored: an unanchored untracked/ would ignore every folder of that
-    // name at any depth (tests/untracked/), in the user's own git as well
-    // as the record's, and the manifest covers only the top one.
-    const line = `# Claerbout: large data, caches and scratch, pinned by .claerbout/untracked.json\n/${UNTRACKED}/\n`;
+    const line = IGNORE_LINES;
     if (kind === 'missing') {
       await fsp.writeFile(file, line, { flag: 'wx' });
     } else {
@@ -933,18 +939,34 @@ class Project {
     }
   }
 
+  /** Whether git compares names ignoring case (core.ignorecase, which git
+   *  init sets on such a volume, as a Mac's is): its ignore rules then
+   *  match /untracked/ in any case, and so does the record's own pathspec
+   *  for it. Asked once. */
+  async caseless() {
+    if (this.ignoreCase === null) this.ignoreCase = (await this.git(['config', '--bool', '--get', 'core.ignorecase'])).stdout.trim() === 'true';
+    return this.ignoreCase;
+  }
+
   /**
    * The temporary index made to match the working tree; its tree. `git add
    * -A --ignore-errors` skips what it cannot read (exit 1; each file said
    * once) and a nested repository without a commit (left out from then
    * on); entries the ignore rules or the secrets now match leave the kept
    * index (git add never drops a path the index already has); and the
-   * manifest and .gitignore go in whatever the ignore rules say. A clean
-   * filter that cannot run (git-lfs not installed, with
-   * filter.<name>.required) is a Skip, said once.
+   * manifest and .gitignore go in whatever the ignore rules say. While the
+   * manifest is kept, the top untracked/ is left out by pathspec too, not
+   * only by its .gitignore line: a moment in which .gitignore lacks the
+   * line (another tool rewriting it, or another shell's rewind) cannot let
+   * it in, and once in, the record never prunes it. A clean filter that
+   * cannot run (git-lfs not installed, with filter.<name>.required) is a
+   * Skip, said once.
    */
   async fill(env) {
     await this.recheckExcluded();
+    // The top untracked/ as a pathspec, `exclude,` for git add, '' to match it.
+    const icase = this.manifest && (await this.caseless()) ? ',icase' : '';
+    const own = (magic) => (this.manifest ? [`:(${magic}top,literal${icase})${UNTRACKED}`] : []);
     const add = () =>
       this.git(
         [
@@ -954,6 +976,7 @@ class Project {
           '--',
           '.',
           ...secretPathspecs('exclude,'),
+          ...own('exclude,'),
           ...[...this.excluded].map((entry) => `:(exclude,literal)${entry}`),
         ],
         { env },
@@ -989,11 +1012,12 @@ class Project {
       throw new Error(`git add: ${errorLine(added.stderr) || added.status}`);
     }
     // What the kept index has that the record must not: ignored now, a
-    // secret, or inside a nested repository left out.
+    // secret, inside untracked/ (while the manifest is kept), or inside a
+    // nested repository left out.
     const ignored = await this.git(['ls-files', '-z', '-c', '-i', '--exclude-standard'], { env });
     if (ignored.status !== 0) throw new Error(`git ls-files: ${errorLine(ignored.stderr) || ignored.status}`);
     const matched = await this.git(
-      ['ls-files', '-z', '-c', '--', ...secretPathspecs(''), ...[...this.excluded].map((entry) => `:(literal)${entry}`)],
+      ['ls-files', '-z', '-c', '--', ...secretPathspecs(''), ...own(''), ...[...this.excluded].map((entry) => `:(literal)${entry}`)],
       { env },
     );
     if (matched.status !== 0) throw new Error(`git ls-files: ${errorLine(matched.stderr) || matched.status}`);
@@ -1444,4 +1468,5 @@ module.exports = {
   MANIFEST,
   MANIFEST_PATH,
   UNTRACKED,
+  IGNORE_LINES,
 };

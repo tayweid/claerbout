@@ -11,10 +11,15 @@
 // file the record does not keep is never overwritten, a .gitignore
 // without /untracked/ gets its line back, another app's document refuses
 // it unless the request says anyway, and a window that could not save
-// refuses it. Everything lives under os.tmpdir(); the user's git
-// configuration is kept out (GIT_CONFIG_GLOBAL points at an empty file).
+// refuses it; from the third pass: a commit whose file is a tree, or whose
+// contents the repository lacks (a crafted one, a partial clone's), or
+// whose tree git cannot list, is refused whole, and the working tree never
+// holds a .gitignore without /untracked/ while another app commits.
+// Everything lives under os.tmpdir(); the user's git configuration is kept
+// out (GIT_CONFIG_GLOBAL points at an empty file).
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,7 +32,7 @@ process.env.GIT_CONFIG_GLOBAL = path.join(work, 'gitconfig');
 process.env.GIT_CONFIG_NOSYSTEM = '1';
 fs.writeFileSync(process.env.GIT_CONFIG_GLOBAL, '');
 
-const { Project, repositoryOf, findGit, BRANCH, MANIFEST } = require('../autosave.js');
+const { Project, repositoryOf, findGit, BRANCH, MANIFEST, IGNORE_LINES } = require('../autosave.js');
 const history = require('../history.js');
 const binary = findGit();
 assert.ok(binary, 'git is needed for these tests');
@@ -621,7 +626,13 @@ test('a crafted commit is refused whole, before anything is recorded or removed'
     ['.GIT', (dir, evil) => [['100644', '.GIT', evil]], '.GIT'],
     ['an HFS+ spelling of .git', (dir, evil) => [['40000', '.g\u200cit', treeNamed(dir, [['100644', 'config', evil]])]], '.g\u200cit/config'],
     ['a path under a link of the same commit', (dir, evil) => [['120000', 'lnk', blobNamed(dir, outside)], ['40000', 'lnk', treeNamed(dir, [['100644', 'victim.txt', evil]])]], 'lnk/victim.txt'],
-    ['a .gitmodules link, which git itself refuses', (dir) => [['120000', '.gitmodules', blobNamed(dir, outside)]], null],
+    ['a .gitmodules link, which git itself refuses', (dir) => [['120000', '.gitmodules', blobNamed(dir, outside)]], '.gitmodules'],
+    // checkout-index finds these out only as it writes, after it has
+    // removed what it replaces: checked first, with git's own objects.
+    ['a tree where the commit says a file', (dir, evil) => [['100644', 'notafile.txt', treeNamed(dir, [['100644', 'x.txt', evil]])]], 'notafile.txt'],
+    ['a file whose contents are not in the repository', () => [['100644', 'm.txt', 'b'.repeat(40)]], 'm.txt'],
+    // git cannot list it at all.
+    ['an empty name', (dir, evil) => [['100644', '', evil]], null],
   ];
   for (const [what, extra, bad] of crafted) {
     const { dir, project, second } = await recorded(`crafted-${counter}`);
@@ -636,14 +647,13 @@ test('a crafted commit is refused whole, before anything is recorded or removed'
     assert.ok(tip, what);
     const gitignore = read(dir, '.gitignore');
     const before = subjects(dir).length;
-    if (bad) {
-      const preview = await history.compare(project, commit);
-      assert.deepEqual([preview.invalid?.path, preview.write, preview.remove], [bad, [], []], `${what}: the card says so`);
-    }
+    const preview = await history.compare(project, commit);
+    assert.ok(preview.invalid, `${what}: the card says so: ${JSON.stringify(preview)}`);
+    assert.deepEqual([preview.invalid.path, preview.write, preview.remove], [bad, [], []], `${what}: the card says so`);
     let saved = false;
     const result = await history.rewind(project, { sha: commit, tip }, { save: async () => ((saved = true), null) });
     assert.equal(result.refused, 'invalid', `${what}: ${JSON.stringify(result)}`);
-    if (bad) assert.equal(result.path, bad, what);
+    assert.equal(result.path, bad, what);
     assert.equal(saved, false, `${what}: refused before the save step`);
     assert.equal(subjects(dir).length, before, `${what}: nothing recorded`);
     assert.equal(read(dir, 'later.txt'), 'later\n', `${what}: nothing removed`);
@@ -654,6 +664,105 @@ test('a crafted commit is refused whole, before anything is recorded or removed'
     assert.ok(!fs.readdirSync(project.stateDir).some((name) => name.startsWith('rewind-')), `${what}: no throwaway index left`);
   }
   assert.equal(read(outside, 'victim.txt'), 'victim\n');
+});
+
+test("a commit whose files a partial clone never fetched is refused whole, and nothing is fetched", async () => {
+  const origin = folder('origin');
+  sh(origin, 'init', '-q', '--initial-branch=main', '.');
+  for (const name of ['a', 'b', 'z']) write(origin, `${name}.txt`, `${name} v1\n`);
+  sh(origin, 'add', '.');
+  at(origin, now() - 1000, 'commit', '-q', '-m', 'v1');
+  const v1 = sh(origin, 'rev-parse', 'HEAD');
+  for (const name of ['a', 'b', 'z']) write(origin, `${name}.txt`, `${name} v2\n`);
+  sh(origin, 'add', '.');
+  at(origin, now() - 900, 'commit', '-q', '-m', 'v2');
+  sh(origin, 'config', 'uploadpack.allowFilter', 'true');
+  const parent = folder('blobless');
+  sh(parent, 'clone', '-q', '--filter=blob:none', `file://${origin}`, 'clone');
+  const dir = path.join(parent, 'clone');
+  const missing = () => sh(dir, 'rev-list', '--objects', '--missing=print', '--all').split('\n').filter((line) => line.startsWith('?')).length;
+  const unfetched = missing();
+  assert.equal(unfetched, 3, "v1's three files were never fetched");
+  const project = await projectAt(dir);
+  write(dir, 'a.txt', 'a, mine\n');
+  const tip = (await project.commit('session open')).hash;
+  const before = userSide(dir);
+  const preview = await history.compare(project, v1);
+  assert.equal(preview.invalid?.absent, true, JSON.stringify(preview));
+  assert.deepEqual([preview.write, preview.remove], [[], []]);
+  let saved = false;
+  const result = await history.rewind(project, { sha: v1, tip }, { save: async () => ((saved = true), null) });
+  assert.equal(result.refused, 'invalid', JSON.stringify(result));
+  assert.equal(result.absent, true);
+  assert.equal(saved, false, 'refused before the save step');
+  assert.deepEqual(subjects(dir), ['fixture: session open'], 'nothing recorded');
+  assert.deepEqual(['a', 'b', 'z'].map((name) => read(dir, `${name}.txt`)), ['a, mine\n', 'b v2\n', 'z v2\n'], 'nothing removed or written');
+  assert.deepEqual(userSide(dir), before);
+  assert.equal(missing(), unfetched, 'nothing fetched');
+  assert.ok(!fs.readdirSync(project.stateDir).some((name) => name.startsWith('rewind-')), 'no throwaway index left');
+});
+
+test('the working tree never holds a .gitignore without /untracked/ during a rewind, so another app\'s commit then never takes untracked/ in', async () => {
+  const dir = folder('window');
+  const knuth = await projectAt(dir, 'knuth');
+  const found = await repositoryOf(binary, dir);
+  const plass = new Project({ binary, root: found.root, gitDir: found.gitDir, commonDir: found.commonDir, appName: 'plass', stateDir: folder('state'), log });
+  write(dir, '.gitignore', 'build/\n');
+  write(dir, 'a.txt', 'a, old\n');
+  // A large file, which checkout-index writes after .gitignore: the gap an
+  // earlier build left open lasted as long as it took to write.
+  fs.writeFileSync(path.join(dir, 'model.bin'), randomBytes(32 * 1024 * 1024));
+  sh(dir, 'add', '.');
+  at(dir, now() - 100, 'commit', '-q', '-m', 'Before the record');
+  const old = sh(dir, 'rev-parse', 'HEAD');
+  write(dir, 'untracked/huge.bin', 'pretend this is 40 GB\n');
+  write(dir, 'a.txt', 'a, new\n');
+  fs.writeFileSync(path.join(dir, 'model.bin'), 'small now\n');
+  await knuth.commit('session open');
+  await plass.commit('session open');
+  // Plass's timer commits the moment .gitignore lacks the line.
+  const without = [];
+  const plassCommits = [];
+  const watch = setInterval(() => {
+    let text = '';
+    try {
+      text = read(dir, '.gitignore');
+    } catch {
+      // None at all: no line either.
+    }
+    if (/^\/untracked\/$/m.test(text)) return;
+    without.push(text);
+    if (plassCommits.length === 0) {
+      write(dir, 'b.txt', 'plass wrote this\n');
+      plassCommits.push(plass.run(() => plass.commit('timer')));
+    }
+  }, 1);
+  try {
+    // A commit from before the record: its .gitignore lacks the line.
+    const toOld = await history.rewind(knuth, { sha: old, tip: await knuth.tip() });
+    assert.equal(toOld.ok, true, JSON.stringify(toOld));
+    assert.ok(toOld.written.includes('.gitignore') && toOld.written.includes('model.bin'));
+    assert.equal(read(dir, '.gitignore'), `build/\n${IGNORE_LINES}`, "the target's .gitignore, with the record's line");
+    // A record commit without .gitignore (crafted: the record keeps one
+    // always): the file becomes the record's line alone, never goes.
+    const tip = await knuth.tip();
+    const bare = sh(dir, 'commit-tree', treeNamed(dir, topOf(dir, treeName(dir, tip)).filter(([, name]) => name !== '.gitignore')), '-p', tip, '-m', 'knuth: timer');
+    sh(dir, 'update-ref', BRANCH, bare);
+    write(dir, 'a.txt', 'a, later\n');
+    const later = (await knuth.commit('timer')).hash;
+    const toBare = await history.rewind(knuth, { sha: bare, tip: later });
+    assert.equal(toBare.ok, true, JSON.stringify(toBare));
+    assert.ok(toBare.removed.includes('.gitignore'));
+    assert.equal(read(dir, '.gitignore'), IGNORE_LINES);
+  } finally {
+    clearInterval(watch);
+  }
+  assert.deepEqual(without, [], 'the working tree never held a .gitignore without the line');
+  await Promise.all(plassCommits);
+  for (const sha of sh(dir, 'rev-list', BRANCH).split('\n')) {
+    const files = sh(dir, 'ls-tree', '-r', '--name-only', sha).split('\n');
+    assert.ok(!files.some((file) => file.startsWith('untracked/')), `${sh(dir, 'log', '-1', '--format=%s', sha)}: untracked/ stayed out`);
+  }
 });
 
 test('on a volume that ignores case, Untracked/ is untracked/ and the manifest in any case is the manifest', async (t) => {
