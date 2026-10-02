@@ -175,7 +175,9 @@ if (smoke.ready) {
     .catch(() => fail(`the page never became ready (${smoke.ready}${want ? ` = ${want}` : ''})`));
 }
 const title = await page.title();
-if (title !== path.basename(doc)) await fail(`the document did not open (title: ${title})`);
+// The update test is about the bundle, not the document: a page that
+// titles its window its own way (Plass) is not held to the file's name.
+if (!updating && title !== path.basename(doc)) await fail(`the document did not open (title: ${title})`);
 
 if (updating) {
   // The page asks, as its update button would: the site's build is not
