@@ -45,7 +45,9 @@
 // Triggers: a page's `autosave` notice ("cell run [4]"), a timer per open
 // project (a tick while a job runs is dropped), `session open` when the
 // first window on a project opens and `session close` when the last
-// closes; quitting flushes, bounded. Messages are "<app>: <trigger>".
+// closes; quitting flushes, bounded. Messages are "<app>: <trigger>". A
+// rewind from the history view (history.js) records "rewind from" and
+// "rewind to" through this same commit path, the second always.
 // untracked/ (large data, caches, scratch) is ignored but kept inside the
 // track by a manifest, .claerbout/untracked.json, rewritten before every
 // commit with each file's size, mtime and SHA-256 (rehashed only when size
@@ -257,14 +259,15 @@ function gitEnvironment(extra = {}) {
 
 /** Run git to completion: {status, stdout, stderr}. A timeout kills it and
  *  reports -1, so a hung git never hangs the app. `input` goes to its
- *  standard input, which is closed either way. */
-function git(binary, cwd, args, { env = {}, timeout = 120_000, input = '' } = {}) {
+ *  standard input, which is closed either way. `encoding: 'buffer'` gives
+ *  stdout as bytes (a blob, for the history view). */
+function git(binary, cwd, args, { env = {}, timeout = 120_000, input = '', encoding = 'utf8' } = {}) {
   return new Promise((resolve) => {
-    const child = execFile(binary, args, { cwd, env: gitEnvironment(env), timeout, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
+    const child = execFile(binary, args, { cwd, env: gitEnvironment(env), timeout, maxBuffer: 64 * 1024 * 1024, encoding }, (error, stdout, stderr) => {
       resolve({
         status: error ? (typeof error.code === 'number' ? error.code : -1) : 0,
         stdout: stdout ?? '',
-        stderr: stderr ?? '',
+        stderr: String(stderr ?? ''),
       });
     });
     child.stdin?.on('error', () => {});
@@ -1001,15 +1004,13 @@ class Project {
   }
 
   /**
-   * One autosave commit on the branch, if anything changed:
-   * {committed: true, hash, message} or {skipped: why, message}. The
-   * user's repository state is read, never written: the temporary index
-   * is the only index touched, and the branch is the only ref.
+   * The working tree as the record would commit it now: the manifest
+   * rewritten, the temporary index filled, and its tree written (objects
+   * only; no commit, no ref). What a commit commits, and what the history
+   * view compares a rewind against (history.js). A clean filter that
+   * cannot run is a Skip.
    */
-  async commit(trigger) {
-    const message = `${this.appName}: ${cleanTrigger(trigger)}`;
-    const reason = await this.blocked();
-    if (reason) return this.skip(reason, message);
+  async snapshot() {
     await this.prepare();
     if (this.manifest) {
       const written = await writeManifest(this.root, path.join(this.stateDir, 'hashes.json'), {
@@ -1025,14 +1026,41 @@ class Project {
     // The index is kept between commits (git add -A against it uses its
     // stat cache); a lock left by a git that was killed goes.
     await fsp.rm(`${this.index}.lock`, { force: true });
-    const env = { GIT_INDEX_FILE: this.index };
     try {
-      const tree = await this.fill(env);
+      return await this.fill({ GIT_INDEX_FILE: this.index });
+    } catch (error) {
+      // An index git could not use is rebuilt at the next commit.
+      if (!(error instanceof Skip)) await fsp.rm(this.index, { force: true });
+      throw error;
+    }
+  }
+
+  /**
+   * One autosave commit on the branch, if anything changed:
+   * {committed: true, hash, message} or {skipped: why, message}. The
+   * user's repository state is read, never written: the temporary index
+   * is the only index touched, and the branch is the only ref. `always`
+   * commits even when the tree equals the tip's (a rewind's "rewind to",
+   * which marks where the rewind landed whatever another app's timer
+   * recorded meanwhile).
+   */
+  async commit(trigger, { always = false } = {}) {
+    const message = `${this.appName}: ${cleanTrigger(trigger)}`;
+    const reason = await this.blocked();
+    if (reason) return this.skip(reason, message);
+    let tree;
+    try {
+      tree = await this.snapshot();
+    } catch (error) {
+      if (error instanceof Skip) return this.skip(error.reason, message, error.line);
+      throw error;
+    }
+    try {
       // The tip may move under us: another app on the same working tree
       // keeps the same branch. Two tries at the compare-and-swap are plenty.
       for (let attempt = 0; attempt < 2; attempt++) {
         const parent = await this.tip();
-        if (parent) {
+        if (parent && !always) {
           const parentTree = await this.git(['rev-parse', `${parent}^{tree}`]);
           if (parentTree.status === 0 && parentTree.stdout.trim() === tree) {
             this.blockedBy = null;
@@ -1066,7 +1094,6 @@ class Project {
       }
       return { skipped: 'the branch moved twice', message };
     } catch (error) {
-      if (error instanceof Skip) return this.skip(error.reason, message, error.line);
       // An index git could not use is rebuilt at the next commit.
       await fsp.rm(this.index, { force: true });
       throw error;
@@ -1140,6 +1167,9 @@ class Autosave {
     this.windows = new Map();
     /** Folders already looked at: dir → root or null. */
     this.roots = new Map();
+    /** Why a folder has no record, in words: dir → reason, beside the
+     *  null in `roots` (for the history view's empty window). */
+    this.reasons = new Map();
     /** Repositories refused for where their root is, said once each. */
     this.refusedRoots = new Set();
     /** Membership changes, one after another. */
@@ -1149,6 +1179,24 @@ class Autosave {
 
   get enabled() {
     return this.binary !== null;
+  }
+
+  /** Why no record is kept: null when it is on. */
+  get reason() {
+    return this.enabled ? null : 'no-git';
+  }
+
+  /** Why a document's folder has no record, in words, once it has been
+   *  looked at (setDocument); null when it has one or is not known. */
+  why(dir) {
+    return this.reasons.get(dir) ?? null;
+  }
+
+  /** The window's project's root once every membership change before now
+   *  has landed; null when the window is on none. */
+  async rootOf(window) {
+    await this.chain;
+    return this.windows.get(window) ?? null;
   }
 
   /** The project for a document's folder: the repository it is in, or one
@@ -1164,27 +1212,35 @@ class Autosave {
     if (this.roots.has(given)) return this.roots.get(given);
     const dir = canonical(given);
     let root = null;
+    const refuse = (reason) => {
+      this.reasons.set(given, reason);
+      this.log(`autosave: no record for ${given}: ${reason}`);
+    };
     try {
       const secret = secretPlace(dir, this.places.home);
       let found = secret ? 'refused' : await repositoryOf(this.binary, dir);
-      if (secret) this.log(`autosave: no record for ${given}: it is in ${secret}, where credentials are kept`);
+      if (secret) refuse(`it is in ${secret}, where credentials are kept`);
       if (found === null) {
         const refused = notProjectFolder(dir, this.places);
         if (refused) {
-          this.log(`autosave: no record for ${given}: ${refused} is not a project's folder; a document here needs a folder of its own`);
+          refuse(`${refused} is not a project's folder; a document here needs a folder of its own`);
           found = 'refused';
         } else {
           found = await initRepository(this.binary, dir);
           this.log(`autosave: initialised a repository at ${found.root}`);
         }
       }
-      if (found === 'unusable') this.log(`autosave: no record for ${given}: inside a git directory or a bare repository`);
+      if (found === 'unusable') refuse('inside a git directory or a bare repository');
       else if (found !== 'refused') {
         // git reports the root as the disk keeps it, so this also catches a
         // path whose form slipped past the guards above.
         const place = secretPlace(found.root, this.places.home);
         const above = place ? null : aboveHome(found.root, this.places.home);
         if (place || above) {
+          this.reasons.set(
+            given,
+            place ? `the repository at ${found.root} is in ${place}, where credentials are kept` : `the repository at ${found.root} is ${above}, and would take in everything under it`,
+          );
           if (!this.refusedRoots.has(found.root)) {
             this.refusedRoots.add(found.root);
             this.log(
@@ -1214,7 +1270,7 @@ class Autosave {
         }
       }
     } catch (error) {
-      this.log(`autosave: no record for ${given}: ${error.message}`);
+      refuse(error.message);
     }
     this.roots.set(given, root);
     return root;
@@ -1319,6 +1375,10 @@ class Autosave {
 function attach({ config, env, log, stateDir }) {
   const nothing = {
     enabled: false,
+    reason: 'off',
+    projects: new Map(),
+    why: () => null,
+    rootOf: () => Promise.resolve(null),
     setDocument: () => Promise.resolve(),
     closed: () => Promise.resolve(),
     notice: () => Promise.resolve(null),
@@ -1330,7 +1390,7 @@ function attach({ config, env, log, stateDir }) {
   const autosave = new Autosave({ appName: config.name, stateDir, log, interval });
   if (!autosave.enabled) {
     log('autosave: off, no git on this machine');
-    return nothing;
+    return { ...nothing, reason: 'no-git' };
   }
   log(`autosave: on, ${BRANCH_NAME} every ${Math.round(interval / 1000)} s and on every trigger, git at ${autosave.binary}`);
   return autosave;
@@ -1358,5 +1418,6 @@ module.exports = {
   SECRET_FOLDERS,
   IDENTITY,
   MANIFEST,
+  MANIFEST_PATH,
   UNTRACKED,
 };
