@@ -19,7 +19,7 @@
 
 'use strict';
 
-const { app, BrowserWindow, Menu, dialog, ipcMain, net, protocol, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, net, protocol, screen, session, shell } = require('electron');
 const { execFile, spawn } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const fs = require('node:fs');
@@ -1037,6 +1037,51 @@ function relaunch() {
   app.quit();
 }
 
+/** The View menu's zoom, with the window following when the config says so
+ *  (`window.followZoom`; Plass): a page laid out as a fixed-width paper with
+ *  a margin wants the window to grow and shrink with the zoom, so the paper
+ *  keeps its room — scaled here, in screen pixels, in one step, never by
+ *  the page measuring itself (a page's px are zoomed px, and a page that
+ *  resized the window after every resize walked it there in several steps).
+ *  The window stays on its display; maximized and fullscreen windows are
+ *  left alone. Chromium's zoom levels: each is ×1.2, half-steps as the
+ *  menu roles use. */
+function zoomTo(window, level) {
+  if (!window || window.isDestroyed()) return;
+  const contents = window.webContents;
+  const before = contents.getZoomFactor();
+  contents.setZoomLevel(level);
+  const after = contents.getZoomFactor();
+  if (!config.window?.followZoom || window.isFullScreen() || window.isMaximized() || after === before) return;
+  const ratio = after / before;
+  const bounds = window.getBounds();
+  const [contentWidth, contentHeight] = window.getContentSize();
+  const area = screen.getDisplayMatching(bounds).workArea;
+  const chrome = { x: bounds.width - contentWidth, y: bounds.height - contentHeight };
+  const width = Math.min(Math.round(contentWidth * ratio), area.width - chrome.x);
+  const height = Math.min(Math.round(contentHeight * ratio), area.height - chrome.y);
+  window.setContentSize(width, height);
+  // Still on the display: nudge back in if the growth ran past its edge.
+  const grown = window.getBounds();
+  const x = Math.max(area.x, Math.min(grown.x, area.x + area.width - grown.width));
+  const y = Math.max(area.y, Math.min(grown.y, area.y + area.height - grown.height));
+  if (x !== grown.x || y !== grown.y) window.setPosition(x, y);
+}
+
+/** The window a menu item acts on: the one the menu passes, else the
+ *  focused one (an item clicked programmatically passes none). */
+const zoomBy = (window, step) => {
+  const target = window ?? BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+  if (target) zoomTo(target, step === 0 ? 0 : target.webContents.getZoomLevel() + step);
+};
+const zoomItems = [
+  { label: 'Actual Size', accelerator: 'CmdOrCtrl+0', click: (_item, window) => zoomBy(window, 0) },
+  { label: 'Zoom In', accelerator: 'CmdOrCtrl+Plus', click: (_item, window) => zoomBy(window, 0.5) },
+  // ⌘= is what the key says without shift; the role registers both.
+  { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', visible: false, acceleratorWorksWhenHidden: true, click: (_item, window) => zoomBy(window, 0.5) },
+  { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: (_item, window) => zoomBy(window, -0.5) },
+];
+
 function buildMenu() {
   const appItems = [
     // A choice only where there is one.
@@ -1082,9 +1127,7 @@ function buildMenu() {
         { role: 'reload' },
         { role: 'toggleDevTools' },
         { type: 'separator' },
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
+        ...(config.window?.followZoom ? zoomItems : [{ role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }]),
         { type: 'separator' },
         { role: 'togglefullscreen' },
       ],
