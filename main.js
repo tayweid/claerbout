@@ -713,6 +713,15 @@ function setDocument(window, file) {
  *  bar and asks the shell nothing. `trafficLightPosition` ({x, y}, macOS)
  *  moves the lights; the overlay's height follows (2·y + 14 px). The
  *  setup page gets the same bar. */
+/** macOS's rubber band at the end of a scroll, which Electron turns off
+ *  unless asked (`webPreferences.scrollBounce`). On by default here: a
+ *  paper or a column that stops dead at its edge feels cramped (Taylor,
+ *  2026-10-02, of Plass's page), and every Mac scroller bounces. The
+ *  config's `window.scrollBounce: false` turns it off. */
+function scrollBounce() {
+  return config.window?.scrollBounce !== false;
+}
+
 function titleBar() {
   const style = config.window.titleBarStyle;
   const titleBarStyle = ['hidden', 'hiddenInset'].includes(style) ? style : 'default';
@@ -743,6 +752,7 @@ function openWindow(url, document = null) {
       sandbox: true,
       nodeIntegration: false,
       spellcheck: false,
+      scrollBounce: scrollBounce(),
     },
   });
   if (last) {
@@ -1005,6 +1015,7 @@ async function openHistory(source, at = null) {
       sandbox: true,
       nodeIntegration: false,
       spellcheck: false,
+      scrollBounce: scrollBounce(),
     },
   });
   if (source && !source.isDestroyed()) {
