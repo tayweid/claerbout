@@ -181,7 +181,12 @@ document each window holds; a page only says when something happened.
   `/tmp`, `/var/tmp`) or a volume root (`/`, `/Volumes/*`). A folder at
   least one level below any of those qualifies: `~/Projects/foo`,
   `~/Desktop/week-3`. A document elsewhere has no record, and the log says
-  why, once per folder per launch.
+  why, once per folder per launch. No record at all, repository or not,
+  for a document in a hidden folder of the home folder (`~/.ssh`, `~/.aws`,
+  `~/.config/gh`: where credentials live) or in a folder named `.ssh`,
+  `.aws`, `.gnupg` or `.env` anywhere, nor for a repository whose root is
+  the home folder or a folder it is in (a dotfiles `~/.git` would take in
+  everything under home), said once per repository.
 - **The branch.** One per working tree: `refs/heads/claerbout-autosave`
   in a repository's main working tree, `refs/heads/claerbout-autosave-<name>`
   in a linked worktree (`git worktree add`; `<name>` is the worktree's
@@ -196,27 +201,43 @@ document each window holds; a page only says when something happened.
   over the working tree, so `.gitignore` applies; entries the ignore rules
   or the secrets list have come to match since are dropped from it; then
   `write-tree`, `commit-tree` with the branch's tip as parent, and
-  `update-ref` as a compare-and-swap. Every git it runs has
+  `update-ref --no-deref` as a compare-and-swap. Every git it runs has
   `core.splitIndex`, `core.fsmonitor` and the add advice off, so nothing
   is written into the user's `.git` but objects and the record's branch
-  (and its reflog).
+  (and its reflog), and `core.sparseCheckout` off, so a sparse checkout is
+  recorded (git add refuses the manifest outside the cone otherwise); a
+  partial clone never fetches (`GIT_NO_LAZY_FETCH`), and git's `PATH` has
+  `/opt/homebrew/bin`, `/usr/local/bin` and the system's defaults
+  (`/etc/paths`, `/etc/paths.d`) after the app's own, so a clean filter
+  such as git-lfs is found from a Finder launch.
 - **What it never touches, and what it writes.** The user's HEAD, branch
   and index are never touched. Nothing is committed while the record's
   branch is checked out in any working tree of the repository (an
-  `update-ref` would move that HEAD; the log says so once), while
-  `index.lock` exists, or while a merge, rebase, cherry-pick or revert is
-  in progress, and nothing when the tree equals the tip's. In the working
-  tree it does write: `untracked/` (made, empty), a `.gitignore` line for
-  it (appended, or a new `.gitignore`), and `.claerbout/untracked.json`.
-  These show in the user's own `git status`, and ride along in a `git
-  commit -a` or `git add -A` the user makes.
+  `update-ref` would move that HEAD; the log says so once) or being
+  rebased in one (its `rebase-merge/head-name` or `rebase-apply/head-name`
+  names the branch), while the record's ref is a symbolic ref (the write
+  would land on the branch it points at), while `index.lock` exists, or
+  while a merge, rebase, cherry-pick or revert is in progress, and nothing
+  when the tree equals the tip's; the guards are asked again just before
+  the ref moves, so only a few milliseconds of race remain after a fill
+  that took seconds. In the working tree it does write: `untracked/`
+  (made, empty), a `.gitignore` line for it (appended, or a new
+  `.gitignore`), and `.claerbout/untracked.json`. These show in the
+  user's own `git status`, and ride along in a `git commit -a` or `git add
+  -A` the user makes. None of them is written through a symbolic link: a
+  link (or anything else that is not a folder or a file) at `untracked`,
+  `.claerbout`, the manifest or, when the line has to be added,
+  `.gitignore` turns the manifest off for that project, said once.
 - **What git cannot read, or must leave out.** A file git cannot read is
   left out, and the log names it once; the rest is recorded. A nested
   repository without a commit (a fresh `git init` or `uv init` inside the
   project) is left out, said once, until it has one; a nested repository
   with a commit is recorded as a gitlink, as git does. A file named
   `untracked` (not a folder) means no `untracked/` and no manifest for that
-  project, said once.
+  project, said once. A required clean filter that cannot run (git-lfs not
+  installed, `filter.lfs.required`) skips the commit, and the log names the
+  missing command once; any other failure is said once until a commit
+  lands again, never every tick.
 - **Messages.** `<app>: <trigger>`: `knuth: cell run [4]`, `plass: timer`,
   `knuth: session open`, `plass: session close`. The author is the
   repository's git identity when it has one, else `Claerbout Autosave
@@ -236,21 +257,30 @@ document each window holds; a page only says when something happened.
   `*.json` or `.claerbout/` line cannot make `untracked/` a loophole). A
   file is hashed again only when its size or mtime changed; the hashes
   are cached under the app's state folder (`autosave/<project>/hashes.json`).
-- **Secrets.** Kept out of the record by pathspec, in every folder: the
-  files `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`,
-  `id_ecdsa*`, `id_dsa*`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`,
-  `*.gpg`, `*.asc`, `credentials.json`, `service-account*.json`,
-  `.git-credentials`, `.pypirc`, `.npmrc`, `.netrc`, `token*`, `*.token`,
+  A file in `untracked/` that the secrets list matches is left out of the
+  manifest, name and hash (a hash of a short secret can be reversed), and
+  only counted in the log. The manifest is written beside itself and
+  renamed into place, so it is never half-written.
+- **Secrets.** Kept out of the record by pathspec, in every folder and
+  whatever the case (`Server.PEM`, `ID_RSA`): the files `.env`, `.env.*`,
+  `*.pem`, `*.key`, `id_*`, `*.p8` (App Store Connect's `AuthKey_*.p8`),
+  `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.keychain`, `*.keychain-db`,
+  `*.gpg`, `*.asc`, `*.ppk`, `*.kdbx`, `credentials.json`,
+  `service-account*.json`, `client_secret*.json`, `kaggle.json`,
+  `secrets.toml`, `.git-credentials`, `.pypirc`, `.npmrc`, `.netrc`,
+  `.htpasswd`, `.Renviron`, `token`, `token.txt`, `*.token`, `.token*`,
   and everything under a folder named `.env/`, `.aws/`, `.ssh/` or
   `.gnupg/`. Names only: nothing scans file contents, so a key pasted into
-  a notebook is recorded. `token*` also catches `tokenizer.py` and the
-  like; the log names what the list kept out of a project, once per
-  launch, so such a catch is seen.
+  a notebook is recorded. `tokenizer.py` and `tokens.json` are recorded;
+  `id_*` also catches `id_map.csv`, and `*.key` a Keynote deck, so the log
+  names what the list kept out of a project, once per launch, and such a
+  catch is seen.
 - **The log** gets one line per commit (`autosave: knuth: cell run [4] →
   <hash> (<project>)`), and one when a repository is initialised, when
   `.gitignore` gains `untracked/`, when a folder is refused, and when a
   commit is skipped for a new reason. An error is git's last line that is
-  not a `hint:` or `warning:`.
+  not a `hint:`, a `warning:` or a wrap-up (`the remote end hung up
+  unexpectedly`, after a filter that never started).
 - **Nothing is pushed.** The spec's outside witness (the branch pushed to
   `origin` after every ~10 commits, every 30 minutes with anything
   unpushed, on close and on launch) is not built; see "Built" in Knuth's

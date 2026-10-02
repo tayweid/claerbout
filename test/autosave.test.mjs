@@ -6,7 +6,13 @@
 // must leave out (an unreadable file, a nested repository without a
 // commit), the secrets kept out, the untracked/ manifest (forced in, and
 // its hash cache), nothing written into the user's .git, the identity, the
-// sessions, the timer (never piling up) and quit (waiting, bounded).
+// sessions, the timer (never piling up) and quit (waiting, bounded); and
+// from the second review: the guards again just before the ref moves, a
+// rebase of the record in a linked worktree, a symbolic ref at the
+// record's name, hidden folders of the home folder, a repository at the
+// home folder, symbolic links at the record's names, secrets whatever their
+// case (and in untracked/), a sparse checkout, git's PATH, a clean filter
+// that cannot run, and a failure every tick said once.
 // Everything lives under os.tmpdir(); the user's git configuration is kept
 // out (GIT_CONFIG_GLOBAL points at an empty file), so the fallback
 // identity is what a bare machine gets.
@@ -32,7 +38,11 @@ const {
   writeManifest,
   branchFor,
   notProjectFolder,
+  secretPlace,
+  isSecret,
   errorLine,
+  filterFailure,
+  gitEnvironment,
   BRANCH,
   BRANCH_NAME,
   SECRETS,
@@ -76,7 +86,19 @@ async function projectAt(dir, appName = 'fixture') {
     sh(dir, 'init', '-q', '--initial-branch=main', '.');
     found = await repositoryOf(binary, dir);
   }
-  return new Project({ binary, root: found.root, gitDir: found.gitDir, appName, stateDir: folder('state'), log });
+  return new Project({ binary, root: found.root, gitDir: found.gitDir, commonDir: found.commonDir, appName, stateDir: folder('state'), log });
+}
+/** A git that fails one subcommand while a flag file exists. */
+function failingGit(subcommand, line) {
+  const script = path.join(work, `failing-git-${counter++}`);
+  const flag = `${script}.fail`;
+  fs.writeFileSync(
+    script,
+    `#!/bin/sh\nif [ -e '${flag}' ]; then\n  for arg in "$@"; do\n    if [ "$arg" = ${subcommand} ]; then echo '${line}' >&2; exit 128; fi\n  done\nfi\nexec '${binary}' "$@"\n`,
+  );
+  fs.chmodSync(script, 0o755);
+  fs.writeFileSync(flag, '');
+  return { binary: script, heal: () => fs.rmSync(flag, { force: true }), break: () => fs.writeFileSync(flag, '') };
 }
 
 before(() => {
@@ -499,18 +521,301 @@ test('where a repository may be started: not the home folder, its standard folde
   assert.equal(notProjectFolder(path.join(os.homedir(), 'Dropbox', 'thesis')), null);
 });
 
-test('an existing repository is recorded wherever it is, even one at the home folder', async () => {
+test('a repository whose root is the home folder is not used: no record under it, said once', async () => {
   const home = folder('dotfiles-home');
   fs.mkdirSync(path.join(home, 'Desktop'));
+  fs.mkdirSync(path.join(home, 'Projects', 'plan'), { recursive: true });
   sh(home, 'init', '-q', '--initial-branch=main', '.');
   fs.writeFileSync(path.join(home, 'Desktop', 'note.typ'), '= Note\n');
+  fs.writeFileSync(path.join(home, 'Projects', 'plan', 'plan.typ'), '= Plan\n');
+  fs.writeFileSync(path.join(home, '.zsh_history'), 'secret command\n');
   const autosave = new Autosave({ appName: 'Plass', stateDir: folder('state'), log, interval: 60_000, binary, home });
   const window = { id: 'w' };
+  lines.length = 0;
   await autosave.setDocument(window, path.join(home, 'Desktop', 'note.typ'));
+  assert.equal(autosave.project(window), null);
+  await autosave.setDocument(window, path.join(home, 'Projects', 'plan', 'plan.typ'));
+  assert.equal(autosave.project(window), null);
+  assert.equal(lines.filter((line) => line.includes(`no record for the repository at ${fs.realpathSync(home)}: it is the home folder`)).length, 1, 'said once');
+  assert.throws(() => sh(home, 'rev-parse', '--verify', '-q', BRANCH), 'no record branch');
+  assert.ok(!fs.existsSync(path.join(home, 'untracked')), 'nothing written under home');
+  assert.ok(!fs.existsSync(path.join(home, 'Projects', 'plan', '.git')), 'and no repository of its own below it');
+  // A repository of its own below home is a project as ever.
+  const own = path.join(home, 'Projects', 'own');
+  fs.mkdirSync(own);
+  sh(own, 'init', '-q', '--initial-branch=main', '.');
+  fs.writeFileSync(path.join(own, 'paper.typ'), '= Paper\n');
+  await autosave.setDocument(window, path.join(own, 'paper.typ'));
   const project = autosave.project(window);
-  assert.equal(project?.root, fs.realpathSync(home));
+  assert.equal(project?.root, fs.realpathSync(own));
   await autosave.setDocument(window, null);
   await project.queue;
+  assert.deepEqual(subjects(own), ['plass: session close', 'plass: session open'].slice(-subjects(own).length));
+});
+
+test('a hidden folder of the home folder, or a secret-named folder: no record, repository or not', async () => {
+  const home = folder('hidden-home');
+  const files = {
+    aws: path.join(home, '.aws', 'config'),
+    gh: path.join(home, '.config', 'gh', 'hosts.yml'),
+    nvim: path.join(home, '.config', 'nvim', 'init.lua'),
+    ssh: path.join(home, 'Projects', 'proj', '.ssh', 'config'),
+  };
+  for (const file of Object.values(files)) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'secret\n');
+  }
+  sh(path.dirname(files.nvim), 'init', '-q', '--initial-branch=main', '.'); // a dotfiles repository in ~/.config/nvim
+  sh(path.join(home, 'Projects', 'proj'), 'init', '-q', '--initial-branch=main', '.');
+  const autosave = new Autosave({ appName: 'Knuth', stateDir: folder('state'), log, interval: 60_000, binary, home });
+  const window = { id: 'w' };
+  lines.length = 0;
+  for (const [key, file] of Object.entries(files)) {
+    await autosave.setDocument(window, file);
+    assert.equal(autosave.project(window), null, `no record for ${key}`);
+    const reason = key === 'ssh' ? 'a .ssh folder' : 'a hidden folder of the home folder';
+    assert.ok(lines.some((line) => line.includes(`no record for ${path.dirname(file)}: it is in ${reason}`)), `${key}: ${reason}`);
+  }
+  assert.ok(!fs.existsSync(path.join(home, '.aws', '.git')), 'no repository in ~/.aws');
+  assert.ok(!fs.existsSync(path.join(home, '.aws', 'untracked')), 'nothing written in ~/.aws');
+  assert.ok(!fs.existsSync(path.join(home, '.config', 'gh', '.git')), 'no repository in ~/.config/gh');
+  assert.throws(() => sh(path.dirname(files.nvim), 'rev-parse', '--verify', '-q', BRANCH), 'no record in ~/.config/nvim');
+  // The rules themselves.
+  assert.equal(notProjectFolder(path.join(home, '.ssh'), { home }), 'a hidden folder of the home folder');
+  assert.equal(notProjectFolder(path.join(home, '.config', 'gh'), { home }), 'a hidden folder of the home folder');
+  assert.equal(notProjectFolder(path.join(home, 'Projects', '.archive', 'x'), { home }), null, 'only folders directly under home');
+  assert.equal(secretPlace(path.join(os.homedir(), '.kube')), 'a hidden folder of the home folder');
+  assert.equal(secretPlace(path.join(home, 'Projects', 'proj', '.GnuPG')), 'a .GnuPG folder');
+  assert.equal(secretPlace(path.join(home, 'Projects', 'proj')), null);
+});
+
+test('the guards again just before the ref moves: the branch checked out during a slow commit is not moved', async () => {
+  const dir = folder('late-guard');
+  sh(dir, 'init', '-q', '--initial-branch=main', '.');
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+  sh(dir, 'add', 'a.txt');
+  sh(dir, ...as, 'commit', '-q', '-m', 'a');
+  const found = await repositoryOf(binary, dir);
+  const slow = slowGit(1);
+  const project = new Project({ binary: slow.binary, root: found.root, gitDir: found.gitDir, appName: 'fixture', stateDir: folder('state'), log });
+  assert.equal((await project.commit('timer')).committed, true);
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+  const pending = project.commit('timer');
+  for (let i = 0; i < 100 && slow.adds() < 2; i++) await pause(20);
+  // While git add sleeps: the user looks at the record, and edits.
+  sh(dir, 'checkout', '-q', '-f', BRANCH_NAME);
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'three\n');
+  const head = sh(dir, 'rev-parse', 'HEAD');
+  const status = sh(dir, 'status', '--porcelain', '--untracked-files=no');
+  const result = await pending;
+  assert.match(result.skipped ?? '', /checked out/);
+  assert.equal(sh(dir, 'rev-parse', 'HEAD'), head, 'HEAD did not move');
+  assert.equal(sh(dir, 'rev-parse', BRANCH), head, 'nor the branch');
+  assert.equal(sh(dir, 'status', '--porcelain', '--untracked-files=no'), status, 'nothing changed under the user');
+});
+
+test('the record being rebased in a linked worktree: skipped, and the rebase continues', async () => {
+  const dir = folder('rebased');
+  sh(dir, 'init', '-q', '--initial-branch=main', '.');
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+  sh(dir, 'add', 'a.txt');
+  sh(dir, ...as, 'commit', '-q', '-m', 'a');
+  const project = await projectAt(dir);
+  assert.equal((await project.commit('timer')).committed, true);
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+  assert.equal((await project.commit('timer')).committed, true);
+  const look = path.join(work, `rebase-look-${counter++}`);
+  sh(dir, 'worktree', 'add', '-q', look, BRANCH_NAME);
+  sh(look, ...as, '-c', 'sequence.editor=sed -i.bak s/^pick/edit/', 'rebase', '-q', '-i', 'HEAD~1');
+  assert.match(sh(dir, 'worktree', 'list', '--porcelain'), /detached/, 'the worktree is detached while it rebases');
+  const tip = sh(dir, 'rev-parse', BRANCH);
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'three\n');
+  lines.length = 0;
+  const result = await project.commit('timer');
+  assert.equal(result.skipped, `${BRANCH_NAME} is being rebased`);
+  assert.equal(sh(dir, 'rev-parse', BRANCH), tip, 'the branch did not move');
+  assert.ok(lines.some((line) => line.includes(`not recorded while ${BRANCH_NAME} is being rebased`)));
+  sh(look, ...as, 'rebase', '--continue');
+  assert.equal(sh(look, 'symbolic-ref', 'HEAD'), BRANCH, 'the rebase finished on the branch');
+});
+
+test("a symbolic ref at the record's name: skipped, and the branch it points at does not move", async () => {
+  const dir = folder('symref');
+  sh(dir, 'init', '-q', '--initial-branch=main', '.');
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+  sh(dir, 'add', 'a.txt');
+  sh(dir, ...as, 'commit', '-q', '-m', 'a');
+  sh(dir, 'symbolic-ref', BRANCH, 'refs/heads/main');
+  const main = sh(dir, 'rev-parse', 'main');
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+  const project = await projectAt(dir);
+  const result = await project.commit('timer');
+  assert.equal(result.skipped, `${BRANCH_NAME} is a symbolic ref`);
+  assert.equal(sh(dir, 'rev-parse', 'main'), main, 'main did not move');
+  assert.equal(sh(dir, 'status', '--porcelain', '--untracked-files=no'), 'M a.txt');
+});
+
+test('symbolic links at untracked/, .claerbout/, the manifest or .gitignore are never followed', async () => {
+  const outside = folder('outside');
+  const target = path.join(outside, 'zshrc');
+  fs.writeFileSync(target, 'export KEEP=1\n');
+  const data = path.join(outside, 'home');
+  fs.mkdirSync(data);
+  fs.writeFileSync(path.join(data, 'private.txt'), 'private\n');
+  const cases = [
+    ['manifest', (dir) => {
+      fs.mkdirSync(path.join(dir, '.claerbout'));
+      fs.symlinkSync(target, path.join(dir, '.claerbout', 'untracked.json'));
+    }, '.claerbout/untracked.json or its folder is a symbolic link'],
+    ['gitignore', (dir) => fs.symlinkSync(target, path.join(dir, '.gitignore')), '.gitignore is a symbolic link'],
+    ['untracked', (dir) => fs.symlinkSync(data, path.join(dir, 'untracked')), 'untracked is a symbolic link'],
+    ['claerbout', (dir) => fs.symlinkSync(data, path.join(dir, '.claerbout')), '.claerbout is a symbolic link'],
+  ];
+  for (const [name, link, said] of cases) {
+    const dir = folder(`link-${name}`);
+    fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 1\n');
+    link(dir);
+    const project = await projectAt(dir);
+    lines.length = 0;
+    assert.equal((await project.commit('timer')).committed, true, `${name}: the rest is recorded`);
+    fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 2\n');
+    assert.equal((await project.commit('timer')).committed, true);
+    assert.equal(fs.readFileSync(target, 'utf8'), 'export KEEP=1\n', `${name}: the file outside is byte for byte the same`);
+    assert.deepEqual(fs.readdirSync(data), ['private.txt'], `${name}: nothing written in the folder outside`);
+    assert.equal(lines.filter((line) => line.includes(said)).length, 1, `${name}: said once`);
+    assert.ok(!project.manifest, `${name}: no manifest for this project`);
+    const cache = path.join(project.stateDir, 'hashes.json');
+    assert.ok(!fs.existsSync(cache) || !fs.readFileSync(cache, 'utf8').includes('private'), `${name}: nothing outside was hashed`);
+    assert.ok(!tree(dir).some((entry) => entry.includes('private')), `${name}: nothing outside was recorded`);
+  }
+});
+
+test('secrets whatever the case, the longer list, tokenizer.py kept; secret files in untracked/ are left out of the manifest', async () => {
+  const dir = folder('secrets-case');
+  const secrets = [
+    'Server.PEM', 'ID_RSA', '.ENV', 'Cert.PFX', 'AuthKey_ABC123.p8', 'login.keychain', 'login.keychain-db', '.htpasswd',
+    'id_github', '.token', 'gh.TOKEN', 'CLIENT_SECRET_123.json', 'kaggle.json', 'secrets.toml', '.Renviron', 'putty.ppk', 'vault.kdbx',
+  ];
+  const kept = ['tokenizer.py', 'tokens.json', 'token_utils.py', 'notes.md', 'keys.md'];
+  fs.mkdirSync(path.join(dir, 'sub'));
+  for (const name of [...secrets, ...kept]) {
+    fs.writeFileSync(path.join(dir, name), 'x\n');
+    fs.writeFileSync(path.join(dir, 'sub', name), 'x\n');
+  }
+  fs.mkdirSync(path.join(dir, 'Deep', '.SSH'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'Deep', '.SSH', 'config'), 'Host x\n');
+  const project = await projectAt(dir);
+  await project.prepare();
+  fs.mkdirSync(path.join(dir, 'untracked', 'keys'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'untracked', '.env'), 'PASSWORD=hunter2');
+  fs.writeFileSync(path.join(dir, 'untracked', 'keys', 'AuthKey_X.P8'), 'key');
+  fs.writeFileSync(path.join(dir, 'untracked', 'data.csv'), 'a,b\n');
+  lines.length = 0;
+  assert.equal((await project.commit('timer')).committed, true);
+  const recorded = tree(dir);
+  for (const name of secrets) {
+    assert.ok(!recorded.includes(name), `${name} is out`);
+    assert.ok(!recorded.includes(`sub/${name}`), `sub/${name} is out`);
+  }
+  assert.ok(!recorded.includes('Deep/.SSH/config'), 'a secret folder in another case is out');
+  for (const name of kept) {
+    assert.ok(recorded.includes(name), `${name} is in`);
+    assert.ok(recorded.includes(`sub/${name}`), `sub/${name} is in`);
+  }
+  const manifestText = sh(dir, 'show', `${BRANCH}:.claerbout/untracked.json`);
+  assert.deepEqual(JSON.parse(manifestText).files.map((entry) => entry.path), ['untracked/data.csv']);
+  assert.ok(!manifestText.includes(sha256('PASSWORD=hunter2')), 'no hash of a secret');
+  assert.ok(!manifestText.includes('.env') && !manifestText.includes('AuthKey'), 'nor its name');
+  assert.ok(!fs.readFileSync(path.join(project.stateDir, 'hashes.json'), 'utf8').includes('.env'), 'nor in the hash cache');
+  assert.equal(lines.filter((line) => line.includes('possible secrets') && line.includes('2 files in untracked/, left out of its manifest')).length, 1);
+  // A secret the kept index already holds under another case leaves it.
+  assert.equal(isSecret('a/B/SERVER.pem'), true);
+  assert.equal(isSecret('untracked/.Aws/config'), true);
+  assert.equal(isSecret('tokenizer.py'), false);
+});
+
+test('a sparse checkout is recorded: the manifest and new files outside the cone go in, the checkout is as it was', async () => {
+  const source = folder('sparse-source');
+  sh(source, 'init', '-q', '--initial-branch=main', '.');
+  for (const file of ['a/x.txt', 'b/y.txt', 'top.txt']) {
+    fs.mkdirSync(path.dirname(path.join(source, file)), { recursive: true });
+    fs.writeFileSync(path.join(source, file), `${file}\n`);
+  }
+  sh(source, 'add', '.');
+  sh(source, ...as, 'commit', '-q', '-m', 'files');
+  const dir = path.join(work, `sparse-${counter++}`);
+  sh(work, 'clone', '-q', '--sparse', source, dir);
+  sh(dir, 'sparse-checkout', 'set', 'a');
+  fs.mkdirSync(path.join(dir, 'c'));
+  fs.writeFileSync(path.join(dir, 'c', 'z.txt'), 'new, outside the cone\n');
+  const cone = sh(dir, 'sparse-checkout', 'list');
+  const userIndex = fs.readFileSync(path.join(dir, '.git', 'index'));
+  const project = await projectAt(dir);
+  lines.length = 0;
+  assert.equal((await project.commit('timer')).committed, true);
+  const recorded = tree(dir);
+  for (const file of ['.claerbout/untracked.json', '.gitignore', 'a/x.txt', 'c/z.txt', 'top.txt']) assert.ok(recorded.includes(file), `${file} is in`);
+  assert.ok(!recorded.includes('b/y.txt'), 'what the checkout does not hold is not in the working tree, so not in the record');
+  assert.equal(sh(dir, 'sparse-checkout', 'list'), cone, 'the cone is as it was');
+  assert.ok(!fs.existsSync(path.join(dir, 'b')), 'nothing outside it was checked out');
+  assert.ok(userIndex.equals(fs.readFileSync(path.join(dir, '.git', 'index'))), "the user's index is byte for byte the same");
+  assert.ok(!lines.some((line) => /outside of your sparse-checkout|git add/.test(line)), `and nothing to say (${lines.join(' | ')})`);
+});
+
+test("git's PATH: the app's own first, then Homebrew's, the system's defaults and the standard folders", () => {
+  const saved = process.env.PATH;
+  try {
+    process.env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin'; // launchd's, a Finder launch
+    const dirs = gitEnvironment().PATH.split(path.delimiter);
+    assert.deepEqual(dirs.slice(0, 4), ['/usr/bin', '/bin', '/usr/sbin', '/sbin']);
+    for (const dir of ['/opt/homebrew/bin', '/usr/local/bin']) assert.ok(dirs.includes(dir), `${dir} is on it`);
+    assert.equal(new Set(dirs).size, dirs.length, 'each folder once');
+    process.env.PATH = '/somewhere/own:/usr/bin';
+    assert.equal(gitEnvironment().PATH.split(path.delimiter)[0], '/somewhere/own');
+    assert.equal(gitEnvironment().GIT_NO_LAZY_FETCH, '1');
+  } finally {
+    process.env.PATH = saved;
+  }
+});
+
+test('a required clean filter that cannot run: the commit is skipped, said once, naming the command', async () => {
+  for (const [kind, value] of [['process', 'claerbout-no-such-filter filter-process'], ['clean', 'claerbout-no-such-filter clean -- %f']]) {
+    const dir = folder(`filter-${kind}`);
+    sh(dir, 'init', '-q', '--initial-branch=main', '.');
+    sh(dir, 'config', `filter.lfs.${kind}`, value);
+    sh(dir, 'config', 'filter.lfs.required', 'true');
+    fs.writeFileSync(path.join(dir, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n');
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'untracked/\n');
+    fs.writeFileSync(path.join(dir, 'data.bin'), 'large\n');
+    const project = await projectAt(dir);
+    lines.length = 0;
+    for (let round = 0; round < 3; round++) {
+      fs.writeFileSync(path.join(dir, 'data.bin'), `large ${round}\n`);
+      const result = await project.autosave('timer');
+      assert.match(result?.skipped ?? '', /clean filter cannot run/, `${kind}: skipped, not an error`);
+    }
+    const said = lines.filter((line) => line.includes('autosave:'));
+    assert.equal(said.length, 1, `${kind}: one line in three rounds (${said.join(' | ')})`);
+    assert.match(said[0], /claerbout-no-such-filter/, `${kind}: the line names the command`);
+    assert.throws(() => sh(dir, 'rev-parse', '--verify', '-q', BRANCH), 'no record without the filter');
+  }
+});
+
+test('a failure every tick is said once, until a commit lands again', async () => {
+  const dir = folder('failing');
+  fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 1\n');
+  const found = await repositoryOf(binary, (sh(dir, 'init', '-q', '--initial-branch=main', '.'), dir));
+  const failing = failingGit('write-tree', 'fatal: the disk is on fire');
+  const project = new Project({ binary: failing.binary, root: found.root, gitDir: found.gitDir, appName: 'fixture', stateDir: folder('state'), log });
+  lines.length = 0;
+  for (let round = 0; round < 3; round++) assert.equal(await project.autosave('timer'), null);
+  assert.equal(lines.filter((line) => line.includes('the disk is on fire')).length, 1, 'said once');
+  failing.heal();
+  assert.equal((await project.autosave('timer')).committed, true);
+  failing.break();
+  fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 2\n');
+  assert.equal(await project.autosave('timer'), null);
+  assert.equal(lines.filter((line) => line.includes('the disk is on fire')).length, 2, 'said again after a commit landed');
 });
 
 test('linked worktrees: one branch each, so two open at once never flap; the branch name is git-safe', async () => {
@@ -724,4 +1029,11 @@ test('the error line is the last one that is not a hint or a warning', () => {
   assert.equal(errorLine('fatal: bad\nwarning: careful\n'), 'fatal: bad');
   assert.equal(errorLine('hint: only advice'), 'hint: only advice');
   assert.equal(errorLine(''), '');
+  // A filter process that never started: the cause, not git's wrap-up.
+  const missing = 'git-lfs filter-process: git-lfs: command not found\nfatal: the remote end hung up unexpectedly';
+  assert.equal(errorLine(missing), 'git-lfs filter-process: git-lfs: command not found');
+  assert.equal(errorLine('fatal: the remote end hung up unexpectedly'), 'fatal: the remote end hung up unexpectedly');
+  assert.equal(filterFailure(missing), 'git-lfs filter-process: git-lfs: command not found');
+  assert.equal(filterFailure("error: external filter 'x' failed 1\nfatal: a.bin: clean filter 'crypt' failed"), "error: external filter 'x' failed 1");
+  assert.equal(filterFailure('fatal: something else'), null);
 });

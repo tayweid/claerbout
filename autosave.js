@@ -8,19 +8,29 @@
 // in none gets one, quietly, once, but only where a project can be: never
 // the home folder, its standard folders (Desktop, Documents, Downloads,
 // …), a cloud-synced root, a temporary folder or a volume root; a folder
-// below one of those is fine. The record is one branch per working tree:
+// below one of those is fine. No record at all, repository or not, for a
+// document in a hidden folder of the home folder (~/.ssh, ~/.aws,
+// ~/.config/gh: where credentials live) or in a folder named like a
+// secret one (.ssh, .aws, .gnupg, .env), nor for a repository whose root
+// is the home folder or a folder it is in (a dotfiles ~/.git would take
+// in everything under home). The record is one branch per working tree:
 // refs/heads/claerbout-autosave for a repository's main working tree,
 // refs/heads/claerbout-autosave-<name> for a linked worktree. It is
 // written with plumbing only: a temporary index (GIT_INDEX_FILE, kept in
 // the shell's state folder between commits for its stat cache) filled by
 // `git add -A` over the working tree, so .gitignore applies, then
-// write-tree, commit-tree with the branch's tip as parent, and update-ref.
-// The user's HEAD, branch and index are never touched: nothing is
-// committed while the record's branch is checked out in any worktree,
-// while git itself is at work (index.lock), or while a merge, rebase,
-// cherry-pick or revert is in progress. A commit lands only when the tree
-// differs from the tip's. In the working tree the record does write
-// untracked/, a line in .gitignore and .claerbout/untracked.json.
+// write-tree, commit-tree with the branch's tip as parent, and update-ref
+// --no-deref. The user's HEAD, branch and index are never touched:
+// nothing is committed while the record's branch is checked out in any
+// worktree or being rebased in one, while it is a symbolic ref, while git
+// itself is at work (index.lock), or while a merge, rebase, cherry-pick or
+// revert is in progress; all of that is checked again just before the ref
+// moves, so only a few milliseconds of race remain. A commit lands only
+// when the tree differs from the tip's. In the working tree the record
+// does write untracked/, a line in .gitignore and
+// .claerbout/untracked.json, never through a symbolic link: a link (or
+// anything else that is not a folder or a file) at any of those names
+// turns the manifest off for that project, said once.
 //
 // Triggers: a page's `autosave` notice ("cell run [4]"), a timer per open
 // project (a tick while a job runs is dropped), `session open` when the
@@ -31,7 +41,16 @@
 // commit with each file's size, mtime and SHA-256 (rehashed only when size
 // or mtime changed; the hashes are cached in the shell's state folder),
 // and always recorded, whatever the ignore rules say. Common secret files
-// are kept out by pathspec.
+// are kept out by pathspec, whatever their case, and a file in untracked/
+// that the list matches is left out of the manifest, name and hash.
+//
+// git runs with the sparse-checkout rules off (the record is the working
+// tree; git add refuses paths outside the cone otherwise), with no lazy
+// fetch for a partial clone, and with a PATH that has Homebrew's and the
+// system's folders after the app's own, so a clean filter (git-lfs) is
+// found from a Finder launch. A required filter that is still missing
+// skips the commit, said once; any other failure is said once until a
+// commit lands again, never every tick.
 //
 // The record stays on this machine: nothing here pushes. The spec's
 // outside witness (the branch pushed to a remote on a schedule) is open;
@@ -42,7 +61,7 @@
 'use strict';
 
 const { execFile, execFileSync } = require('node:child_process');
-const { createHash } = require('node:crypto');
+const { createHash, randomBytes } = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
@@ -50,30 +69,40 @@ const path = require('node:path');
 
 const BRANCH_NAME = 'claerbout-autosave';
 const BRANCH = `refs/heads/${BRANCH_NAME}`;
-/** Kept out of the record by pathspec, in every folder: files by name… */
+/** Kept out of the record by pathspec, in every folder and whatever the
+ *  case (a key exported on Windows is Server.PEM): files by name… */
 const SECRET_FILES = [
   '.env',
   '.env.*',
   '*.pem',
   '*.key',
-  'id_rsa*',
-  'id_ed25519*',
-  'id_ecdsa*',
-  'id_dsa*',
+  'id_*',
+  '*.p8',
   '*.p12',
   '*.pfx',
   '*.jks',
   '*.keystore',
+  '*.keychain',
+  '*.keychain-db',
   '*.gpg',
   '*.asc',
+  '*.ppk',
+  '*.kdbx',
   'credentials.json',
   'service-account*.json',
+  'client_secret*.json',
+  'kaggle.json',
+  'secrets.toml',
   '.git-credentials',
   '.pypirc',
   '.npmrc',
   '.netrc',
-  'token*',
+  '.htpasswd',
+  '.Renviron',
+  'token',
+  'token.txt',
   '*.token',
+  '.token*',
 ];
 /** …and everything under a folder of one of these names. */
 const SECRET_FOLDERS = ['.env', '.aws', '.ssh', '.gnupg'];
@@ -88,9 +117,12 @@ const IN_PROGRESS = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-me
 /** Set on every git the record runs, so nothing it does writes into the
  *  user's .git beyond objects and its own branch: a split index would put
  *  a sharedindex file there for each temporary index, an fsmonitor would
- *  start a daemon, and the advice is noise in the log. */
+ *  start a daemon, and the advice is noise in the log. The sparse-checkout
+ *  rules are off because the record is the working tree: with them, git
+ *  add refuses the manifest and any new file outside the cone. */
 const QUIET = [
   '-c', 'core.splitIndex=false',
+  '-c', 'core.sparseCheckout=false',
   '-c', 'core.fsmonitor=false',
   '-c', 'advice.addIgnoredFile=false',
   '-c', 'advice.addEmbeddedRepo=false',
@@ -150,15 +182,67 @@ function developerToolsInstalled() {
   }
 }
 
+/** The folders a login shell's PATH starts from on a Mac (path_helper
+ *  reads /etc/paths and /etc/paths.d); read once. */
+let systemPaths = null;
+function readSystemPaths() {
+  if (systemPaths) return systemPaths;
+  systemPaths = [];
+  const lines = (file) => {
+    try {
+      return fs.readFileSync(file, 'utf8').split('\n').map((line) => line.trim()).filter((line) => line && !line.startsWith('#'));
+    } catch {
+      return [];
+    }
+  };
+  systemPaths.push(...lines('/etc/paths'));
+  try {
+    for (const name of fs.readdirSync('/etc/paths.d').sort()) systemPaths.push(...lines(path.join('/etc/paths.d', name)));
+  } catch {
+    // No /etc/paths.d: not a Mac.
+  }
+  return systemPaths;
+}
+
+/** The PATH git runs with: the app's own first, then Homebrew's, the
+ *  system's defaults and the standard folders. An app opened from Finder
+ *  has launchd's bare /usr/bin:/bin:/usr/sbin:/sbin, where git-lfs and
+ *  git-crypt (clean and smudge filters), and credential helpers, are not. */
+function searchPath() {
+  const own = (process.env.PATH ?? '').split(path.delimiter);
+  if (process.platform === 'win32') return own.filter(Boolean).join(path.delimiter);
+  const more = [
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',
+    ...readSystemPaths(),
+    path.join(os.homedir(), '.local', 'bin'),
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin',
+  ];
+  return [...new Set([...own, ...more].filter(Boolean))].join(path.delimiter);
+}
+
 /** git's environment: the user's, without the redirects, never prompting,
- *  taking no optional locks, and in the C locale so its messages are the
- *  ones this module reads. */
+ *  taking no optional locks, never fetching a partial clone's missing
+ *  objects, with the PATH above, and in the C locale so its messages are
+ *  the ones this module reads. */
 function gitEnvironment(extra = {}) {
   const env = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (!REDIRECTS.includes(key)) env[key] = value;
   }
-  return { ...env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C', ...extra };
+  return {
+    ...env,
+    PATH: searchPath(),
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_NO_LAZY_FETCH: '1',
+    LC_ALL: 'C',
+    ...extra,
+  };
 }
 
 /** Run git to completion: {status, stdout, stderr}. A timeout kills it and
@@ -178,14 +262,36 @@ function git(binary, cwd, args, { env = {}, timeout = 120_000, input = '' } = {}
   });
 }
 
+/** Lines git ends with that are not the cause: advice, and the wrap-up a
+ *  filter process that never started leaves (`the remote end hung up`). */
+const NOT_THE_CAUSE = [/^(hint|warning):/i, /^fatal: the remote end hung up unexpectedly$/i, /^fatal: early EOF$/i];
+
 /** The line of git's stderr that says what went wrong: the last that is
- *  not a hint or a warning (git ends many errors with advice). */
+ *  not a hint, a warning or a wrap-up line (git ends many errors with
+ *  advice, and a missing filter with `the remote end hung up`). */
 function errorLine(text) {
   const lines = String(text ?? '')
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean);
-  return [...lines].reverse().find((line) => !/^(hint|warning):/i.test(line)) ?? lines.at(-1) ?? '';
+  const reversed = [...lines].reverse();
+  return (
+    reversed.find((line) => !NOT_THE_CAUSE.some((pattern) => pattern.test(line))) ??
+    reversed.find((line) => !NOT_THE_CAUSE[0].test(line)) ??
+    lines.at(-1) ??
+    ''
+  );
+}
+
+/** Why git add stopped on a clean filter (git-lfs, git-crypt) it could
+ *  not run, or null: the shell's `<command>: command not found` (`not
+ *  found` from dash), or git's own line. */
+function filterFailure(stderr) {
+  const text = String(stderr ?? '');
+  const missing = text.match(/^.*: (?:command )?not found\s*$/m);
+  const failed = text.match(/^(?:fatal|error): .*(?:clean filter '[^']*' failed|external filter '[^']*' failed).*$/m);
+  if (!missing && !failed) return null;
+  return (missing ?? failed)[0].trim();
 }
 
 const nulList = (text) => text.split('\0').filter(Boolean);
@@ -205,10 +311,11 @@ function someOf(names) {
 
 // MARK: - Repositories
 
-/** The repository a folder is in: {root, gitDir, linked}; null when it is
- *  in none; 'unusable' when it is inside a .git folder or a bare
- *  repository, where no record can be kept. `linked` is a linked worktree
- *  (`git worktree add`), whose git dir is not the repository's common one. */
+/** The repository a folder is in: {root, gitDir, commonDir, linked}; null
+ *  when it is in none; 'unusable' when it is inside a .git folder or a
+ *  bare repository, where no record can be kept. `linked` is a linked
+ *  worktree (`git worktree add`), whose git dir is not the repository's
+ *  common one (`commonDir`, where every worktree's own folder is kept). */
 async function repositoryOf(binary, dir) {
   const { status, stdout, stderr } = await git(binary, dir, [
     'rev-parse',
@@ -226,8 +333,9 @@ async function repositoryOf(binary, dir) {
   }
   const [insideGitDir, bare, root, gitDir, commonDir] = stdout.trim().split('\n');
   if (insideGitDir === 'true' || bare === 'true' || !root) return 'unusable';
-  const linked = Boolean(commonDir) && realpath(path.resolve(dir, commonDir)) !== realpath(gitDir);
-  return { root, gitDir, linked };
+  const common = commonDir ? realpath(path.resolve(dir, commonDir)) : realpath(gitDir);
+  const linked = common !== realpath(gitDir);
+  return { root, gitDir, commonDir: common, linked };
 }
 
 /** A repository at a folder that has none. Its HEAD is an unborn branch;
@@ -278,25 +386,68 @@ const CLOUD_ROOTS = [
 ];
 const TEMPORARY_FOLDERS = () => [os.tmpdir(), '/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp'];
 
+/** A folder's two forms: as given and with symbolic links resolved (/tmp
+ *  is /private/tmp on a Mac). */
+const forms = (file) => new Set([path.resolve(file), realpath(file)]);
+
+/** 'the home folder', 'a folder the home folder is in', or null. */
+function aboveHome(dir, home) {
+  const here = forms(dir);
+  if ([...forms(home)].some((form) => here.has(form))) return 'the home folder';
+  for (const homeForm of forms(home)) {
+    for (const form of here) if (homeForm.startsWith(form.endsWith(path.sep) ? form : form + path.sep)) return 'a folder the home folder is in';
+  }
+  return null;
+}
+
+/** Whether a folder is a hidden folder of the home folder or inside one:
+ *  ~/.ssh, ~/.aws, ~/.config/gh. */
+function inHiddenHomeFolder(dir, home) {
+  for (const homeForm of forms(home)) {
+    for (const form of forms(dir)) {
+      const relative = path.relative(homeForm, form);
+      if (relative && !relative.startsWith('..') && !path.isAbsolute(relative) && relative.split(path.sep)[0].startsWith('.')) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Why no record is kept for a document in this folder at all, whether a
+ * repository is there or not, or null: a hidden folder of the home folder
+ * (~/.ssh, ~/.aws, ~/.gnupg, ~/.config/*, ~/.kube, ~/.docker), where
+ * credentials live, or a folder named like one the secrets list keeps out
+ * (.ssh, .aws, .gnupg, .env), anywhere. The secrets' pathspecs are
+ * relative to the repository's root, so they miss when the root is that
+ * folder.
+ */
+function secretPlace(dir, home = os.homedir()) {
+  if (inHiddenHomeFolder(dir, home)) return 'a hidden folder of the home folder';
+  for (const form of forms(dir)) {
+    const named = form.split(path.sep).find((part) => SECRET_FOLDERS.some((name) => name.toLowerCase() === part.toLowerCase()));
+    if (named) return `a ${named} folder`;
+  }
+  return null;
+}
+
 /**
  * Why a folder in no repository is no place to start one, or null when it
- * is a project's folder: the home folder or a folder it is in, one of its
- * standard folders, a cloud-synced root, a temporary folder, or a volume
- * root. A folder at least one level below any of those qualifies
- * (~/Projects/foo, ~/Desktop/week-3). Paths are compared as given and
- * with symbolic links resolved (/tmp is /private/tmp on a Mac).
+ * is a project's folder: the home folder or a folder it is in, a hidden
+ * folder of the home folder or a folder in one, one of its standard
+ * folders, a cloud-synced root, a temporary folder, or a volume root. A
+ * folder at least one level below any of those but the hidden ones
+ * qualifies (~/Projects/foo, ~/Desktop/week-3). Paths are compared as
+ * given and with symbolic links resolved (/tmp is /private/tmp on a Mac).
  */
 function notProjectFolder(dir, { home = os.homedir(), temporary = TEMPORARY_FOLDERS() } = {}) {
-  const forms = (file) => new Set([path.resolve(file), realpath(file)]);
   const here = forms(dir);
   const is = (file) => [...forms(file)].some((form) => here.has(form));
   for (const form of here) {
     if (path.parse(form).root === form || /^\/Volumes\/[^/]+$/.test(form)) return 'a volume root';
   }
-  if (is(home)) return 'the home folder';
-  for (const homeForm of forms(home)) {
-    for (const form of here) if (homeForm.startsWith(form + path.sep)) return 'a folder the home folder is in';
-  }
+  const above = aboveHome(dir, home);
+  if (above) return above;
+  if (inHiddenHomeFolder(dir, home)) return 'a hidden folder of the home folder';
   for (const name of STANDARD_FOLDERS) if (is(path.join(home, name))) return `the ${name} folder itself`;
   for (const folder of temporary) if (is(folder)) return 'a temporary folder';
   for (const homeForm of forms(home)) {
@@ -333,12 +484,60 @@ async function filesUnder(folder) {
   return found;
 }
 
-/** .claerbout/untracked.json: every file under untracked/ with its size,
- *  mtime and SHA-256, so the data the record leaves out is still pinned
- *  by it. A file is hashed again only when its size or mtime changed;
- *  the hashes live in `cacheFile`, outside the project. A file that
- *  cannot be read is left out and named to `unreadable`. */
-async function writeManifest(root, cacheFile, unreadable = () => {}) {
+/** A name pattern of the secrets list as a regular expression: `*` is
+ *  any run of characters but `/`, `?` one, and case is ignored, as git's
+ *  `:(glob,icase)` pathspecs match them. */
+function globPattern(pattern) {
+  const source = pattern
+    .replace(/[.+^$()|{}[\]\\]/g, '\\$&')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]');
+  return new RegExp(`^${source}$`, 'i');
+}
+const SECRET_NAMES = SECRET_FILES.map(globPattern);
+
+/** Whether the secrets list matches a root-relative path ('a/b/.env'):
+ *  its name matches a file pattern, or a folder on the way has a secret
+ *  folder's name. */
+function isSecret(relative) {
+  const parts = relative.split('/');
+  if (SECRET_NAMES.some((pattern) => pattern.test(parts.at(-1)))) return true;
+  return parts.slice(0, -1).some((part) => SECRET_FOLDERS.some((name) => name.toLowerCase() === part.toLowerCase()));
+}
+
+/** What is at a path without following a link: 'missing', 'file',
+ *  'folder', 'link' or 'other'. */
+async function kindOf(file) {
+  try {
+    const info = await fsp.lstat(file);
+    if (info.isSymbolicLink()) return 'link';
+    if (info.isFile()) return 'file';
+    if (info.isDirectory()) return 'folder';
+    return 'other';
+  } catch (error) {
+    if (error.code === 'ENOENT') return 'missing';
+    throw error;
+  }
+}
+
+/**
+ * .claerbout/untracked.json: every file under untracked/ with its size,
+ * mtime and SHA-256, so the data the record leaves out is still pinned by
+ * it. A file is hashed again only when its size or mtime changed; the
+ * hashes live in `cacheFile`, outside the project. A file that cannot be
+ * read is left out and named to `unreadable`; a file the secrets list
+ * matches is left out, neither named nor hashed, and counted to `secrets`.
+ * The manifest is written to a new file beside it and renamed over it, so
+ * a link there is replaced, never followed, and a reader never sees half
+ * of one; but a link (or anything not a file) at its name, or at
+ * .claerbout's, means no manifest: null, and nothing written.
+ */
+async function writeManifest(root, cacheFile, { unreadable = () => {}, secrets = () => {} } = {}) {
+  const manifest = path.join(root, MANIFEST);
+  const folder = await kindOf(path.dirname(manifest));
+  if (folder === 'missing') await fsp.mkdir(path.dirname(manifest));
+  else if (folder !== 'folder') return null;
+  if (!['missing', 'file'].includes(await kindOf(manifest))) return null;
   let cache = {};
   try {
     cache = JSON.parse(await fsp.readFile(cacheFile, 'utf8'));
@@ -348,12 +547,18 @@ async function writeManifest(root, cacheFile, unreadable = () => {}) {
   const files = (await filesUnder(path.join(root, UNTRACKED))).sort();
   const fresh = {};
   const entries = [];
+  let secret = 0;
   for (const file of files) {
     const relative = path.relative(root, file).split(path.sep).join('/');
+    if (isSecret(relative)) {
+      secret += 1;
+      continue;
+    }
     let info;
     let sha256;
     try {
-      info = await fsp.stat(file);
+      info = await fsp.lstat(file);
+      if (!info.isFile()) continue;
       const known = cache[relative];
       sha256 = known && known.size === info.size && known.mtime === info.mtimeMs ? known.sha256 : await sha256Of(file);
     } catch (error) {
@@ -363,7 +568,7 @@ async function writeManifest(root, cacheFile, unreadable = () => {}) {
     fresh[relative] = { size: info.size, mtime: info.mtimeMs, sha256 };
     entries.push({ path: relative, size: info.size, mtime: new Date(info.mtimeMs).toISOString(), sha256 });
   }
-  const manifest = path.join(root, MANIFEST);
+  secrets(secret);
   const text = `${JSON.stringify({ files: entries }, null, 2)}\n`;
   let current = null;
   try {
@@ -372,8 +577,13 @@ async function writeManifest(root, cacheFile, unreadable = () => {}) {
     // Not there yet.
   }
   if (current !== text) {
-    await fsp.mkdir(path.dirname(manifest), { recursive: true });
-    await fsp.writeFile(manifest, text);
+    const fresher = `${manifest}.${process.pid}-${randomBytes(4).toString('hex')}.tmp`;
+    try {
+      await fsp.writeFile(fresher, text, { flag: 'wx' });
+      await fsp.rename(fresher, manifest);
+    } finally {
+      await fsp.rm(fresher, { force: true });
+    }
   }
   await fsp.mkdir(path.dirname(cacheFile), { recursive: true });
   await fsp.writeFile(cacheFile, JSON.stringify(fresh));
@@ -382,12 +592,23 @@ async function writeManifest(root, cacheFile, unreadable = () => {}) {
 
 // MARK: - One project
 
-/** Pathspecs for the secrets: `exclude,` for git add, '' to match them. */
+/** Pathspecs for the secrets, whatever the case: `exclude,` for git add,
+ *  '' to match them. */
 function secretPathspecs(magic) {
   return [
-    ...SECRET_FILES.map((pattern) => `:(${magic}glob)**/${pattern}`),
-    ...SECRET_FOLDERS.map((name) => `:(${magic}glob)**/${name}/**`),
+    ...SECRET_FILES.map((pattern) => `:(${magic}glob,icase)**/${pattern}`),
+    ...SECRET_FOLDERS.map((name) => `:(${magic}glob,icase)**/${name}/**`),
   ];
+}
+
+/** A commit skipped for a reason of the repository's, not an error:
+ *  said once, as a guard's reason is. */
+class Skip extends Error {
+  constructor(reason, line) {
+    super(reason);
+    this.reason = reason;
+    this.line = line;
+  }
 }
 
 class Project {
@@ -396,15 +617,18 @@ class Project {
    * @param {string} options.binary git
    * @param {string} options.root the working tree
    * @param {string} options.gitDir its git dir (a linked worktree's own)
+   * @param {string} [options.commonDir] the repository's common git dir;
+   *   asked of git when omitted
    * @param {string} [options.branch] the record's branch name (branchFor)
    * @param {string} options.appName lower-case, the message's prefix
    * @param {string} options.stateDir this project's folder in the shell's state
    * @param {(line: string) => void} options.log
    */
-  constructor({ binary, root, gitDir, branch = BRANCH_NAME, appName, stateDir, log }) {
+  constructor({ binary, root, gitDir, commonDir, branch = BRANCH_NAME, appName, stateDir, log }) {
     this.binary = binary;
     this.root = root;
     this.gitDir = gitDir;
+    this.commonDir = commonDir ?? null;
     this.branchName = branch;
     this.ref = `refs/heads/${branch}`;
     this.appName = appName;
@@ -424,6 +648,10 @@ class Project {
     this.said = new Set();
     /** Why the last commit was skipped, so it is said once. */
     this.blockedBy = null;
+    /** The last job's error, so a failure every tick is said once. */
+    this.failedWith = null;
+    /** Secret files in untracked/ the manifest left out, for the log. */
+    this.manifestSecrets = 0;
     /** Nested repositories without a commit, left out of the record. */
     this.excluded = new Set();
     this.secretsShown = false;
@@ -439,15 +667,24 @@ class Project {
     this.log(line);
   }
 
-  /** Chain a job after the ones before it; its failure is logged, not thrown. */
+  /** Chain a job after the ones before it; its failure is logged, not
+   *  thrown, and said once until a job succeeds again, so a repository
+   *  the record cannot write logs its reason once, not every tick. */
   run(job) {
     this.pending += 1;
     const next = this.queue
       .then(job, job)
-      .catch((error) => {
-        this.log(`autosave: ${error.message} (${this.root})`);
-        return null;
-      })
+      .then(
+        (value) => {
+          this.failedWith = null;
+          return value;
+        },
+        (error) => {
+          if (error.message !== this.failedWith) this.log(`autosave: ${error.message} (${this.root})`);
+          this.failedWith = error.message;
+          return null;
+        },
+      )
       .finally(() => {
         this.pending -= 1;
       });
@@ -455,53 +692,99 @@ class Project {
     return next;
   }
 
-  /** A folder of the record's in the working tree; false (said once) when
-   *  something that is not a folder has its name. */
+  /** A folder of the record's in the working tree, made when missing;
+   *  false (said once) when a symbolic link or something that is not a
+   *  folder has its name. Never followed: a link to ~ would have the
+   *  manifest walk and hash the whole home folder. */
   async folder(name) {
     const full = path.join(this.root, name);
+    let kind;
     try {
-      await fsp.mkdir(full);
-      return true;
-    } catch (error) {
-      if (error.code === 'EEXIST') {
-        try {
-          if ((await fsp.stat(full)).isDirectory()) return true;
-        } catch {
-          // A dangling link: not a folder.
-        }
+      kind = await kindOf(full);
+      if (kind === 'missing') {
+        await fsp.mkdir(full);
+        return true;
       }
-      this.once(`folder ${name}`, `autosave: ${name} exists and is not a folder, so untracked/ is not kept and has no manifest (${this.root})`);
-      return false;
+    } catch (error) {
+      kind = error.code ?? 'unusable';
     }
+    if (kind === 'folder') return true;
+    const what = kind === 'link' ? 'is a symbolic link' : kind === 'file' || kind === 'other' ? 'exists and is not a folder' : `cannot be used (${kind})`;
+    this.once(`folder ${name}`, `autosave: ${name} ${what}, so untracked/ is not kept and has no manifest (${this.root})`);
+    return false;
   }
 
   /** untracked/ exists and is ignored; .claerbout/ exists. Once per
-   *  process; idempotent on disk. Neither when a file has either name. */
+   *  process; idempotent on disk. Neither, and no manifest, when a file or
+   *  a link has either name, or when the line has to go into a .gitignore
+   *  that is a link (git reads no linked .gitignore, and the append would
+   *  land in the file it points to). */
   async prepare() {
     if (this.prepared) return;
+    const ignored = (await this.git(['check-ignore', '-q', `${UNTRACKED}/`])).status !== 1;
+    const file = path.join(this.root, '.gitignore');
+    const kind = ignored ? null : await kindOf(file);
+    if (kind !== null && kind !== 'missing' && kind !== 'file') {
+      this.manifest = false;
+      this.prepared = true;
+      this.once('gitignore', `autosave: .gitignore ${kind === 'link' ? 'is a symbolic link' : 'is not a file'}, so untracked/ is not kept and has no manifest (${this.root})`);
+      return;
+    }
     this.manifest = (await this.folder(UNTRACKED)) && (await this.folder('.claerbout'));
-    if (this.manifest) {
-      const ignored = await this.git(['check-ignore', '-q', `${UNTRACKED}/`]);
-      if (ignored.status === 1) {
-        const file = path.join(this.root, '.gitignore');
-        let text = '';
-        try {
-          text = await fsp.readFile(file, 'utf8');
-        } catch {
-          // No .gitignore yet.
-        }
-        const lead = text === '' || text.endsWith('\n') ? '' : '\n';
-        await fsp.appendFile(
-          file,
-          `${lead}# Claerbout: large data, caches and scratch, pinned by .claerbout/untracked.json\n${UNTRACKED}/\n`,
-        );
-        this.log(`autosave: ${UNTRACKED}/ added to .gitignore (${this.root})`);
+    if (!this.manifest || ignored) {
+      this.prepared = true;
+      return;
+    }
+    const line = `# Claerbout: large data, caches and scratch, pinned by .claerbout/untracked.json\n${UNTRACKED}/\n`;
+    if (kind === 'missing') {
+      await fsp.writeFile(file, line, { flag: 'wx' });
+    } else {
+      const text = await fsp.readFile(file, 'utf8');
+      const lead = text === '' || text.endsWith('\n') ? '' : '\n';
+      const handle = await fsp.open(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | (fs.constants.O_NOFOLLOW ?? 0));
+      try {
+        await handle.write(`${lead}${line}`);
+      } finally {
+        await handle.close();
       }
     }
     this.prepared = true;
+    this.log(`autosave: ${UNTRACKED}/ added to .gitignore (${this.root})`);
   }
 
-  /** Why no commit can be made right now, or null. */
+  /** The repository's common git dir, where every worktree's own is. */
+  async common() {
+    if (this.commonDir) return this.commonDir;
+    const { status, stdout } = await this.git(['rev-parse', '--git-common-dir']);
+    this.commonDir = status === 0 && stdout.trim() ? realpath(path.resolve(this.root, stdout.trim())) : this.gitDir;
+    return this.commonDir;
+  }
+
+  /** Whether the record's branch is being rebased in any working tree:
+   *  that worktree's HEAD is detached meanwhile, so the worktree list does
+   *  not show the branch, but the rebase's head-name names it. */
+  async rebasing() {
+    const common = await this.common();
+    let names = [];
+    try {
+      names = fs.readdirSync(path.join(common, 'worktrees'));
+    } catch {
+      // No linked worktrees.
+    }
+    for (const dir of [common, ...names.map((name) => path.join(common, 'worktrees', name))]) {
+      for (const state of ['rebase-merge', 'rebase-apply']) {
+        try {
+          if (fs.readFileSync(path.join(dir, state, 'head-name'), 'utf8').trim() === this.ref) return true;
+        } catch {
+          // No rebase there.
+        }
+      }
+    }
+    return false;
+  }
+
+  /** Why no commit can be made right now, or null. Asked before a commit
+   *  and again just before its ref moves. */
   async blocked() {
     if (fs.existsSync(path.join(this.gitDir, 'index.lock'))) return 'index.lock exists';
     for (const marker of IN_PROGRESS) {
@@ -509,6 +792,9 @@ class Project {
         return `${marker.replace(/_HEAD$/, '').replace('-', ' ').toLowerCase()} in progress`;
       }
     }
+    // A symbolic ref at the record's name would carry the write to the
+    // branch it points at (the user's main, say).
+    if ((await this.git(['symbolic-ref', '-q', this.ref])).status === 0) return `${this.branchName} is a symbolic ref`;
     // The branch checked out in any working tree of the repository: an
     // update-ref would move that worktree's HEAD under the user.
     const listed = await this.git(['worktree', 'list', '--porcelain']);
@@ -517,7 +803,19 @@ class Project {
         ? listed.stdout.split('\n').includes(`branch ${this.ref}`)
         : (await this.git(['symbolic-ref', '-q', 'HEAD'])).stdout.trim() === this.ref;
     if (checkedOut) return `${this.branchName} is checked out`;
+    // Being rebased in a working tree: a commit now would strand the
+    // user's `git rebase --continue` (it cannot lock the ref).
+    if (await this.rebasing()) return `${this.branchName} is being rebased`;
     return null;
+  }
+
+  /** A skipped commit's result; the reason said when it is new. */
+  skip(reason, message, line = `autosave: not recorded while ${reason} (${this.root})`) {
+    if (reason !== this.blockedBy) {
+      this.log(line);
+      this.blockedBy = reason;
+    }
+    return { skipped: reason, message };
   }
 
   /** The repository's own identity when it has one, else the autosave's. */
@@ -558,7 +856,9 @@ class Project {
    * once) and a nested repository without a commit (left out from then
    * on); entries the ignore rules or the secrets now match leave the kept
    * index (git add never drops a path the index already has); and the
-   * manifest and .gitignore go in whatever the ignore rules say.
+   * manifest and .gitignore go in whatever the ignore rules say. A clean
+   * filter that cannot run (git-lfs not installed, with
+   * filter.<name>.required) is a Skip, said once.
    */
   async fill(env) {
     await this.recheckExcluded();
@@ -575,7 +875,13 @@ class Project {
         ],
         { env },
       );
-    let added = await add();
+    const filtered = (result) => {
+      // A filter git could not run is fatal (128), even with --ignore-errors.
+      const failure = result.status !== 0 && result.status !== 1 && filterFailure(result.stderr);
+      if (failure) throw new Skip(`a clean filter cannot run: ${failure}`, `autosave: not recorded, a clean filter cannot run: ${failure} (${this.root})`);
+      return result;
+    };
+    let added = filtered(await add());
     const unborn = [...added.stderr.matchAll(/'(.+?)\/?' does not have a commit checked out/g)]
       .map((match) => match[1])
       .filter((entry) => !this.excluded.has(entry));
@@ -585,7 +891,7 @@ class Project {
     }
     // An older git gives up (128) on a nested repository without a commit
     // even with --ignore-errors: again, with it excluded.
-    if (added.status !== 0 && added.status !== 1 && unborn.length > 0) added = await add();
+    if (added.status !== 0 && added.status !== 1 && unborn.length > 0) added = filtered(await add());
     if (added.status === 1) {
       const unreadable = [...added.stderr.matchAll(/unable to index file '(.+?)'/g)]
         .map((match) => match[1])
@@ -617,16 +923,21 @@ class Project {
     // .gitignore says what the record leaves out: both always go in.
     const forced = [...(this.manifest ? [MANIFEST_PATH] : []), '.gitignore'].filter((file) => fs.existsSync(path.join(this.root, file)));
     if (forced.length > 0) {
-      const forcedAdd = await this.git(['add', '-f', '--', ...forced.map((file) => `:(literal)${file}`)], { env });
+      const forcedAdd = filtered(await this.git(['add', '-f', '--', ...forced.map((file) => `:(literal)${file}`)], { env }));
       if (forcedAdd.status !== 0) throw new Error(`git add -f: ${errorLine(forcedAdd.stderr) || forcedAdd.status}`);
     }
     if (!this.secretsShown) {
       // Once per launch: what the secrets list keeps out of this project,
-      // so a name it catches by mistake (tokenizer.py) is seen.
+      // so a name it catches by mistake (id_map.csv) is seen, and how many
+      // files in untracked/ the manifest left out (not their names).
       this.secretsShown = true;
       const kept = await this.git(['ls-files', '-z', '-o', '--exclude-standard', '--', ...secretPathspecs('')], { env });
-      const names = nulList(kept.stdout);
-      if (kept.status === 0 && names.length > 0) this.log(`autosave: kept out of the record as possible secrets: ${someOf(names)} (${this.root})`);
+      const names = kept.status === 0 ? nulList(kept.stdout) : [];
+      const inUntracked = this.manifestSecrets;
+      const more = inUntracked > 0 ? `${inUntracked} ${inUntracked === 1 ? 'file' : 'files'} in ${UNTRACKED}/, left out of its manifest` : '';
+      if (names.length > 0 || more) {
+        this.log(`autosave: kept out of the record as possible secrets: ${[names.length > 0 ? someOf(names) : '', more].filter(Boolean).join('; ')} (${this.root})`);
+      }
     }
     const written = await this.git(['write-tree'], { env });
     if (written.status !== 0) throw new Error(`git write-tree: ${errorLine(written.stderr) || written.status}`);
@@ -642,16 +953,17 @@ class Project {
   async commit(trigger) {
     const message = `${this.appName}: ${cleanTrigger(trigger)}`;
     const reason = await this.blocked();
-    if (reason !== this.blockedBy) {
-      if (reason) this.log(`autosave: not recorded while ${reason} (${this.root})`);
-      this.blockedBy = reason;
-    }
-    if (reason) return { skipped: reason, message };
+    if (reason) return this.skip(reason, message);
     await this.prepare();
     if (this.manifest) {
-      await writeManifest(this.root, path.join(this.stateDir, 'hashes.json'), (file) =>
-        this.once(`unhashed ${file}`, `autosave: ${file} cannot be read, so the manifest leaves it out (${this.root})`),
-      );
+      const written = await writeManifest(this.root, path.join(this.stateDir, 'hashes.json'), {
+        unreadable: (file) => this.once(`unhashed ${file}`, `autosave: ${file} cannot be read, so the manifest leaves it out (${this.root})`),
+        secrets: (count) => (this.manifestSecrets = count),
+      });
+      if (written === null) {
+        this.manifest = false;
+        this.once('manifest', `autosave: ${MANIFEST_PATH} or its folder is a symbolic link or not a file, so untracked/ has no manifest (${this.root})`);
+      }
     }
     await fsp.mkdir(this.stateDir, { recursive: true });
     // The index is kept between commits (git add -A against it uses its
@@ -666,26 +978,39 @@ class Project {
         const parent = await this.tip();
         if (parent) {
           const parentTree = await this.git(['rev-parse', `${parent}^{tree}`]);
-          if (parentTree.status === 0 && parentTree.stdout.trim() === tree) return { skipped: 'unchanged', message };
+          if (parentTree.status === 0 && parentTree.stdout.trim() === tree) {
+            this.blockedBy = null;
+            return { skipped: 'unchanged', message };
+          }
         }
         const made = await this.git(['commit-tree', tree, ...(parent ? ['-p', parent] : []), '-m', message], {
           env: await this.identity(),
         });
         if (made.status !== 0) throw new Error(`git commit-tree: ${errorLine(made.stderr) || made.status}`);
         const hash = made.stdout.trim();
+        // The guards again: filling a large tree takes seconds (minutes
+        // when untracked/ is hashed for the first time), long enough for
+        // the user to check the branch out or start a rebase.
+        const late = await this.blocked();
+        if (late) return this.skip(late, message);
         const updated = await this.git([
           'update-ref',
+          '--no-deref',
           '-m',
           `autosave: ${message}`,
           this.ref,
           hash,
           parent ?? '0'.repeat(tree.length),
         ]);
-        if (updated.status === 0) return { committed: true, hash, message };
+        if (updated.status === 0) {
+          this.blockedBy = null;
+          return { committed: true, hash, message };
+        }
         if (attempt === 1) throw new Error(`git update-ref: ${errorLine(updated.stderr) || updated.status}`);
       }
       return { skipped: 'the branch moved twice', message };
     } catch (error) {
+      if (error instanceof Skip) return this.skip(error.reason, message, error.line);
       // An index git could not use is rebuilt at the next commit.
       await fsp.rm(this.index, { force: true });
       throw error;
@@ -759,6 +1084,8 @@ class Autosave {
     this.windows = new Map();
     /** Folders already looked at: dir → root or null. */
     this.roots = new Map();
+    /** Repositories refused for where their root is, said once each. */
+    this.refusedRoots = new Set();
     /** Membership changes, one after another. */
     this.chain = Promise.resolve();
     this.quitting = false;
@@ -770,12 +1097,17 @@ class Autosave {
 
   /** The project for a document's folder: the repository it is in, or one
    *  made there when it is in none and is a project's folder; null where
-   *  no record is kept (said once per folder). */
+   *  no record is kept (said once per folder): a hidden folder of the home
+   *  folder or a secret-named one, repository or not, and a repository
+   *  whose root is the home folder or a folder it is in (said once per
+   *  repository). */
   async rootFor(dir) {
     if (this.roots.has(dir)) return this.roots.get(dir);
     let root = null;
     try {
-      let found = await repositoryOf(this.binary, dir);
+      const secret = secretPlace(dir, this.places.home);
+      let found = secret ? 'refused' : await repositoryOf(this.binary, dir);
+      if (secret) this.log(`autosave: no record for ${dir}: it is in ${secret}, where credentials are kept`);
       if (found === null) {
         const refused = notProjectFolder(dir, this.places);
         if (refused) {
@@ -788,21 +1120,30 @@ class Autosave {
       }
       if (found === 'unusable') this.log(`autosave: no record for ${dir}: inside a git directory or a bare repository`);
       else if (found !== 'refused') {
-        root = found.root;
-        if (!this.projects.has(root)) {
-          const key = createHash('sha256').update(root).digest('hex').slice(0, 16);
-          this.projects.set(
-            root,
-            new Project({
-              binary: this.binary,
+        const above = aboveHome(found.root, this.places.home);
+        if (above) {
+          if (!this.refusedRoots.has(found.root)) {
+            this.refusedRoots.add(found.root);
+            this.log(`autosave: no record for the repository at ${found.root}: it is ${above}, and would take in everything under it`);
+          }
+        } else {
+          root = found.root;
+          if (!this.projects.has(root)) {
+            const key = createHash('sha256').update(root).digest('hex').slice(0, 16);
+            this.projects.set(
               root,
-              gitDir: found.gitDir,
-              branch: branchFor(found),
-              appName: this.appName,
-              stateDir: path.join(this.stateDir, key),
-              log: this.log,
-            }),
-          );
+              new Project({
+                binary: this.binary,
+                root,
+                gitDir: found.gitDir,
+                commonDir: found.commonDir,
+                branch: branchFor(found),
+                appName: this.appName,
+                stateDir: path.join(this.stateDir, key),
+                log: this.log,
+              }),
+            );
+          }
         }
       }
     } catch (error) {
@@ -937,8 +1278,12 @@ module.exports = {
   initRepository,
   branchFor,
   notProjectFolder,
+  secretPlace,
+  isSecret,
   writeManifest,
   errorLine,
+  filterFailure,
+  gitEnvironment,
   BRANCH,
   BRANCH_NAME,
   SECRETS,
