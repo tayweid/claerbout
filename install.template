@@ -77,6 +77,9 @@ if [ "${1:-}" = "--check" ]; then
         echo "@NAME@: not installed at $app; the site has build $latest ($when). Run the install line to install it."
     elif [ "$(field "$stamp" build)" = "$latest" ]; then
         echo "@NAME@: up to date at $app (build $latest, $when)."
+    elif [ -z "$(field "$stamp" build)" ]; then
+        # Built before the shell stamped builds (0.2.0): it cannot say which.
+        echo "@NAME@: an earlier build at $app, with no build stamp; the site has build $latest ($when). Run the install line again to update."
     else
         echo "@NAME@: installed build $(field "$stamp" build) ($(field "$stamp" built | cut -c1-10)) at $app; the site has build $latest ($when). Run the install line again to update."
     fi
