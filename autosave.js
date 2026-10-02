@@ -124,8 +124,15 @@ const UNTRACKED = 'untracked';
 const MANIFEST = path.join('.claerbout', 'untracked.json');
 const MANIFEST_PATH = MANIFEST.split(path.sep).join('/');
 const DEFAULT_INTERVAL_MS = 60 * 1000;
-/** Files in .git that mean a merge, rebase, cherry-pick or revert is under way. */
-const IN_PROGRESS = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply'];
+/** Files in .git that mean a merge, rebase, cherry-pick or revert is
+ *  under way, and what the record calls each in the sentence it gives. */
+const IN_PROGRESS = [
+  ['MERGE_HEAD', 'a merge'],
+  ['CHERRY_PICK_HEAD', 'a cherry-pick'],
+  ['REVERT_HEAD', 'a revert'],
+  ['rebase-merge', 'a rebase'],
+  ['rebase-apply', 'a rebase'],
+];
 /** Set on every git the record runs, so nothing it does writes into the
  *  user's .git beyond objects and its own branch: a split index would put
  *  a sharedindex file there for each temporary index, an fsmonitor would
@@ -842,13 +849,30 @@ class Project {
     return false;
   }
 
-  /** Why no commit can be made right now, or null. Asked before a commit
-   *  and again just before its ref moves. */
+  /** The branch git's work is on, for a guard's sentence: a rebase's
+   *  head-name, else this worktree's HEAD; null when detached or unread. */
+  branchAtWork(marker) {
+    const read = (file) => {
+      try {
+        return fs.readFileSync(file, 'utf8').trim();
+      } catch {
+        return '';
+      }
+    };
+    const ref = marker.startsWith('rebase-') ? read(path.join(this.gitDir, marker, 'head-name')) : read(path.join(this.gitDir, 'HEAD')).replace(/^ref: /, '');
+    return ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : null;
+  }
+
+  /** Why no commit can be made right now, or null: a sentence the log and
+   *  the history view both say as it is ("not recorded while a merge is
+   *  in progress on main", "the record is paused: git holds index.lock").
+   *  Asked before a commit and again just before its ref moves. */
   async blocked() {
-    if (fs.existsSync(path.join(this.gitDir, 'index.lock'))) return 'index.lock exists';
-    for (const marker of IN_PROGRESS) {
+    if (fs.existsSync(path.join(this.gitDir, 'index.lock'))) return 'git holds index.lock';
+    for (const [marker, what] of IN_PROGRESS) {
       if (fs.existsSync(path.join(this.gitDir, marker))) {
-        return `${marker.replace(/_HEAD$/, '').replace('-', ' ').toLowerCase()} in progress`;
+        const branch = this.branchAtWork(marker);
+        return `${what} is in progress${branch ? ` on ${branch}` : ''}`;
       }
     }
     // A symbolic ref at the record's name would carry the write to the

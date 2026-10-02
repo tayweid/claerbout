@@ -20,6 +20,16 @@
 // holds it: nothing the record never held is removed, and a commit on a
 // user branch writes only the files it holds.
 //
+// Before anything is recorded or touched, every path the target holds is
+// checked twice: here (no empty, '.' or '..' name, not absolute, no .git
+// in any case or HFS+ spelling, nothing under another of its entries that
+// is a link or a nested repository) and by git itself (`read-tree` into
+// the throwaway index the write then uses). A target that fails either is
+// refused whole. On the disk, every removal and every write walks from the
+// project's root with lstat and never goes through a link; and paths are
+// compared as the volume compares them (Unicode form always, case on a
+// volume that ignores it, as macOS's does), so Untracked/ is untracked/.
+//
 // Every function takes the autosave Project for the window's project and
 // runs git through it (its environment, its guards, its job queue), so
 // all of this runs under node:test without Electron.
@@ -42,7 +52,12 @@ const PATCH_LINES = 400;
 const PATCH_BYTES = 1024 * 1024;
 /** A commit with more files than this has no patches (its first, say). */
 const PATCH_FILES = 400;
+/** A file past this, on either side, is too large to read: no blob text,
+ *  no patch. */
 const BLOB_BYTES = 1024 * 1024;
+/** The bytes of blobs one commit's patches may read in all, so git's
+ *  output always fits its buffer. */
+const PATCH_READ = 16 * 1024 * 1024;
 const MANIFEST_BYTES = 8 * 1024 * 1024;
 const SHA = /^[0-9a-f]{4,64}$/;
 /** The log's fields: record separator, then unit separators. */
@@ -117,9 +132,69 @@ function ok(result, what) {
 
 const nul = (text) => text.split('\0').filter(Boolean);
 
-/** A path the rewind leaves alone: the record's manifest and untracked/. */
-function recordOwn(file) {
-  return file === MANIFEST_PATH || file === UNTRACKED || file.startsWith(`${UNTRACKED}/`);
+// MARK: - Paths as the volume compares them
+
+const caseless = new Map();
+/** Whether the volume a working tree is on ignores case (macOS's default
+ *  APFS does): .git and .GIT are one file. Asked of the disk, once per
+ *  root, rather than of core.ignorecase, which a copied repository can
+ *  carry from another volume. */
+function ignoresCase(root) {
+  if (!caseless.has(root)) {
+    let found = false;
+    try {
+      const one = fs.lstatSync(path.join(root, '.git'));
+      const two = fs.lstatSync(path.join(root, '.GIT'));
+      found = one.dev === two.dev && one.ino === two.ino;
+    } catch {
+      // No .GIT: the volume keeps case apart.
+    }
+    caseless.set(root, found);
+  }
+  return caseless.get(root);
+}
+
+/**
+ * A working tree's way of comparing paths: each path's form as the volume
+ * compares names, the same rule autosave.js judges a folder by (the name
+ * as the disk keeps it). Unicode NFC always (APFS and HFS+ ignore the
+ * form), and lower case where the volume ignores case, so Untracked/x is
+ * untracked/x and Paper.typ is paper.typ.
+ */
+function foldFor(root) {
+  const lower = ignoresCase(root);
+  return (file) => {
+    const form = String(file).normalize('NFC');
+    return lower ? form.toLowerCase() : form;
+  };
+}
+
+/** A path the rewind leaves alone: the record's manifest and untracked/,
+ *  in whatever case the volume takes for them. */
+function recordOwn(file, fold = (name) => name) {
+  const folded = fold(file);
+  const untracked = fold(UNTRACKED);
+  return folded === fold(MANIFEST_PATH) || folded === untracked || folded.startsWith(`${untracked}/`);
+}
+
+/** Code points HFS+ ignores in a name (git's is_hfs_dotgit list): on such
+ *  a volume '.g\u200cit' opens .git. */
+const IGNORED = /[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/g;
+
+/** Why a path from a tree is no path a rewind writes or removes, or null:
+ *  an empty, '.' or '..' name, an absolute path, or a .git name in any
+ *  case or HFS+ spelling, anywhere along it. */
+function badPath(file) {
+  if (typeof file !== 'string' || file === '') return 'an empty name';
+  if (file.startsWith('/')) return 'an absolute path';
+  if (file.includes('\0')) return 'a NUL in its name';
+  for (const part of file.split('/')) {
+    if (part === '') return 'an empty name along it';
+    if (part === '..') return 'it climbs out of the project (..)';
+    if (part === '.') return "a '.' along it";
+    if (part.replace(IGNORED, '').toLowerCase() === '.git') return 'a .git along it';
+  }
+  return null;
 }
 
 /** The full name of a commit the page named; an error when it is none. */
@@ -150,16 +225,48 @@ async function pathsIn(project, tree) {
 }
 
 /** `git diff-tree --raw` between two trees (null: the empty tree), as
- *  [{status, from, to, path}], `from` and `to` the two modes. */
+ *  [{status, from, to, a, b, path}], `from` and `to` the two modes, `a`
+ *  and `b` the two blobs (zeros for none). */
 async function rawDiff(project, a, b) {
   const left = a ?? (await emptyTree(project));
   const fields = nul(ok(await project.git(['diff-tree', '-r', '--no-renames', '--raw', '-z', left, b]), 'diff-tree'));
   const entries = [];
   for (let i = 0; i + 1 < fields.length; i += 2) {
-    const [from, to, , , status] = fields[i].replace(/^:/, '').split(' ');
-    entries.push({ status: status[0], from, to, path: fields[i + 1] });
+    const [from, to, before, after, status] = fields[i].replace(/^:/, '').split(' ');
+    entries.push({ status: status[0], from, to, a: before, b: after, path: fields[i + 1] });
   }
   return entries;
+}
+
+/** Every entry a tree holds, files, links and gitlinks: [{mode, path}]. */
+async function entriesIn(project, tree) {
+  return nul(ok(await project.git(['ls-tree', '-r', '-z', '--full-tree', tree]), 'ls-tree')).map((line) => {
+    const tab = line.indexOf('\t');
+    return { mode: line.slice(0, line.indexOf(' ')), path: line.slice(tab + 1) };
+  });
+}
+
+/**
+ * Why a tree is no tree a rewind writes, or null: every path it holds must
+ * pass badPath, and none may lie under another of its entries that is a
+ * symbolic link or a nested repository (compared as the volume compares
+ * names, so `Sub`, a link, and `sub/x` collide on a volume that ignores
+ * case). git's own check comes after (read-tree, in the rewind). {path,
+ * why} for the first that fails: the whole rewind is refused.
+ */
+async function checkTree(project, tree, fold) {
+  const entries = await entriesIn(project, tree);
+  const leaves = new Set(entries.filter((entry) => entry.mode === '120000' || entry.mode === GITLINK).map((entry) => fold(entry.path)));
+  for (const entry of entries) {
+    const why = badPath(entry.path);
+    if (why) return { path: entry.path, why };
+    const parts = fold(entry.path).split('/');
+    for (let i = 1; i < parts.length; i++) {
+      const lead = parts.slice(0, i).join('/');
+      if (leaves.has(lead)) return { path: entry.path, why: `it lies under ${entry.path.split('/').slice(0, i).join('/')}, a symbolic link or a nested repository in that commit` };
+    }
+  }
+  return null;
 }
 
 const GITLINK = '160000';
@@ -387,9 +494,11 @@ async function touched(project, sha) {
 /**
  * What one commit changed against its first parent (the empty tree for a
  * root): {sha, parents, time, subject, author, files: [{path, status,
- * plus, minus, binary, link?, gitlink?, patch?}]}. A patch is capped at
- * 400 lines per file and 1 MB in all, and left out for a commit of more
- * than 400 files. diff-tree runs with no external diff and no textconv.
+ * plus, minus, binary, link?, gitlink?, patch?, cut?, large?, size?}]}.
+ * A patch is capped at 400 lines per file and 1 MB in all, and left out
+ * for a commit of more than 400 files; a file with a side past 1 MB has
+ * none and is `large`, with the larger side's `size`. diff-tree runs with
+ * no external diff and no textconv.
  */
 async function commitDetail(project, sha) {
   const full = await resolveCommit(project, sha);
@@ -415,11 +524,35 @@ async function commitDetail(project, sha) {
     ...(entry.from === GITLINK || entry.to === GITLINK ? { gitlink: true } : {}),
   }));
   if (files.length > 0 && files.length <= PATCH_FILES) {
-    const patch = await project.git(['diff-tree', '-r', '--no-renames', '-p', '--no-color', '--no-ext-diff', '--no-textconv', left, full]);
-    if (patch.status === 0) {
+    // Patches only for files whose two sides are small enough to read, so
+    // one huge file costs only itself its patch, and git's output always
+    // fits its buffer. A type change is two chunks in a patch, and a
+    // nested repository's says only which commit: neither is asked for.
+    const wanted = raw.map((entry, i) => ({ entry, file: files[i] })).filter(({ entry, file }) => !file.binary && !file.gitlink && entry.status !== 'T');
+    const sizes = await blobSizes(project, wanted.flatMap(({ entry }) => [entry.a, entry.b]));
+    let room = PATCH_READ;
+    const chosen = [];
+    for (const item of wanted) {
+      const one = sizes.get(item.entry.a) ?? 0;
+      const two = sizes.get(item.entry.b) ?? 0;
+      if (one > BLOB_BYTES || two > BLOB_BYTES) {
+        item.file.large = true;
+        item.file.size = Math.max(one, two);
+        continue;
+      }
+      if (one + two > room) continue;
+      room -= one + two;
+      chosen.push(item);
+    }
+    const patch = chosen.length
+      ? await project.git(['diff-tree', '-r', '--no-renames', '-p', '--no-color', '--no-ext-diff', '--no-textconv', left, full, '--', ...chosen.map(({ entry }) => entry.path)], {
+          env: { GIT_LITERAL_PATHSPECS: '1' },
+        })
+      : null;
+    if (patch?.status === 0) {
       // One chunk per file, in the same order as the raw list.
       const chunks = patch.stdout.split(/^(?=diff --git )/m).filter((chunk) => chunk.startsWith('diff --git '));
-      if (chunks.length === files.length) {
+      if (chunks.length === chosen.length) {
         let budget = PATCH_BYTES;
         chunks.forEach((chunk, i) => {
           const start = chunk.search(/^@@ /m);
@@ -428,8 +561,8 @@ async function commitDetail(project, sha) {
           let text = lines.slice(0, PATCH_LINES).join('\n');
           if (text.length > budget) text = text.slice(0, budget);
           budget -= text.length;
-          files[i].patch = text;
-          if (lines.length > PATCH_LINES || text.length < lines.join('\n').length) files[i].cut = true;
+          chosen[i].file.patch = text;
+          if (lines.length > PATCH_LINES || text.length < lines.join('\n').length) chosen[i].file.cut = true;
         });
       }
     }
@@ -437,8 +570,24 @@ async function commitDetail(project, sha) {
   return { sha: full, parents: parentList, time, subject, author, files };
 }
 
-/** A file at a commit or a tree: {text} (UTF-8, at most 1 MB), {binary:
- *  true, size}, or {large: true, size} for text past 1 MB. */
+/** The sizes of blobs by name (zeros, for no blob, are left out): one
+ *  `cat-file --batch-check`. */
+async function blobSizes(project, shas) {
+  const names = [...new Set(shas.filter((sha) => sha && !/^0+$/.test(sha)))];
+  const sizes = new Map();
+  if (names.length === 0) return sizes;
+  const text = ok(await project.git(['cat-file', '--batch-check=%(objectname) %(objectsize)'], { input: `${names.join('\n')}\n` }), 'cat-file --batch-check');
+  for (const line of text.split('\n')) {
+    const [sha, size] = line.split(' ');
+    if (/^\d+$/.test(size ?? '')) sizes.set(sha, Number(size));
+  }
+  return sizes;
+}
+
+/** A file at a commit or a tree: {text, size} (UTF-8, at most 1 MB),
+ *  {binary: true, size}, or {large: true, size} past 1 MB, which is not
+ *  read at all (its size is asked first), so a 400 MB file costs nothing.
+ *  The page says a large file is too large to look inside. */
 async function blob(project, sha, file) {
   checkedSha(sha);
   if (typeof file !== 'string' || !file || file.includes('\0') || file.startsWith('/')) throw new Error('path must be a path inside the project');
@@ -447,11 +596,10 @@ async function blob(project, sha, file) {
   if (kind.status !== 0) return { missing: true };
   if (kind.stdout.trim() !== 'blob') return { missing: true, kind: kind.stdout.trim() };
   const size = Number(ok(await project.git(['cat-file', '-s', name]), 'cat-file').trim());
-  const bytes = await project.git(['cat-file', 'blob', name], { encoding: 'buffer', ...(size > BLOB_BYTES ? { timeout: 30_000 } : {}) });
-  if (bytes.status !== 0) throw new Error(`git cat-file: ${errorLine(bytes.stderr)}`);
-  const data = bytes.stdout.subarray(0, Math.min(bytes.stdout.length, 8000));
-  if (data.includes(0)) return { binary: true, size };
-  if (size > BLOB_BYTES) return { large: true, size };
+  if (!(size <= BLOB_BYTES)) return { large: true, size };
+  const bytes = await project.git(['cat-file', 'blob', name], { encoding: 'buffer' });
+  if (bytes.status !== 0) throw new Error(`git cat-file: ${errorLine(bytes.stderr) || bytes.status}`);
+  if (bytes.stdout.subarray(0, Math.min(bytes.stdout.length, 8000)).includes(0)) return { binary: true, size };
   try {
     return { text: new TextDecoder('utf-8', { fatal: true }).decode(bytes.stdout), size };
   } catch {
@@ -475,21 +623,42 @@ async function manifestAt(project, tree) {
   }
 }
 
-/** Whether the working tree has something at a path (a file the record
- *  never kept: ignored, or kept out as a secret), or a leading folder of
- *  it is not a folder; never following a link. */
-function inTheWay(root, file) {
+/**
+ * What stands where a rewind would write `file`, or null when the way is
+ * clear. It walks from the project's root with lstat, never following a
+ * link: each leading name must be a real folder (or missing, and then so
+ * is everything below it), and the last must be missing for a new file
+ * (`added`), or anything but a folder for one the record holds (which
+ * checkout-index replaces, a link included, never writing through it).
+ * Something this same set removes is no obstacle (`removing`, folded): a
+ * leading file or link it removes, or a folder at the path whose recorded
+ * files it all removes (`goes`). The rewind asks again after its removals,
+ * with nothing removing, so a folder that still holds a file the record
+ * does not keep stops the write then.
+ */
+function obstacle(root, file, { added, removing = null, fold = (name) => name, goes = () => false }) {
   const parts = file.split('/');
   for (let i = 1; i <= parts.length; i++) {
+    const at = parts.slice(0, i).join('/');
     let info;
     try {
       info = fs.lstatSync(path.join(root, ...parts.slice(0, i)));
-    } catch {
-      return false;
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      return `${at} cannot be looked at (${error.code ?? error.message})`;
     }
-    if (i === parts.length || !info.isDirectory()) return true;
+    const last = i === parts.length;
+    if (info.isDirectory()) {
+      if (!last) continue;
+      if (removing && goes(at)) return null;
+      return 'a folder is there, and this commit has a file by that name';
+    }
+    if (removing && removing.has(fold(at))) return null;
+    if (!last) return `${at} is ${info.isSymbolicLink() ? 'a symbolic link' : 'a file'} here, and a folder in this commit`;
+    if (!added) return null;
+    return 'something the record does not keep is there (an ignored file, or one kept out as a secret)';
   }
-  return false;
+  return null;
 }
 
 /**
@@ -497,40 +666,91 @@ function inTheWay(root, file) {
  * working tree whose tree is `base` would do. A, M and T paths are
  * written; a D path is removed only when the target is on the record and
  * the record's tip held it (`held`); the manifest and untracked/ are left
- * out; a gitlink is left alone, and an A path where the working tree
- * already has something is skipped (it can only be a file the record did
- * not keep). `paths`, when given, keeps the set to those. Answer: {write:
- * [{path, status}], remove: [path], skipped: [{path, why}], kept: [path]
- * (removals the rules forbid), full (the set's size before `paths`)}.
+ * out, in whatever case the volume takes for them; a gitlink, and a
+ * .gitignore that is a link in the target, are left alone; and a path
+ * with something in its way (obstacle) is skipped and
+ * named, except where what is in its way is something this same set
+ * removes: a file that becomes a folder, or a folder (or a link to one)
+ * that becomes a file, is written once the removal clears it. `paths`,
+ * when given, keeps the set to those (folded as the volume compares
+ * them), and a removal left out keeps its way blocked. A target that
+ * fails checkTree is {invalid: {path, why}} and nothing else. Answer:
+ * {write: [{path, status}], remove: [path], skipped: [{path, why}], kept:
+ * [path] (removals the rules forbid), full (the set's size before
+ * `paths`)}.
  */
 async function rewindSet(project, { base, target, held, onRecord, paths = null }) {
-  const write = [];
-  const remove = [];
+  const fold = foldFor(project.root);
+  const refused = (invalid) => ({ invalid, write: [], remove: [], skipped: [], kept: [], full: 0 });
+  const invalid = await checkTree(project, target, fold);
+  if (invalid) return refused(invalid);
+  const heldNames = new Set([...held].map(fold));
   const skipped = [];
   const kept = [];
+  const removals = [];
+  const writes = [];
   for (const entry of await rawDiff(project, base, target)) {
-    if (recordOwn(entry.path)) continue;
+    const why = badPath(entry.path);
+    if (why) return refused({ path: entry.path, why });
+    if (recordOwn(entry.path, fold)) continue;
     if (entry.from === GITLINK || entry.to === GITLINK) {
       skipped.push({ path: entry.path, why: 'a nested repository, left alone' });
       continue;
     }
+    if (entry.to === '120000' && fold(entry.path) === fold('.gitignore')) {
+      // git reads no linked .gitignore, so untracked/ would lose its line
+      // and the record's next fill would take it in.
+      skipped.push({ path: entry.path, why: 'a .gitignore that is a symbolic link in this commit: git reads none, and untracked/ would lose its line' });
+      continue;
+    }
     if (entry.status === 'D') {
-      if (onRecord && held.has(entry.path)) remove.push(entry.path);
+      if (onRecord && heldNames.has(fold(entry.path))) removals.push(entry.path);
       else kept.push(entry.path);
       continue;
     }
-    if (entry.status === 'A' && inTheWay(project.root, entry.path)) {
-      skipped.push({ path: entry.path, why: 'something the record does not keep is there (an ignored file, or one kept out as a secret)' });
-      continue;
+    writes.push(entry);
+  }
+  // The base's paths, folded, read once and only when a removal might
+  // clear a folder out of a new file's way.
+  let recorded = null;
+  const plan = async (removed) => {
+    const removing = new Set(removed.map(fold));
+    if (recorded === null && removed.length > 0 && writes.some((entry) => entry.status === 'A')) recorded = [...(await pathsIn(project, base))].map(fold);
+    const goes = (at) => {
+      const prefix = `${fold(at)}/`;
+      let any = false;
+      for (const file of recorded ?? []) {
+        if (!file.startsWith(prefix)) continue;
+        if (!removing.has(file)) return false;
+        any = true;
+      }
+      return any;
+    };
+    const write = [];
+    const left = [];
+    for (const entry of writes) {
+      const why = obstacle(project.root, entry.path, { added: entry.status === 'A', removing, fold, goes });
+      if (why) left.push({ path: entry.path, why });
+      else write.push({ path: entry.path, status: entry.status });
     }
-    write.push({ path: entry.path, status: entry.status });
-  }
-  const full = write.length + remove.length;
-  if (Array.isArray(paths)) {
-    const wanted = new Set(paths.filter((file) => typeof file === 'string'));
-    return { write: write.filter((entry) => wanted.has(entry.path)), remove: remove.filter((file) => wanted.has(file)), skipped, kept, full };
-  }
-  return { write, remove, skipped, kept, full };
+    return { write, left };
+  };
+  const all = await plan(removals);
+  const full = all.write.length + removals.length;
+  if (!Array.isArray(paths)) return { write: all.write, remove: removals, skipped: [...skipped, ...all.left], kept, full };
+  const wanted = new Set(paths.filter((file) => typeof file === 'string').map(fold));
+  const remove = removals.filter((file) => wanted.has(fold(file)));
+  const chosen = remove.length === removals.length ? all : await plan(remove);
+  const before = new Set(all.left.map((entry) => entry.path));
+  return {
+    write: chosen.write.filter((entry) => wanted.has(fold(entry.path))),
+    remove,
+    // Left as they are: what no choice could write, and what a removal
+    // left out of the choice keeps in the way.
+    skipped: [...skipped, ...all.left, ...chosen.left.filter((entry) => !before.has(entry.path) && wanted.has(fold(entry.path)))],
+    kept,
+    full,
+  };
 }
 
 /** Whether a commit is the record's tip or behind it. */
@@ -542,9 +762,13 @@ async function onTheRecord(project, sha, tip) {
 /** Another app's documents on this project that a set writes or removes:
  *  {app, documents} for the first such app, or null. */
 function heldElsewhere(project, others, set) {
-  const touchedPaths = new Set([...set.write.map((entry) => entry.path), ...set.remove]);
+  const fold = foldFor(project.root);
+  const touchedPaths = new Set([...set.write.map((entry) => entry.path), ...set.remove].map(fold));
   for (const other of others) {
-    const documents = (other.documents ?? []).filter((file) => touchedPaths.has(relativeTo(project.root, file)));
+    const documents = (other.documents ?? []).filter((file) => {
+      const relative = relativeTo(project.root, file);
+      return relative !== null && touchedPaths.has(fold(relative));
+    });
     if (documents.length > 0) return { app: other.app, documents };
   }
   return null;
@@ -571,11 +795,13 @@ function relativeTo(root, file) {
 /**
  * What a rewind to `sha` would do now, on the project's job queue like a
  * commit: {tip, now, target, onRecord, unrecorded, write, remove, skipped,
- * kept, same, untracked, untrackedGone, others, blocked}. `now` is the
- * tree of a fresh fill of the working tree (written, not committed), so
- * the page can read now's files from it; while a guard holds, nothing is
- * filled and `now` is the tip's tree. `others()` is another app's windows
- * on the project (the presence files): [{app, documents}].
+ * kept, same, untracked, untrackedGone, others, blocked}, and `invalid`
+ * ({path, why}, with nothing to write) for a target no rewind writes.
+ * `now` is the tree of a fresh fill of the working tree (written, not
+ * committed), so the page can read now's files from it; while a guard
+ * holds, nothing is filled and `now` is the tip's tree. `others()` is
+ * another app's windows on the project (the presence files): [{app,
+ * documents}].
  */
 function compare(project, sha, { paths = null, others = () => [] } = {}) {
   return project.run(async () => {
@@ -596,18 +822,20 @@ function compare(project, sha, { paths = null, others = () => [] } = {}) {
       const targetTree = await treeOf(project, target);
       const onRecord = await onTheRecord(project, target, tip);
       const set = await rewindSet(project, { base: now, target: targetTree, held: await pathsIn(project, tipTree), onRecord, paths });
+      const answer = { tip, now, target, onRecord, others: others(), blocked: blocked ?? null };
+      if (set.invalid) {
+        return { ...answer, invalid: set.invalid, unrecorded: [], write: [], remove: [], skipped: [], kept: [], same: 0, untracked: false, untrackedGone: [] };
+      }
+      const fold = foldFor(project.root);
       const unrecorded = blocked || !now ? [] : (await rawDiff(project, tipTree, now)).map((entry) => entry.path);
       const differing = new Set((await rawDiff(project, now, targetTree)).map((entry) => entry.path));
-      const same = [...(await pathsIn(project, targetTree))].filter((file) => !recordOwn(file) && !differing.has(file)).length;
+      const same = [...(await pathsIn(project, targetTree))].filter((file) => !recordOwn(file, fold) && !differing.has(file)).length;
       const then = await manifestAt(project, targetTree);
       const current = await manifestAt(project, now);
       const untracked = then !== null && JSON.stringify([...then]) !== JSON.stringify([...(current ?? new Map())]);
       const untrackedGone = untracked ? [...then].filter(([file, hash]) => current?.get(file) !== hash).map(([file]) => file) : [];
       return {
-        tip,
-        now,
-        target,
-        onRecord,
+        ...answer,
         unrecorded,
         write: set.write,
         remove: set.remove,
@@ -616,8 +844,6 @@ function compare(project, sha, { paths = null, others = () => [] } = {}) {
         same,
         untracked,
         untrackedGone,
-        others: others(),
-        blocked: blocked ?? null,
       };
     } catch (error) {
       return { error: error.message };
@@ -625,75 +851,121 @@ function compare(project, sha, { paths = null, others = () => [] } = {}) {
   });
 }
 
-/** Remove a file or link the rewind's set names (never what a link points
- *  to), then its folders while they are empty, never past the root. */
+/** null when every name of `parts` below the root is a real folder,
+ *  looked at with lstat and never followed; else why not ('missing' when
+ *  one is not there). */
+async function realFolders(root, parts) {
+  for (let i = 1; i <= parts.length; i++) {
+    const at = parts.slice(0, i).join('/');
+    let info;
+    try {
+      info = await fsp.lstat(path.join(root, ...parts.slice(0, i)));
+    } catch (error) {
+      if (error.code === 'ENOENT') return 'missing';
+      return `${at} cannot be looked at (${error.code ?? error.message})`;
+    }
+    if (!info.isDirectory()) return `${at} is ${info.isSymbolicLink() ? 'a symbolic link' : 'not a folder'} here`;
+  }
+  return null;
+}
+
+/**
+ * Remove a file or link the rewind's set names (never what a link points
+ * to), then its folders while they are empty, never past the root: true
+ * when it went, false when nothing was there, or why it was left. Every
+ * name on the way is looked at with lstat from the root first, and again
+ * before each folder is removed, so nothing is ever removed through a
+ * link that took a folder's place.
+ */
 async function removePath(root, file) {
-  const full = path.join(root, ...file.split('/'));
+  const parts = file.split('/');
+  const way = await realFolders(root, parts.slice(0, -1));
+  if (way === 'missing') return false;
+  if (way) return way;
+  const full = path.join(root, ...parts);
   let info;
   try {
     info = await fsp.lstat(full);
   } catch {
     return false;
   }
-  if (info.isDirectory()) return false;
+  if (info.isDirectory()) return 'a folder is there now';
   await fsp.unlink(full);
-  let dir = path.dirname(full);
-  while (dir.startsWith(root + path.sep) && dir !== root) {
+  for (let i = parts.length - 1; i >= 1; i--) {
+    if ((await realFolders(root, parts.slice(0, i))) !== null) break;
     try {
-      await fsp.rmdir(dir);
+      await fsp.rmdir(path.join(root, ...parts.slice(0, i)));
     } catch {
       break;
     }
-    dir = path.dirname(dir);
   }
   return true;
 }
 
-/** The target's files at `paths`, written into the working tree through a
- *  throwaway index (read-tree, then checkout-index on those paths only). */
-async function writeFiles(project, target, paths) {
-  if (paths.length === 0) return;
+/** git's own check of every name a target holds: `read-tree` into a new
+ *  throwaway index in the shell's state folder, the one the write then
+ *  checks files out of. {index}, or {refused: git's line}. */
+async function readTarget(project, target) {
   await fsp.mkdir(project.stateDir, { recursive: true });
   const index = path.join(project.stateDir, `rewind-${process.pid}-${Date.now()}.index`);
-  const env = { GIT_INDEX_FILE: index };
-  try {
-    ok(await project.git(['read-tree', target], { env }), 'read-tree');
-    ok(await project.git(['checkout-index', '-f', '-z', '--stdin'], { env, input: `${paths.join('\0')}\0` }), 'checkout-index');
-  } finally {
-    await fsp.rm(index, { force: true });
-    await fsp.rm(`${index}.lock`, { force: true });
-  }
+  const read = await project.git(['read-tree', target], { env: { GIT_INDEX_FILE: index } });
+  if (read.status === 0) return { index };
+  await dropIndex(index);
+  return { refused: errorLine(read.stderr) || `git read-tree failed (${read.status})` };
+}
+
+async function dropIndex(index) {
+  await fsp.rm(index, { force: true });
+  await fsp.rm(`${index}.lock`, { force: true });
+}
+
+/** The target's files at `paths`, written into the working tree from the
+ *  throwaway index (checkout-index on those paths only, never -a). */
+async function writeFiles(project, index, paths) {
+  if (paths.length === 0) return;
+  ok(await project.git(['checkout-index', '-f', '-z', '--stdin'], { env: { GIT_INDEX_FILE: index }, input: `${paths.join('\0')}\0` }), 'checkout-index');
 }
 
 /**
  * The rewind, as one job on the project's queue (so the record's timer is
  * dropped while it runs): `{sha, tip, paths?, anyway?}`.
  *
- * Checks: the record's tip must still be `tip`, else {refused: 'moved',
- * tip}; no guard may hold, else {refused: 'paused', reason}; another
- * app's windows holding a file the rewind writes or removes refuse it,
- * {refused: 'other-app', app, documents}, unless `anyway`; nothing to
- * write or remove is {same: true}. Then `save()` asks this shell's
- * windows on the project to save (a window that answers that it could
- * not refuses: {refused: 'unsaved', path}), and the three steps:
+ * Checks, before anything is recorded or touched: the record's tip must
+ * still be `tip`, else {refused: 'moved', tip}; no guard may hold, else
+ * {refused: 'paused', reason}; every path the target holds must pass
+ * checkTree and git's own read-tree, else {refused: 'invalid', path?,
+ * why}; another app's windows holding a file the rewind writes or removes
+ * refuse it, {refused: 'other-app', app, documents}, unless `anyway`;
+ * nothing to write or remove is {same: true}. Then `save()` asks this
+ * shell's windows on the project to save: it answers {unsaved: {path,
+ * error?}} when a window answered that it could not, which refuses the
+ * rewind ({refused: 'unsaved', path, error?}), or {silent: [path]}, the
+ * documents whose windows did not answer, which goes on. Then the three
+ * steps:
  *
  * 1. Record now: "<app>: rewind from <tip>", through the record's own
  *    commit path, skipped when the working tree equals the tip.
  * 2. Write the target's files: the set again, against the tip after step
- *    1, removals first, then the writes through a throwaway index.
+ *    1; removals first, then the writes (each path asked again whether
+ *    anything is in its way), from the index read-tree made. The record's
+ *    `prepared` is cleared before anything is touched, and the record
+ *    prepares again as soon as the step ends, whether it finished or not:
+ *    a target's .gitignore without /untracked/ gets the line back at once,
+ *    so no fill takes untracked/ in.
  * 3. Record the rewind: "<app>: rewind to <target>" (with its paths for a
- *    partial one), always, after the record prepares again (a target's
- *    .gitignore without /untracked/ gets the line back before the fill).
+ *    partial one), always.
  *
- * `onStep(step, state, detail?)` hears 'save', 'record-from', 'write'
- * and 'record-to', each 'doing' then 'done'. Answer: {ok: true, from,
- * to, target, written, removed, skipped}, `from` null when step 1 was
- * skipped. A git failure in step 2 or 3 is {refused: 'failed', detail};
- * the next commit records whatever the folder then holds.
+ * `onStep(step, state, detail?)` hears 'save' (done with {silent} when a
+ * window did not answer), 'record-from', 'write' and 'record-to', each
+ * 'doing' then 'done'. Answer: {ok: true, from, to, target, written,
+ * removed, skipped, silent}, `from` null when step 1 was skipped. A git
+ * failure in step 2 or 3 is {refused: 'failed', detail}; the next commit
+ * records whatever the folder then holds.
  */
 function rewind(project, request, { save = async () => null, onStep = () => {}, others = () => [] } = {}) {
   return project.run(async () => {
     let step = 'check';
+    let index = null;
     try {
       const target = await resolveCommit(project, request?.sha);
       const tip = await project.tip();
@@ -714,17 +986,22 @@ function rewind(project, request, { save = async () => null, onStep = () => {}, 
         throw error;
       }
       const planned = await rewindSet(project, { base: now, target: targetTree, held, onRecord, paths });
+      if (planned.invalid) return { refused: 'invalid', ...planned.invalid };
       if (!request.anyway) {
         const holder = heldElsewhere(project, others(), planned);
         if (holder) return { refused: 'other-app', ...holder };
       }
       if (planned.write.length + planned.remove.length === 0) return { same: true };
+      const read = await readTarget(project, target);
+      if (read.refused) return { refused: 'invalid', why: `git refuses a path in it: ${read.refused}` };
+      index = read.index;
 
       step = 'save';
       onStep('save', 'doing');
-      const unsaved = await save();
-      if (unsaved) return { refused: 'unsaved', ...unsaved };
-      onStep('save', 'done');
+      const saved = (await save()) ?? {};
+      if (saved.unsaved) return { refused: 'unsaved', ...saved.unsaved };
+      const silent = Array.isArray(saved.silent) ? saved.silent : [];
+      onStep('save', 'done', silent.length > 0 ? { silent } : undefined);
 
       step = 'record-from';
       onStep('record-from', 'doing');
@@ -735,35 +1012,50 @@ function rewind(project, request, { save = async () => null, onStep = () => {}, 
 
       step = 'write';
       onStep('write', 'doing');
-      // Against the record as it now is: the working tree, just recorded.
-      const base = await treeOf(project, (await project.tip()) ?? tip);
-      const set = await rewindSet(project, { base, target: targetTree, held, onRecord, paths });
+      // Whatever happens from here, the next fill prepares first.
+      project.prepared = false;
       const removed = [];
-      for (const file of set.remove) if (await removePath(project.root, file)) removed.push(file);
       const written = [];
-      const skipped = [...set.skipped];
-      for (const entry of set.write) {
-        // A removal above may have cleared the way; anything still there
-        // that is not the record's own is left alone.
-        if (entry.status === 'A' && inTheWay(project.root, entry.path)) skipped.push({ path: entry.path, why: 'something the record does not keep is there' });
-        else written.push(entry.path);
+      let set;
+      try {
+        // Against the record as it now is: the working tree, just recorded.
+        const base = await treeOf(project, (await project.tip()) ?? tip);
+        set = await rewindSet(project, { base, target: targetTree, held, onRecord, paths });
+        if (set.invalid) throw new Error(`${set.invalid.path}: ${set.invalid.why}`);
+        for (const file of set.remove) {
+          const gone = await removePath(project.root, file);
+          if (gone === true) removed.push(file);
+          else if (gone) set.skipped.push({ path: file, why: `${gone}, so it was not removed` });
+        }
+        for (const entry of set.write) {
+          // A removal above may have cleared the way; anything still in it
+          // is left alone.
+          const why = obstacle(project.root, entry.path, { added: entry.status === 'A' });
+          if (why) set.skipped.push({ path: entry.path, why });
+          else written.push(entry.path);
+        }
+        await writeFiles(project, index, written);
+      } finally {
+        // The target's .gitignore may lack the /untracked/ line: the record
+        // prepares now, not at the next fill, which may be another app's.
+        await project.prepare().catch(() => {
+          project.prepared = false;
+        });
       }
-      await writeFiles(project, target, written);
       onStep('write', 'done', { written, removed });
 
       step = 'record-to';
       onStep('record-to', 'doing');
-      // The record prepares again: the target's .gitignore may lack the
-      // /untracked/ line, and the next fill would take untracked/ in.
-      project.prepared = false;
       const partial = paths !== null && written.length + removed.length < set.full ? [...written, ...removed].sort() : null;
       const landed = await project.commit(rewindToTrigger(target, partial), { always: true });
       if (!landed.committed) return { refused: 'failed', detail: `the files were written, but the record did not commit: ${landed.skipped}`, written, removed };
       onStep('record-to', 'done', { to: landed.hash });
-      return { ok: true, from, to: landed.hash, target, written, removed, skipped };
+      return { ok: true, from, to: landed.hash, target, written, removed, skipped: set.skipped, silent };
     } catch (error) {
       if (step === 'check' || step === 'save') return { refused: 'failed', detail: error.message };
       return { refused: 'failed', detail: `${step}: ${error.message}` };
+    } finally {
+      if (index) await dropIndex(index);
     }
   });
 }
@@ -840,5 +1132,6 @@ module.exports = {
   rewind,
   presence,
   relativeTo,
+  removePath,
   LIMIT,
 };

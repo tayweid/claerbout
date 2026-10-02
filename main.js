@@ -1023,6 +1023,9 @@ async function openHistory(source, at = null) {
     if (/^https?:/i.test(url)) void shell.openExternal(url);
   });
   window.once('ready-to-show', () => window.show());
+  // "History — week-3", not the page's <title>: with two projects open,
+  // the Window menu and Mission Control tell them apart.
+  window.on('page-title-updated', (event) => event.preventDefault());
   window.on('close', () => {
     if (!window.isMaximized() && !window.isFullScreen()) writePreference('historySize', window.getSize());
   });
@@ -1093,23 +1096,33 @@ function askToSave(target) {
 }
 
 /** Every one of this shell's windows on the project asked to save, at
- *  once, each for at most SAVE_WAIT: null to go on, or {path} for a
- *  window that answered it could not. A window that does not answer is
- *  passed over (the apps do not answer yet), and the log says so. */
+ *  once, each for at most SAVE_WAIT: {unsaved: {path, error?}} for a
+ *  window that answered it could not (the rewind is refused), else
+ *  {silent: [path]}, the documents whose windows did not answer. Those
+ *  are passed over (the apps do not answer yet), logged, and named to the
+ *  page: not saved first, and, a page that does not answer save being one
+ *  that does not reload either, to be reopened after the rewind. */
 async function saveAll(windows) {
   const answers = await Promise.all(windows.map(askToSave));
   for (const [i, answer] of answers.entries()) {
-    if (answer.answered && answer.ok === false) return { path: documents.get(windows[i]) ?? null, ...(answer.error ? { error: answer.error } : {}) };
+    if (answer.answered && answer.ok === false) return { unsaved: { path: documents.get(windows[i]) ?? null, ...(answer.error ? { error: answer.error } : {}) } };
   }
-  const silent = answers.filter((answer) => !answer.answered).length;
-  if (silent > 0) log(`history: ${silent} ${silent === 1 ? 'window' : 'windows'} did not answer save within ${SAVE_WAIT / 1000} s; the rewind went on`);
-  return null;
+  const silent = windows.filter((_window, i) => !answers[i].answered).map((window) => documents.get(window) ?? null).filter(Boolean);
+  if (silent.length > 0) log(`history: ${someNames(silent.map((file) => path.basename(file)))} did not answer save within ${SAVE_WAIT / 1000} s; the rewind went on`);
+  return { silent };
+}
+
+/** A few names for the log. */
+function someNames(names) {
+  return names.length <= 3 ? names.join(', ') : `${names.slice(0, 3).join(', ')} and ${names.length - 3} more`;
 }
 
 /** `rewind {sha, tip, paths?, anyway?}` (history.js, rewind): the steps
  *  as `rewind {step, state, detail?}` events to the History windows on
  *  the project, then `reload {id, paths, reason, to}` to this shell's
- *  windows on it, with every path written or removed. */
+ *  windows on it, with every path written or removed. The reload step's
+ *  `done` names, in `silent`, the rewound documents whose windows did not
+ *  answer save: they will not reload, and the page says to reopen them. */
 async function historyRewind(entry, message) {
   const project = projectFor(entry);
   if (!project) return { refused: 'failed', detail: 'there is no record here' };
@@ -1128,7 +1141,12 @@ async function historyRewind(entry, message) {
     tell(viewers(), 'rewind', { step: 'reload', state: 'doing' });
     const paths = [...result.written, ...result.removed].map((file) => path.join(root, ...file.split('/')));
     tell(openOn(root), 'reload', { id: randomUUID(), paths, reason: 'rewind', to: result.target });
-    tell(viewers(), 'rewind', { step: 'reload', state: 'done' });
+    const rewound = new Set([...result.written, ...result.removed]);
+    const silent = (result.silent ?? []).filter((file) => {
+      const relative = history.relativeTo(root, file);
+      return relative !== null && rewound.has(relative);
+    });
+    tell(viewers(), 'rewind', { step: 'reload', state: 'done', ...(silent.length ? { detail: { silent } } : {}) });
     log(`history: rewound ${root} to ${result.target.slice(0, 10)}: ${result.written.length} written, ${result.removed.length} removed`);
     void watchProjects();
   } else if (result) {

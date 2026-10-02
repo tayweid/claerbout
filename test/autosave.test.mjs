@@ -180,7 +180,7 @@ test('index.lock present: skipped', async () => {
   fs.writeFileSync(path.join(dir, 'x.txt'), 'x\n');
   const project = await projectAt(dir);
   fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
-  assert.equal((await project.commit('timer')).skipped, 'index.lock exists');
+  assert.equal((await project.commit('timer')).skipped, 'git holds index.lock');
   assert.throws(() => sh(dir, 'rev-parse', '--verify', '-q', BRANCH), 'no branch was made');
   fs.rmSync(path.join(dir, '.git', 'index.lock'));
   assert.equal((await project.commit('timer')).committed, true);
@@ -191,10 +191,14 @@ test('a merge in progress: skipped', async () => {
   fs.writeFileSync(path.join(dir, 'x.txt'), 'x\n');
   const project = await projectAt(dir);
   fs.writeFileSync(path.join(dir, '.git', 'MERGE_HEAD'), '0'.repeat(40));
-  assert.equal((await project.commit('timer')).skipped, 'merge in progress');
+  // Said as a sentence, naming the branch git's work is on.
+  assert.equal((await project.commit('timer')).skipped, 'a merge is in progress on main');
+  assert.ok(lines.some((line) => line.startsWith('autosave: not recorded while a merge is in progress on main')));
   fs.rmSync(path.join(dir, '.git', 'MERGE_HEAD'));
   fs.mkdirSync(path.join(dir, '.git', 'rebase-merge'));
-  assert.equal((await project.commit('timer')).skipped, 'rebase merge in progress');
+  assert.equal((await project.commit('timer')).skipped, 'a rebase is in progress');
+  fs.writeFileSync(path.join(dir, '.git', 'rebase-merge', 'head-name'), 'refs/heads/main\n');
+  assert.equal((await project.commit('timer')).skipped, 'a rebase is in progress on main');
   fs.rmSync(path.join(dir, '.git', 'rebase-merge'), { recursive: true });
   assert.equal((await project.commit('timer')).committed, true);
 });

@@ -85,7 +85,9 @@
       }
       #title .ico { color: var(--frame-ink-soft); display: inline-flex; }
       #title .name { font: 15px/1 var(--serif); letter-spacing: 0.06em; color: var(--frame-ink); white-space: nowrap; }
+      /* the project's name whole, its parent folder dimmed and cut from its start (fitPath) */
       #title .path { color: var(--frame-ink-soft); font: 12px var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+      #title .path .nm { color: var(--frame-ink); }
       #title .meta { margin-left: auto; color: var(--frame-ink-soft); font: 11.5px var(--mono); white-space: nowrap; padding-left: 10px; }
       #zoom { display: flex; height: 30px; padding: 3px; gap: 2px; border-radius: 8px; background: var(--pill); flex: 0 0 auto; }
       #zoom button { border: 0; border-radius: 6px; background: transparent; color: var(--frame-ink-soft); font: 12px var(--sans); padding: 0 10px; cursor: pointer; }
@@ -99,7 +101,7 @@
         display: flex; align-items: center; gap: 7px; padding: 0 11px; font: 12px var(--sans); color: var(--frame-ink-soft); white-space: nowrap;
       }
       #here .app { width: 17px; height: 17px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; font: 600 9.5px var(--sans); color: var(--frame-ink); background: #38383e; flex: 0 0 auto; }
-      #here .app.other { background: rgba(201, 138, 29, 0.35); }
+      #here .app.elsewhere { background: rgba(201, 138, 29, 0.35); }
       #here .doc { color: var(--frame-ink); font: 11.5px var(--mono); margin-right: 4px; }
       #here:empty { display: none; }
       /* the record's state, only when it is not simply recording */
@@ -213,12 +215,15 @@
       .t-timer .lb, .t-timer .tm { line-height: 1; }
       .row.near.t-timer .lb, .row.near.t-timer .tm { font-size: 11px; }
       /* the selected node says what a second click does */
+      /* out of the label's flow, so the label's width (and the hairline to the card) is its words */
       .again {
-        display: inline-block; margin-left: 12px; white-space: nowrap; vertical-align: 1px;
+        position: absolute; left: 100%; top: 50%; transform: translateY(-50%); margin-left: 12px; white-space: nowrap;
         font: 11.5px/1 var(--sans); color: var(--blue); background: var(--bg); padding: 4px 9px; border-radius: 999px;
-        border: 1px solid rgba(157, 184, 214, 0.35); opacity: 0; transition: opacity 0.12s; pointer-events: none;
+        border: 1px solid rgba(157, 184, 214, 0.35); opacity: 0; transition: opacity 0.12s; pointer-events: none; z-index: 2;
+        overflow: hidden; text-overflow: ellipsis;
       }
       .row.sel:hover .again, .row.show-again .again { opacity: 1; }
+      body.busy .again { display: none; }
       .row.landed .nd { animation: land 1.4s ease-out; }
       @keyframes land { 0% { box-shadow: 0 0 0 3px var(--bg), 0 0 0 10px rgba(157, 184, 214, 0.5); } 100% { box-shadow: 0 0 0 3px var(--bg), 0 0 0 3px rgba(157, 184, 214, 0); } }
 
@@ -266,7 +271,7 @@
       .fs .mi { color: var(--red); font-style: normal; opacity: 0.85; }
       .fn { color: var(--room-ink-soft); font-size: 12px; margin: 1px 0 0; }
       .diff { margin: 5px 0 2px; padding: 6px 8px; border-radius: 6px; background: #282c34; border: 1px solid rgba(255, 255, 255, 0.06); font: 11.5px/1.55 var(--mono); color: #abb2bf; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
-      .diff .cl { color: #5c6370; display: block; }
+      .diff .cl { color: #5c6370; }
       .diff .m { color: #e06c75; }
       .diff .p { color: #98c379; }
       .diff .c { color: #6f7682; }
@@ -298,14 +303,16 @@
       .dkey i { width: 9px; height: 8px; border-radius: 2px; display: block; }
       .nr .dmap { margin-top: 5px; }
       /* another app holds a file the rewind writes */
-      .other { margin: 9px 0 0; padding: 7px 9px; border-radius: 7px; background: rgba(201, 138, 29, 0.07); box-shadow: inset 2px 0 0 rgba(201, 138, 29, 0.6); color: var(--room-ink-soft); font-size: 12px; }
-      .other b { color: var(--room-ink); font-weight: 500; }
+      #card .other { margin: 9px 0 0; padding: 7px 9px; border-radius: 7px; background: rgba(201, 138, 29, 0.07); box-shadow: inset 2px 0 0 rgba(201, 138, 29, 0.6); color: var(--room-ink-soft); font-size: 12px; }
+      #card .other b { color: var(--room-ink); font-weight: 500; }
       .why { margin: 8px 0 0; color: var(--room-ink-soft); font-size: 12px; }
       .why b { color: #e2b765; font-weight: 500; }
       .ghostbtn { white-space: nowrap; height: 32px; padding: 0 12px; border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 8px; background: transparent; color: var(--room-ink); font: 13px var(--sans); cursor: pointer; }
       .ghostbtn:hover { background: rgba(255, 255, 255, 0.05); }
       .refuse { margin-top: 12px; }
       .act { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+      /* the rewind button stays in sight at the card's foot however long the list above it */
+      #card .act.foot { position: sticky; bottom: -13px; z-index: 1; background: var(--card); margin: 4px 0 0; padding: 8px 0 9px; box-shadow: 0 -10px 10px -10px rgba(0, 0, 0, 0.5); }
       .rw {
         display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 14px 0 11px; border: 0; border-radius: 8px;
         background: var(--accent); color: #fff; font: 500 13px var(--sans); cursor: pointer; transition: background 0.12s; white-space: nowrap;
@@ -323,6 +330,8 @@
       .steps li.doing::before { border-color: var(--blue); border-top-color: transparent; animation: turn 0.7s linear infinite; }
       .steps li.done { color: var(--room-ink-soft); }
       .steps li.done::before { border-color: var(--green); background: var(--green); }
+      .steps li.warn { color: #e2b765; }
+      .steps li.warn::before { border-color: var(--amber); background: var(--amber); }
       .steps .sha { font: 11.5px var(--mono); }
       @keyframes turn { to { transform: rotate(360deg); } }
 
@@ -420,13 +429,14 @@
       /* The protocol (claerbout/README.md, "The history view"):
            request {type:'history', action:'graph', before?, limit?}
              → {state:'on'|'paused'|'none', reason, detail?, project, app, tip, head, branches, commits, more, total, windows, others}
-           request {type:'history', action:'commit', sha} → {files:[{path, status, plus, minus, binary, patch?}]}
+           request {type:'history', action:'commit', sha} → {files:[{path, status, plus, minus, binary, patch?, large?, size?}]}
            request {type:'history', action:'blob', sha, path} → {text} | {binary, size} | {large, size} | {missing}
            request {type:'history', action:'compare', sha, paths?}
-             → {tip, now, target, onRecord, unrecorded, write, remove, skipped, kept, same, untracked, untrackedGone, others, blocked}
+             → {tip, now, target, onRecord, unrecorded, write, remove, skipped, kept, same, untracked, untrackedGone, others, blocked, invalid?}
            request {type:'rewind', sha, tip, paths?, anyway?}
-             → {ok, from, to, target, written, removed, skipped} | {same:true} | {refused, ...}
+             → {ok, from, to, target, written, removed, skipped, silent} | {same:true} | {refused, ...}
            events  history {kind:'commit'|'refs'|'state'|'focus', ...}, rewind {step, state, detail?}
+             (save and reload done with detail.silent: the documents whose windows did not answer save)
          Cells, values.json names and word counts are worked out here, from
          blob text: the shell knows git, not the apps' formats. */
       (function () {
@@ -445,6 +455,7 @@
         const HT = { more: 40, dayhead: 46, dayfold: 50, open: 32, close: 32, run: 30, note: 30, timer: 11, cluster: 26, user: 36, rfrom: 30, rto: 34, gap: 34, now: 48 };
         const PICK = new Set(['open', 'close', 'run', 'note', 'timer', 'rfrom', 'rto', 'user']);
         const LANES = 3;
+        const ARC_LANES = 4;
         const BACK = '<svg viewBox="0 0 24 24"><use href="#g-back"/></svg>';
         const STEP_ORDER = ['save', 'record-from', 'write', 'record-to', 'reload'];
 
@@ -462,6 +473,14 @@
           return { short: `${WD[w].slice(0, 3)} ${d} ${MO[m - 1].slice(0, 3)}`, long: `${WD[w]} ${d} ${MO[m - 1]}` };
         }
         const today = () => dayKey(Date.now());
+        // A span of time in words: "22 min", "3 h 9 min", "2 days". The gap rows and "… back" both say it so.
+        function spanWords(ms) {
+          const m = Math.max(1, Math.round(ms / 60000));
+          if (m >= 60 * 24) return plural(Math.round(m / (60 * 24)), 'day');
+          if (m >= 60) return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`;
+          return `${m} min`;
+        }
+        const megabytes = (n) => `${(n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`;
         function when(c) { return c.day === today() ? hm(c.t) : `${dayInfo(c.day).short}, ${hm(c.t)}`; }
         const short = (sha) => String(sha || '').slice(0, 7);
         const base = (file) => String(file).split('/').pop();
@@ -482,7 +501,7 @@
         // S.graph: the shell's answer, commits merged as events arrive. S.data: built from it for drawing.
         const S = {
           graph: null, data: null, zoom: 'runs', sel: null, dayFold: new Map(), openClusters: new Set(), showBranch: true,
-          busy: false, rows: [], rmap: new Map(), landed: null, cardX: 580, selAt: 0, hintOn: false, selRow: -1,
+          busy: false, rows: [], rmap: new Map(), landed: null, cardX: 580, rowW: 562, selAt: 0, hintOn: false, selRow: -1,
           details: new Map(), blobs: new Map(), compares: new Map(), card: null, at: null, loading: false, last: null,
         };
         try {
@@ -492,6 +511,11 @@
           // No address to read: nothing selected.
         }
 
+        // While a rewind runs: no second one, and no "click again" hint on any node.
+        function setBusy(on) {
+          S.busy = on;
+          document.body.classList.toggle('busy', on);
+        }
         function kindOf(c) {
           if (c.line !== 'record') return 'user';
           return { run: 'run', timer: 'timer', open: 'open', close: 'close', 'rewind-from': 'rfrom', 'rewind-to': 'rto' }[c.trigger] || 'note';
@@ -636,10 +660,12 @@
               const runs = cs.filter((x) => x.kind === 'run').length, errs = cs.filter((x) => x.kind === 'run' && x.error).length;
               const timers = cs.filter((x) => x.kind === 'timer').length, rws = cs.filter((x) => x.kind === 'rto').length;
               const us = r.items.filter((x) => x.kind === 'user').length;
-              const span = r.items.length ? `${hm(r.items[0].t)}–${hm(r.items[r.items.length - 1].t)}` : '';
+              const a = r.items.length ? hm(r.items[0].t) : '', b = r.items.length ? hm(r.items[r.items.length - 1].t) : '';
+              const span = a === b ? a : `${a}–${b}`;
               const first = D.records[0] && D.records[0].day === r.day.key && !S.graph.more ? ' · the record begins' : '';
               const parts = [span];
-              if (cs.length) parts.push(`${plural(runs, 'run')}${errs ? `, ${errs} raised` : ''}`, plural(timers, 'timer commit'));
+              if (runs) parts.push(`${plural(runs, 'run')}${errs ? `, ${errs} raised` : ''}`);
+              if (timers) parts.push(plural(timers, 'timer commit'));
               if (rws) parts.push(plural(rws, 'rewind'));
               if (us) parts.push(`${us} of yours`);
               lb = `<span class="lb"><b>${info.short}</b><span class="hint">${parts.filter(Boolean).join(' · ')}${first}</span></span>`;
@@ -647,9 +673,7 @@
               break;
             }
             case 'gap': {
-              const m = Math.round(r.span / 60000);
-              const span = m >= 60 * 24 ? plural(Math.round(m / (60 * 24)), 'day') : m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`;
-              lb = `<span class="lb it">${span} with nothing recorded</span>`;
+              lb = `<span class="lb it">${spanWords(r.span)} with nothing recorded</span>`;
               break;
             }
             case 'cluster': {
@@ -678,9 +702,13 @@
             }
             case 'timer': {
               const names = touchedNames([c]);
-              tm = `<span class="tm${tags ? '' : ' ghost'}">${hm(c.t)}</span>`;
+              // A bead's words show on hover, except where nothing else would say them: the record's
+              // first commit, its tip, a timer with no commit row beside it, and a rewind's target.
+              const quiet = (row) => !row || ['dayhead', 'gap', 'now', 'more', 'dayfold'].includes(row.type);
+              const shown = tags || first(c) || c.sha === S.graph.tip || (quiet(S.rows[i - 1]) && quiet(S.rows[i + 1]));
+              tm = `<span class="tm${shown ? '' : ' ghost'}">${hm(c.t)}</span>`;
               nd = '<i class="nd bead"></i>';
-              lb = `<span class="lb${tags ? '' : ' ghost'}">${labelHTML(c)}${names.length ? `<span class="hint">· ${esc(listNames(names, 2))}</span>` : ''}${first(c)}${tags}${again(c)}</span>`;
+              lb = `<span class="lb${shown ? '' : ' ghost'}">${labelHTML(c)}${names.length ? `<span class="hint">· ${esc(listNames(names, 2))}</span>` : ''}${first(c)}${tags}${again(c)}</span>`;
               pick = true;
               break;
             }
@@ -719,7 +747,7 @@
           const near = !sel && S.selRow >= 0 && Math.abs(i - S.selRow) <= 2 ? ' near' : '';
           const hint = sel && S.hintOn ? ' show-again' : '';
           const landed = c && S.landed && S.landed.has(c.sha) ? ' landed' : '';
-          return `<div class="row t-${r.type}${pick ? ' pick' : ''}${sel}${near}${hint}${landed}" data-i="${i}" style="top:${r.y}px;height:${r.h}px;width:${S.cardX - 18}px">${tm}${nd}${lb}</div>`;
+          return `<div class="row t-${r.type}${pick ? ' pick' : ''}${sel}${near}${hint}${landed}" data-i="${i}" style="top:${r.y}px;height:${r.h}px;width:${S.rowW}px">${tm}${nd}${lb}</div>`;
         }
         // The selected node's hint: a second click rewinds, when the card says a rewind would change something.
         function again(c) {
@@ -729,7 +757,7 @@
         function first(c) { return S.data.records[0] === c && !S.graph.more ? '<span class="hint">· the record begins</span>' : ''; }
         function rewindable() {
           const k = S.card && S.card.compare;
-          return !!(k && !k.error && !k.blocked && S.graph.state !== 'paused' && k.write.length + k.remove.length > 0);
+          return !!(k && !k.error && !k.invalid && !k.blocked && S.graph.state !== 'paused' && k.write.length + k.remove.length > 0);
         }
 
         /* ---------- the drawing: river, reaches, tributaries, ties, arcs ---------- */
@@ -785,7 +813,8 @@
             let lane = 0;
             while (lanes.some((l) => l.lane === lane && !(l.y2 < y1 - 4 || l.y1 > y2 + 4))) lane++;
             lanes.push({ lane, y1, y2 });
-            const ax = rx - 24 - lane * 10;
+            // At most four lanes: a deeper rewind shares the outer one rather than running into the times.
+            const ax = rx - 24 - Math.min(lane, ARC_LANES - 1) * 10;
             P.push(`<path class="arc" d="M${rx - 10},${y2} H${ax + 7} Q${ax},${y2} ${ax},${y2 - 7} V${y1 + 7} Q${ax},${y1} ${ax + 7},${y1} H${rx - 10}"/>`);
             P.push(`<path class="arrow" d="M${rx - 15},${y1 - 3.5} L${rx - 10},${y1} L${rx - 15},${y1 + 3.5}"/>`);
           });
@@ -796,7 +825,9 @@
         const scroll = $('#scroll'), river = $('#river'), lines = $('#lines'), rowsEl = $('#rows'), card = $('#card'), tie = $('#tie'), mini = $('#mini');
         function render() {
           if (!S.data) return;
-          const w = Math.min(G.w, Math.max(560, scroll.clientWidth - 36));
+          // The branch lanes push the labels right; the river widens by as much, so the card moves
+          // over instead of the labels losing room.
+          const w = Math.min(G.w + (labelX() - G.lx), Math.max(560, scroll.clientWidth - 36));
           S.cardX = w - G.cardW;
           river.style.width = w + 'px';
           const { rows, height } = layout();
@@ -805,6 +836,8 @@
           rows.forEach((r) => { if (r.item) S.rmap.set(r.item.sha, r); if (r.items) r.items.forEach((c) => S.rmap.set(c.sha, r)); });
           const sr = S.sel ? S.rmap.get(S.sel) : null;
           S.selRow = sr && sr.item ? rows.indexOf(sr) : -1;
+          // A row reaches the card when one is open, the river's edge when none is.
+          S.rowW = (S.selRow >= 0 ? S.cardX : w) - 18;
           river.style.setProperty('--rx', G.rx + 'px');
           river.style.setProperty('--lx', labelX() + 'px');
           river.style.setProperty('--timer', G.timeR + 'px');
@@ -819,7 +852,7 @@
         }
         function paintChrome() {
           const g = S.graph, D = S.data;
-          $('#t-path').textContent = g.project ? g.project.display : '';
+          setPath(g.project ? g.project.display : '');
           const n = D.records.filter((c) => c.day === today()).length;
           $('#t-meta').textContent = `${plural(g.total || D.records.length, 'commit')}${n ? ` · ${n} today` : ''} · ${g.project ? g.project.branch : ''}`;
           paintHere();
@@ -831,13 +864,40 @@
           $('#rb-proj').dataset.label = g.project ? g.project.name : 'No project';
           $('#rb-about').dataset.label = g.project ? `Kept on this Mac, on the branch ${g.project.branch}` : 'Kept on this Mac';
           paintRec();
+          fitPath();
+        }
+        // The project's path in the top bar: its name whole, the folder it is in before it.
+        function setPath(display) {
+          const el = $('#t-path');
+          const cut = display.lastIndexOf('/');
+          el.innerHTML = cut > 0 ? `<span class="par">${esc(display.slice(0, cut + 1))}</span><span class="nm">${esc(display.slice(cut + 1))}</span>` : `<span class="nm">${esc(display)}</span>`;
+          const par = el.querySelector('.par');
+          if (par) par.dataset.full = par.textContent;
+        }
+        // Where the bar is short, the folder is cut from its start, so the project's name is the last thing lost.
+        function fitPath() {
+          const el = $('#t-path'), par = el.querySelector('.par');
+          if (!par) return;
+          const full = par.dataset.full;
+          par.textContent = full;
+          par.hidden = false;
+          if (el.scrollWidth <= el.clientWidth) return;
+          let lo = 1, hi = full.length;
+          while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            par.textContent = '…' + full.slice(mid);
+            if (el.scrollWidth <= el.clientWidth) hi = mid;
+            else lo = mid + 1;
+          }
+          par.textContent = '…' + full.slice(lo);
+          if (el.scrollWidth > el.clientWidth) par.hidden = true;
         }
         function paintHere() {
           const g = S.graph;
           const own = (g.windows || []).map((file) => `<span class="app" title="${esc(capital(g.app))}">${esc((g.app || '?').charAt(0).toUpperCase())}</span><span class="doc">${esc(base(file))}</span>`);
-          const others = (g.others || []).flatMap((o) => o.documents.map((file) => `<span class="app other" title="${esc(capital(o.app))}">${esc(o.app.charAt(0).toUpperCase())}</span><span class="doc">${esc(base(file))}</span>`));
+          const others = (g.others || []).flatMap((o) => o.documents.map((file) => `<span class="app elsewhere" title="${esc(capital(o.app))}">${esc(o.app.charAt(0).toUpperCase())}</span><span class="doc">${esc(base(file))}</span>`));
           $('#here').innerHTML = own.concat(others).join('');
-          $('#here').title = 'Open on this project: a rewind saves and reloads them';
+          $('#here').title = 'Open on this project: a rewind asks this app’s windows to save first, and reloads the documents it rewinds';
         }
         function paintRec() {
           const rec = $('#rec');
@@ -860,7 +920,18 @@
           fitCard();
           const rowEl = rowsEl.children[S.rows.indexOf(r)];
           const lb = rowEl && rowEl.querySelector('.lb');
-          const x1 = lb ? lb.offsetLeft + Math.min(lb.scrollWidth, lb.offsetWidth) + 12 : G.rx + 16;
+          const x1 = lb ? lb.offsetLeft + lb.offsetWidth + 12 : G.rx + 16;
+          // The hint after the label stops short of the card: shorter words where the room is short.
+          const hint = lb && lb.querySelector('.again');
+          if (hint) {
+            const room = S.cardX - 12 - x1;
+            for (const words of [hint.textContent, 'click again to rewind', 'click again']) {
+              hint.textContent = words;
+              if (hint.offsetWidth <= room) break;
+            }
+            hint.style.maxWidth = Math.max(0, room) + 'px';
+            hint.hidden = room < 60;
+          }
           if (x1 < S.cardX - 14) {
             tie.hidden = false;
             tie.style.left = x1 + 'px';
@@ -980,15 +1051,17 @@
             if (f.status !== 'D' && isFigure(f.path)) {
               const b = await blob(detail.sha, f.path);
               if (b.text) bits.thumb = svgImg(b.text);
+              if (b.large) bits.large = b.size;
             }
             if (f.status !== 'D' && /\.py$/i.test(f.path) && f.patch) {
               const b = await blob(detail.sha, f.path);
               const cells = cellsIn(b.text);
+              if (b.large) bits.large = b.size;
               if (cells) {
                 const changed = changedLines(f.patch);
                 const lit = new Set(changed.map((l) => cellAt(cells, l.at)));
                 lit.delete(0);
-                bits.cells = { n: cells.length, lit: [...lit].sort((a, b) => a - b), firstCell: changed.length ? cellAt(cells, changed[0].at) : 0 };
+                bits.cells = { n: cells.length, lit: [...lit].sort((a, b) => a - b), list: cells.map(({ start, end }) => ({ start, end })) };
               }
             }
             if (base(f.path) === 'values.json' && f.status === 'M' && parent) {
@@ -999,6 +1072,7 @@
             if (/\.typ$/i.test(f.path) && f.status === 'M' && parent) {
               const [a, b] = await Promise.all([blob(parent, f.path), blob(detail.sha, f.path)]);
               if (a.text != null && b.text != null) bits.words = words(b.text) - words(a.text);
+              if (a.large || b.large) bits.large = Math.max(a.size || 0, b.size || 0);
             }
             S.card && S.card.files.set(f.path, bits);
           }));
@@ -1035,6 +1109,11 @@
             if (entry.status !== 'D' && isFigure(p)) {
               const t = await blob(k.target, p);
               if (t.text) bits.thumb = svgImg(t.text);
+              if (t.large) bits.large = t.size;
+            }
+            if (entry.status === 'M' && /\.(py|typ|json)$/i.test(p) && !bits.cells && !bits.values && bits.words == null) {
+              const [t, n] = await Promise.all([blob(k.target, p), blob(k.now, p)]);
+              if (t.large || n.large) bits.large = Math.max(t.size || 0, n.size || 0);
             }
             S.card && S.card.back.set(p, bits);
           }));
@@ -1056,6 +1135,8 @@
           if (bits && bits.cells && bits.cells.lit.length) notes.push(listCells(bits.cells.lit));
           if (bits && bits.values) notes.push(`${listNames(bits.values)} ${bits.values.length === 1 ? 'was' : 'were'} rewritten`);
           if (bits && bits.words) notes.push(bits.words > 0 ? `about ${bits.words} words written` : `about ${-bits.words} words cut`);
+          const large = (bits && bits.large) || (f.large && f.size) || null;
+          if (large || f.large) notes.push(`too large to look inside here${large ? ` (${megabytes(large)})` : ''}`);
           if (bits && bits.thumb) h += `<div class="thumbrow">${bits.thumb}<span class="fn">${esc(notes.join(' · ') || (f.status === 'A' ? 'new' : 'redrawn'))}</span></div>`;
           else if (notes.length) h += `<div class="fn">${esc(notes.join(' · '))}</div>`;
           if (bits && bits.cells && bits.cells.lit.length) {
@@ -1068,9 +1149,21 @@
             const changed = changedLines(f.patch);
             const shown = changed.slice(0, 8);
             if (shown.length) {
-              const head = bits && bits.cells && bits.cells.firstCell && !/^# %%/.test(shown[0].text) ? `<span class="cl"># %% cell ${bits.cells.firstCell}</span>` : '';
-              const more = changed.length > shown.length || f.cut ? `\n<span class="c">… ${changed.length > shown.length ? plural(changed.length - shown.length, 'more line') : 'more'}</span>` : '';
-              h += `<div class="diff">${head}${shown.map((l) => `<span class="${l.kind}">${l.kind === 'm' ? '−' : '+'}</span> ${esc(l.text)}`).join('\n')}${more}</div>`;
+              // A "# %% cell N" line each time the lines move into another cell (none before a line
+              // that is itself a cell's # %% line).
+              const list = bits && bits.cells && bits.cells.list;
+              const out = [];
+              let cell = 0;
+              for (const l of shown) {
+                if (list) {
+                  const at = cellAt(list, l.at);
+                  if (at !== cell && at > 0 && !/^# %%/.test(l.text)) out.push(`<span class="cl"># %% cell ${at}</span>`);
+                  cell = at;
+                }
+                out.push(`<span class="${l.kind}">${l.kind === 'm' ? '−' : '+'}</span> ${esc(l.text)}`);
+              }
+              if (changed.length > shown.length || f.cut) out.push(`<span class="c">… ${changed.length > shown.length ? plural(changed.length - shown.length, 'more line') : 'more'}</span>`);
+              h += `<div class="diff">${out.join('\n')}</div>`;
             }
           }
           return h;
@@ -1083,8 +1176,16 @@
           const other = (k.others || g.others || []).find((o) => o.documents.some((file) => relative(file) === entry.path));
           const win = own.includes(entry.path) ? `<span class="win">open here: saved first, then reloads</span>` : other ? `<span class="win">open in ${esc(capital(other.app))}</span>` : '';
           let note = '', warn = !!other, strip = '';
+          // A commit of yours that did not change this file holds it as an earlier commit left it.
+          const detail = S.card && S.card.detail;
+          const unchanged = c.kind === 'user' && detail && !detail.error && detail.files && !detail.files.some((f) => f.path === entry.path);
           if (removed) note = 'comes out: not in this commit (the record keeps it)';
           else if (entry.status === 'A') note = c.kind === 'user' ? `written from this commit; not here now` : 'comes back: it was removed since';
+          else if (unchanged && entry.status === 'M') {
+            note = 'this commit has it as it was before; what you wrote since stays in the record';
+            warn = warn || !!(bits && bits.words > 0);
+            if (bits && bits.cells && Object.keys(bits.cells.st).length) strip = dmapHTML(bits.cells.n, bits.cells.st, true);
+          }
           else if (entry.status === 'T') note = 'goes back, and changes kind';
           else if (bits && bits.cells) {
             const { back, out, come } = bits.cells;
@@ -1100,6 +1201,7 @@
             note = `about ${Math.max(10, Math.round(bits.words / 10) * 10)} words written since ${t} leave the page; they stay in the record`;
             warn = true;
           } else if (bits && bits.thumb) note = `the figure as it was at ${t}`;
+          else if (bits && bits.large) note = `goes back to ${t}; too large to look inside here (${megabytes(bits.large)})`;
           else note = `goes back to ${t}`;
           const thumb = bits && bits.thumb && !removed ? `<div class="thumbrow">${bits.thumb}</div>` : '';
           const disabled = k.blocked || S.graph.state === 'paused' ? ' disabled' : '';
@@ -1135,7 +1237,9 @@
           }
           if (S.card && S.card.notice) note += `<div class="note moved">${S.card.notice}</div>`;
           const prev = prevOf(c);
-          const vs = prev ? `since ${esc(when(prev))}, ${esc(shortMsg(prev))}` : 'the first commit';
+          // The app's name is kept when the commit before is another app's (or this is one of yours).
+          const prevMsg = prev && (prev.kind === 'run' || prev.kind === 'timer') && prev.app && prev.app !== c.app ? `${prev.app}: ${restOf(prev)}` : prev ? shortMsg(prev) : '';
+          const vs = prev ? `since ${esc(when(prev))}, ${esc(prevMsg)}` : 'the first commit';
           const detail = S.card && S.card.sha === c.sha ? S.card.detail : null;
           let thisBody;
           if (!detail) thisBody = '<div class="fn">Reading the commit…</div>';
@@ -1156,10 +1260,14 @@
           const k = S.card && S.card.sha === c.sha ? S.card.compare : null;
           if (!k) return `<div class="sec"><div class="sl">Rewinding here</div><div class="fn">Comparing with now…</div></div>`;
           if (k.error) return `<div class="sec"><div class="sl">Rewinding here</div><div class="fn">${esc(k.error)}</div></div>`;
+          if (k.invalid) {
+            // A path no rewind writes (the record never makes one): the whole commit is refused.
+            return `<div class="sec"><div class="sl">Rewinding here</div><div class="other"><b>No rewind to this commit.</b> It holds <span class="eq">${esc(k.invalid.path)}</span>: ${esc(k.invalid.why)}. The record never writes such a path, so this commit was made some other way, and none of it is written into the folder.</div></div>`;
+          }
           const t = when(c);
           const paused = k.blocked || (g.state === 'paused' ? g.reason : null);
           const after = (() => { const anchor = c.kind === 'user' ? c.tie && find(c.tie.sha) : c; return anchor && anchor.i != null ? S.data.records.length - 1 - anchor.i : null; })();
-          const back = c.day === today() ? `${Math.max(1, Math.round((Date.now() - c.t) / 60000))} min back` : dayInfo(c.day).short;
+          const back = c.day === today() ? `${spanWords(Date.now() - c.t)} back` : dayInfo(c.day).short;
           const entries = [...k.write.map((e) => [e, false]), ...k.remove.map((p) => [{ path: p, status: 'D' }, true])];
           if (!entries.length) {
             return `<div class="sec"><div class="sl">Rewinding here</div><div class="fn">This is where you are: the files now are this commit’s${k.kept && k.kept.length && !k.onRecord ? ', and the files it does not hold stay as they are' : ''}.</div>${skippedHTML(k)}</div>
@@ -1180,13 +1288,21 @@
             ? `<div class="other"><b>${esc(listNames(held[0].docs.map(base)))} ${held[0].docs.length === 1 ? 'is' : 'are'} open in ${esc(capital(held[0].app))}</b>, a separate app, so it is not saved first. Close it there or untick it; rewound anyway, ${esc(capital(held[0].app))} reloads it when it sees the rewind.</div>`
             : '';
           const same = k.same > 0 ? `${plural(k.same, 'other file is', 'other files are')} the same at both moments.` : '';
-          const own = (g.windows || []).map(base);
+          // This app's windows on the project: each is asked to save first; only the ones whose
+          // documents the rewind writes or removes reload.
+          const ownPaths = (g.windows || []).map(relative);
+          const reloading = ownPaths.filter((p) => touchedSet.has(p)).map(base);
+          const untouched = ownPaths.filter((p) => !touchedSet.has(p)).map(base);
+          const isAre = (names) => (names.length === 1 ? 'is' : 'are');
+          const windowsSay =
+            (reloading.length ? `${esc(listNames(reloading, 2))} ${isAre(reloading)} saved first and ${reloading.length === 1 ? 'reloads' : 'reload'}. ` : '') +
+            (untouched.length ? `${esc(listNames(untouched, 2))} ${isAre(untouched)} saved first; ${untouched.length === 1 ? 'it is' : 'they are'} not rewound. ` : '');
           const head = g.head && g.head.branch ? `${esc(g.head.branch)} stays where it is, and ` : '';
           const refusal = S.card.refusal;
-          const button = `<div class="act"><button class="rw" type="button" data-act="rewind">${BACK}<span class="rwl">Rewind to ${esc(t)}</span></button><span class="kbd">or click the node again · ⌘↩</span></div>
-               <p class="fine">${own.length ? `${esc(listNames(own, 2))} ${own.length === 1 ? 'is' : 'are'} saved first and ${own.length === 1 ? 'reloads' : 'reload'}. ` : ''}Now is recorded first, so this can be undone; ${head}HEAD and the index are not touched (git status lists the rewound files as changed). A kernel’s memory is not rewound: cells come back stale.</p>`;
+          const button = `<div class="act foot"><button class="rw" type="button" data-act="rewind">${BACK}<span class="rwl">Rewind to ${esc(t)}</span></button><span class="kbd">or click the node again · ⌘↩</span></div>
+               <p class="fine">${windowsSay}Now is recorded first, so this can be undone; ${head}HEAD and the index are not touched (git status lists the rewound files as changed). A kernel’s memory is not rewound: cells come back stale.</p>`;
           const action = paused
-            ? `<div class="act"><button class="rw" type="button" disabled>${BACK}<span class="rwl">Rewind waits</span></button></div>
+            ? `<div class="act foot"><button class="rw" type="button" disabled>${BACK}<span class="rwl">Rewind waits</span></button></div>
                <p class="why"><b>The record is paused:</b> ${esc(paused)}, and git’s work comes first. Nothing is recorded or rewound until it ends.</p>`
             : refusal
               ? refusal.html + (refusal.replaces ? '' : button)
@@ -1212,12 +1328,15 @@
           const n = paths ? paths.length : k.write.length + k.remove.length;
           const others = (g.others || []).filter((o) => o.documents.length);
           const target = c.sha;
+          // Only the documents this rewind writes or removes reload.
+          const rewinding = new Set(paths || [...k.write.map((x) => x.path), ...k.remove]);
+          const reloading = (g.windows || []).map(relative).filter((p) => rewinding.has(p)).map(base);
           const labels = {
             save: own.length ? `Save ${esc(listNames(own, 2))} in ${esc(app)}` : `No ${esc(app)} window on this project to save`,
             'record-from': `Record now: <span class="sha">${esc(g.app)}: rewind from ${short(k.tip)}</span>`,
             write: `Write ${plural(n, 'file')} from <span class="sha">${short(target)}</span> into the folder`,
             'record-to': `Record <span class="sha">${esc(g.app)}: rewind to ${short(target)}</span>`,
-            reload: `Reload ${own.length ? esc(listNames(own, 2)) : 'nothing here'}${others.length ? `; ${esc(capital(others[0].app))} reloads its files when it sees the rewind` : ''}`,
+            reload: `${reloading.length ? `Reload ${esc(listNames(reloading, 2))}` : 'Nothing open here is rewound, so nothing reloads'}${others.length ? `; ${esc(capital(others[0].app))} reloads its files when it sees the rewind` : ''}`,
           };
           return `<ol class="steps">${STEP_ORDER.map((s) => `<li data-step="${s}">${labels[s]}</li>`).join('')}</ol>`;
         }
@@ -1229,10 +1348,29 @@
           li.classList.toggle('doing', detail.state === 'doing');
           li.classList.toggle('done', detail.state === 'done');
           if (detail.step === 'record-from' && detail.state === 'done' && detail.detail && detail.detail.from === null) li.innerHTML = 'Now was the tip: nothing to record first';
+          // A window that did not answer save was not saved first, and will not reload: said in amber.
+          const silent = detail.state === 'done' && detail.detail && Array.isArray(detail.detail.silent) ? detail.detail.silent.map(base) : [];
+          if (silent.length && detail.step === 'save') {
+            li.classList.add('warn');
+            li.textContent = `${listNames(silent, 2)} did not answer: not saved first`;
+          }
+          if (silent.length && detail.step === 'reload') {
+            li.classList.add('warn');
+            li.textContent = `Reopen ${listNames(silent, 2)}: ${silent.length === 1 ? 'its window' : 'their windows'} did not answer, so ${silent.length === 1 ? 'it does' : 'they do'} not reload`;
+          }
+          showSteps();
+        }
+        // A running rewind's steps stay in sight in a card that scrolls inside itself, also when a
+        // figure above them finishes drawing and pushes them down.
+        function showSteps() {
+          const ol = card.querySelector('.steps');
+          if (!ol || card.hidden) return;
+          const bottom = ol.offsetTop + ol.offsetHeight + 14;
+          if (bottom > card.scrollTop + card.clientHeight) card.scrollTop = bottom - card.clientHeight;
         }
         async function startRewind(c, opts) {
           const k = S.card && S.card.compare;
-          if (S.busy || !k || k.error || k.blocked || S.graph.state === 'paused') return;
+          if (S.busy || !k || k.error || k.invalid || k.blocked || S.graph.state === 'paused') return;
           const options = opts || {};
           const paths = options.paths !== undefined ? options.paths : chosenPaths();
           if (paths && !paths.length) return;
@@ -1244,21 +1382,24 @@
             // The boxes as they were chosen, again.
             $$('#card input[data-path]').forEach((b) => { b.checked = S.card.chosen.includes(b.dataset.path); b.closest('.nr').classList.toggle('off', !b.checked); });
           }
-          S.busy = true;
+          setBusy(true);
           S.hintOn = false;
           $$('.row.show-again').forEach((r) => r.classList.remove('show-again'));
-          const anchor = card.querySelector('.act');
+          const anchor = card.querySelector('.act.foot');
           const fine = card.querySelector('.fine');
           if (fine) fine.remove();
           card.querySelectorAll('.nr input').forEach((b) => (b.disabled = true));
           const wrap = document.createElement('div');
           wrap.innerHTML = stepsHTML(c, k, paths);
-          if (anchor) anchor.replaceWith(wrap.firstChild);
-          else card.appendChild(wrap.firstChild);
+          const steps = wrap.firstChild;
+          if (anchor) anchor.replaceWith(steps);
+          else card.appendChild(steps);
           fitCard();
+          showSteps();
+          card.querySelectorAll('img').forEach((img) => { if (!img.complete) img.addEventListener('load', showSteps, { once: true }); });
           const before = S.graph.tip;
           const result = await ask({ type: 'rewind', sha: c.sha, tip: k.tip, ...(paths ? { paths } : {}), ...(options.anyway ? { anyway: true } : {}) });
-          S.busy = false;
+          setBusy(false);
           await afterRewind(c, result, { paths, before, retried: options.retried });
         }
         async function afterRewind(c, result, ctx) {
@@ -1296,6 +1437,8 @@
           }
           S.card.refusal = { html: refusalHTML(result, ctx), replaces: !!(result && result.refused === 'other-app') };
           render();
+          // The refusal, and what can be done about it, in sight at the card's foot.
+          card.scrollTop = card.scrollHeight;
         }
         function refusalHTML(result, ctx) {
           const block = (text, buttons) => `<div class="refuse">${text}${buttons ? `<div class="act">${buttons}</div>` : ''}</div>`;
@@ -1310,6 +1453,8 @@
             }
             case 'paused':
               return block(`<p class="why"><b>The record is paused:</b> ${esc(result.reason)}. Nothing has been written.</p>`);
+            case 'invalid':
+              return block(`<div class="other"><b>No rewind to this commit.</b> ${result.path ? `It holds <span class="eq">${esc(result.path)}</span>: ` : ''}${esc(result.why || 'a path no rewind writes')}. The record never writes such a path, so this commit was made some other way. Nothing has been recorded or written.</div>`);
             case 'unsaved':
               return block(`<div class="other"><b>${esc(base(result.path || 'A document'))} could not be saved${result.error ? `: ${esc(result.error)}` : ''}.</b> Nothing has been written.</div>`);
             case 'moved':
@@ -1320,10 +1465,20 @@
         }
         function toastRewound(c, result) {
           const g = S.graph;
-          const own = (g.windows || []).map(base);
           const what = c.kind === 'rfrom' ? `Back where you were at ${hm(c.t)}, before that rewind` : `Rewound to <b>${esc(when(c))}</b>, ${esc(shortMsg(c))}`;
-          const skipped = result.skipped && result.skipped.length ? ` ${plural(result.skipped.length, 'file was', 'files were')} left as they are.` : '';
-          showToast(`<span class="k">↺</span><span>${what}. ${own.length ? `${esc(listNames(own, 2))} ${own.length === 1 ? 'reloads' : 'reload'}; ` : ''}a kernel’s memory is not rewound.${skipped}</span><button type="button" data-act="undo">Undo</button>`);
+          // Only the documents the rewind wrote or removed reload; one whose window did not answer
+          // save does not, and is to be reopened.
+          const rewound = new Set([...(result.written || []), ...(result.removed || [])]);
+          const silent = new Set((result.silent || []).map(relative));
+          const own = (g.windows || []).map(relative).filter((p) => rewound.has(p));
+          const reloads = own.filter((p) => !silent.has(p)).map(base);
+          const reopen = own.filter((p) => silent.has(p)).map(base);
+          const parts = [];
+          if (reloads.length) parts.push(`${esc(listNames(reloads, 2))} ${reloads.length === 1 ? 'reloads' : 'reload'}`);
+          if (reopen.length) parts.push(`${parts.length ? 'reopen' : 'Reopen'} <b>${esc(listNames(reopen, 2))}</b>: ${reopen.length === 1 ? 'its window' : 'their windows'} did not reload`);
+          parts.push(`${parts.length ? 'a' : 'A'} kernel’s memory is not rewound`);
+          const skipped = result.skipped && result.skipped.length ? ` ${plural(result.skipped.length, 'file was', 'files were')} left as ${result.skipped.length === 1 ? 'it is' : 'they are'}.` : '';
+          showToast(`<span class="k">↺</span><span>${what}. ${parts.join('; ')}.${skipped}</span><button type="button" data-act="undo">Undo</button>`);
         }
         async function undo() {
           const last = S.last;
@@ -1333,9 +1488,9 @@
           const target = find(sha);
           if (!target) return;
           hideToast();
-          S.busy = true;
+          setBusy(true);
           const result = await ask({ type: 'rewind', sha, tip: S.graph.tip });
-          S.busy = false;
+          setBusy(false);
           if (result && result.ok) {
             S.last = { result, target, before: S.graph.tip };
             S.landed = new Set([result.to, result.from].filter(Boolean));
@@ -1536,7 +1691,7 @@
         $('#rb-now').addEventListener('click', () => { scroll.scrollTop = scroll.scrollHeight; });
         $('#rb-start').addEventListener('click', () => { scroll.scrollTop = 0; });
         let rz;
-        window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (S.data) render(); else drawMini(); }, 60); });
+        window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { if (S.data) render(); else { placeBed(); fitPath(); } }, 60); });
         setInterval(() => { const n = $('#now-time'); if (n) n.textContent = hm(Date.now()); }, 30_000);
 
         /* ================= the graph from the shell ================= */
@@ -1631,13 +1786,27 @@
 
         /* ================= no record ================= */
         // Each reason is the graph's {state: 'none', reason} (or no commit yet), said in the record's own terms.
-        function emptyHTML(v, g) {
-          const bed = (main) => `<svg width="70" height="${main ? 210 : 170}" viewBox="0 0 70 ${main ? 210 : 170}">
-              <line class="riv dot" x1="22" y1="12" x2="22" y2="${main ? 192 : 152}"/>
+        // The picture beside an empty window: the river's bed, dotted, and, when commits of yours are
+        // listed beside it, one square node for each at `ys` (placeBed moves them onto their rows).
+        function bedSVG(ys) {
+          const h = ys.length ? Math.max(210, ys[ys.length - 1] + 46) : 170;
+          const squares = ys.map((y) => `<rect x="44.5" y="${y - 5.5}" width="11" height="11" rx="3" fill="#2b2a2d" stroke="#d8d6d1" stroke-width="1.6"/>`).join('');
+          const trib = ys.length > 1 ? `<line class="trib" x1="50" y1="${ys[0]}" x2="50" y2="${ys[ys.length - 1]}"/>` : '';
+          return `<svg width="70" height="${h}" viewBox="0 0 70 ${h}">
+              <line class="riv dot" x1="22" y1="12" x2="22" y2="${h - 18}"/>
               <circle cx="22" cy="12" r="4.5" fill="none" stroke="rgba(157,184,214,0.55)" stroke-width="1.5"/>
-              <circle cx="22" cy="${main ? 196 : 156}" r="6.5" fill="#2b2a2d" stroke="rgba(157,184,214,0.8)" stroke-width="1.5" stroke-dasharray="2.6 2.2"/>
-              ${main ? `<line class="trib" x1="50" y1="40" x2="50" y2="150"/>${[40, 95, 150].map((y) => `<rect x="44.5" y="${y - 5.5}" width="11" height="11" rx="3" fill="#2b2a2d" stroke="#d8d6d1" stroke-width="1.6"/>`).join('')}` : ''}
+              <circle cx="22" cy="${h - 14}" r="6.5" fill="#2b2a2d" stroke="rgba(157,184,214,0.8)" stroke-width="1.5" stroke-dasharray="2.6 2.2"/>
+              ${trib}${squares}
             </svg>`;
+        }
+        function placeBed() {
+          const svg = $('#empty .bed svg'), items = $$('#empty .ucs li');
+          if (!svg || !items.length) return;
+          const top = svg.getBoundingClientRect().top;
+          const ys = items.map((li) => { const r = li.getBoundingClientRect(); return Math.round(r.top + r.height / 2 - top); });
+          svg.outerHTML = bedSVG(ys);
+        }
+        function emptyHTML(v, g) {
           const app = capital((g && g.app) || 'the app');
           const doc = g && g.document ? base(g.document) : null;
           const prefix = app.toUpperCase();
@@ -1648,11 +1817,12 @@
             off: { main: false, title: 'The record is off', body: `<p>Autosave is off for ${esc(app)}, so nothing is being recorded${doc ? ` for <b>${esc(doc)}</b>` : ''}, and there is nothing to go back to.</p>`, foot: `"autosave": true in the app’s config turns it on · ${esc(prefix)}_AUTOSAVE=0 turns it off for a test` },
             'no-git': { main: false, title: 'No git on this Mac', body: `<p>The record is kept with git, and ${esc(app)} found none. On a Mac, the developer tools bring it: <b>xcode-select --install</b> in a terminal, then open the document again.</p>`, foot: 'the record looks for git in the app’s PATH, Homebrew’s folders and /usr/bin' },
             waiting: { main: users.length > 0, title: 'Waiting to begin', body: `<p><b>${esc(g && g.project ? g.project.name : 'This project')}</b> has no record yet, and ${esc((g && g.reason) || 'git is at work')}, so its first commit waits. It lands when that ends${users.length ? ', beside your branch, tied to it wherever they hold the same files' : ''}.</p>${users.length ? `<ul class="ucs">${users.map((u) => `<li><span class="t">${esc(dayInfo(dayKey(Date.parse(u.time))).short)}</span><span class="m">${esc(u.subject)}</span></li>`).join('')}</ul>` : ''}`, foot: `${esc(g && g.project ? g.project.branch : 'claerbout-autosave')}: no commits yet · paused while git is at work` },
-            begins: { main: users.length > 0, title: 'The record begins', body: `<p><b>${esc(g && g.project ? g.project.name : 'This project')}</b> has no record commit yet. The first lands when a window moves onto the project, then every cell run and every minute something changes.</p>`, foot: `${esc(g && g.project ? g.project.branch : 'claerbout-autosave')}: no commits yet` },
+            begins: { main: false, title: 'The record begins', body: `<p><b>${esc(g && g.project ? g.project.name : 'This project')}</b> has no record commit yet. The first lands when a window moves onto the project, then every cell run and every minute something changes.</p>`, foot: `${esc(g && g.project ? g.project.branch : 'claerbout-autosave')}: no commits yet` },
             error: { main: false, title: 'The history could not be read', body: `<p>${esc((g && g.error) || 'The shell did not answer.')}</p><p>The record itself is untouched; the log has more.</p>`, foot: shell ? 'View › Reload tries again' : 'this page is the shell’s own: open it from the app, View › History…' },
           }[v] || null;
           const view = V || { main: false, title: 'No record here', body: `<p>${esc(String(v))}</p>`, foot: '' };
-          return `<div class="em"><div class="bed">${bed(view.main)}</div><div><h2>${view.title}</h2>${view.body}<div class="foot">${view.foot}</div></div></div>`;
+          const ys = view.main ? users.map((_u, k) => 40 + k * 55) : [];
+          return `<div class="em"><div class="bed">${bedSVG(ys)}</div><div><h2>${view.title}</h2>${view.body}<div class="foot">${view.foot}</div></div></div>`;
         }
         function showEmpty(v, g) {
           S.data = null;
@@ -1662,9 +1832,11 @@
           const e = $('#empty');
           e.hidden = false;
           e.innerHTML = emptyHTML(v, g);
-          $('#t-path').textContent = g && g.project ? g.project.display : g && g.document ? base(g.document) : '';
+          placeBed();
+          setPath(g && g.project ? g.project.display : g && g.document ? base(g.document) : '');
           $('#t-meta').textContent = v === 'off' || v === 'no-git' ? 'record off' : v === 'unsaved' || v === 'refused' ? 'no record' : g && g.project ? `no commits yet · ${g.project.branch}` : '';
           if (g && !g.error) { S.graph = g; paintHere(); paintRec(); }
+          fitPath();
           $$('#zoom button').forEach((b) => { b.disabled = true; b.classList.remove('on'); });
           $('#rb-branch').disabled = true;
         }

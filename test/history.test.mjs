@@ -318,11 +318,11 @@ test('a stale tip is refused, and nothing is written', async () => {
 test('the record\'s guards refuse a rewind: a merge in progress, index.lock, the record checked out', async () => {
   const { dir, project, first, second } = await recorded('guards');
   fs.writeFileSync(path.join(dir, '.git', 'MERGE_HEAD'), '0'.repeat(40));
-  assert.deepEqual(await history.rewind(project, { sha: first, tip: second }), { refused: 'paused', reason: 'merge in progress' });
-  assert.equal((await history.compare(project, first)).blocked, 'merge in progress');
+  assert.deepEqual(await history.rewind(project, { sha: first, tip: second }), { refused: 'paused', reason: 'a merge is in progress on main' });
+  assert.equal((await history.compare(project, first)).blocked, 'a merge is in progress on main');
   fs.rmSync(path.join(dir, '.git', 'MERGE_HEAD'));
   fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
-  assert.deepEqual(await history.rewind(project, { sha: first, tip: second }), { refused: 'paused', reason: 'index.lock exists' });
+  assert.deepEqual(await history.rewind(project, { sha: first, tip: second }), { refused: 'paused', reason: 'git holds index.lock' });
   fs.rmSync(path.join(dir, '.git', 'index.lock'));
   const worktree = path.join(work, `record-wt-${counter++}`);
   sh(dir, 'worktree', 'add', '-q', worktree, 'claerbout-autosave');
@@ -459,8 +459,8 @@ test('another app\'s document refuses a rewind unless the request says anyway; a
   assert.deepEqual(refused, { refused: 'other-app', app: 'plass', documents: [path.join(dir, 'a.txt')] });
   assert.equal(read(dir, 'a.txt'), 'two\n');
   // Without the file the other app holds, it goes through.
-  const unsaved = await history.rewind(project, { sha: first, tip: second, anyway: true }, { others, save: async () => ({ path: path.join(dir, 'a.txt') }) });
-  assert.deepEqual(unsaved, { refused: 'unsaved', path: path.join(dir, 'a.txt') });
+  const unsaved = await history.rewind(project, { sha: first, tip: second, anyway: true }, { others, save: async () => ({ unsaved: { path: path.join(dir, 'a.txt'), error: 'the disk is full' } }) });
+  assert.deepEqual(unsaved, { refused: 'unsaved', path: path.join(dir, 'a.txt'), error: 'the disk is full' });
   assert.equal(read(dir, 'a.txt'), 'two\n');
   assert.equal(subjects(dir).length, 2);
   const result = await history.rewind(project, { sha: first, tip: second, anyway: true }, { others });
@@ -474,4 +474,285 @@ test('another app\'s document refuses a rewind unless the request says anyway; a
   assert.deepEqual(others().map((other) => other.app), ['plass']);
   presence.write('plass', project.root, []);
   assert.deepEqual(others(), []);
+});
+
+// From the second review: the rewind's safety and the page's numbers.
+
+const treeName = (dir, rev) => sh(dir, 'rev-parse', `${rev}^{tree}`);
+/** An object written as it is given, so a test can craft what git itself
+ *  would never make. */
+const object = (dir, type, content) =>
+  execFileSync(binary, ['hash-object', '-t', type, '--literally', '-w', '--stdin'], { cwd: dir, input: content, stdio: ['pipe', 'pipe', 'pipe'] })
+    .toString()
+    .trim();
+const blobNamed = (dir, text) => object(dir, 'blob', Buffer.from(text));
+const treeNamed = (dir, entries) =>
+  object(dir, 'tree', Buffer.concat(entries.map(([mode, name, sha]) => Buffer.concat([Buffer.from(`${mode} ${name}\0`), Buffer.from(sha, 'hex')]))));
+/** A tree's top entries as [mode, name, sha]. */
+const topOf = (dir, tree) =>
+  sh(dir, 'ls-tree', '-z', tree)
+    .split('\0')
+    .filter(Boolean)
+    .map((line) => {
+      const [meta, name] = line.split('\t');
+      const [mode, , sha] = meta.split(' ');
+      return [mode, name, sha];
+    });
+const listing = (dir) => fs.readdirSync(dir).sort();
+
+test('a file that becomes a folder, and a folder that becomes a link, are rewound both ways, onto the target\'s own tree', async () => {
+  const dir = folder('swap');
+  const project = await projectAt(dir);
+  const elsewhere = folder('elsewhere');
+  write(elsewhere, 'file.txt', 'outside\n');
+  write(dir, 'keep.txt', 'keep\n');
+  write(dir, 'results', 'a file\n');
+  write(dir, 'dir/file.txt', 'in a folder\n');
+  const asFiles = (await project.commit('session open')).hash;
+  fs.rmSync(path.join(dir, 'results'));
+  write(dir, 'results/a.csv', 'x,y\n');
+  fs.rmSync(path.join(dir, 'dir'), { recursive: true });
+  fs.symlinkSync(elsewhere, path.join(dir, 'dir'));
+  const asFolders = (await project.commit('timer')).hash;
+  // results is a folder now and a file in the target; dir a link now and a
+  // folder there: what this same set removes is no obstacle.
+  const preview = await history.compare(project, asFiles);
+  assert.deepEqual(preview.skipped, []);
+  assert.deepEqual(preview.write.map((entry) => entry.path).sort(), ['dir/file.txt', 'results']);
+  assert.deepEqual([...preview.remove].sort(), ['dir', 'results/a.csv']);
+  const back = await history.rewind(project, { sha: asFiles, tip: asFolders });
+  assert.equal(back.ok, true, JSON.stringify(back));
+  assert.deepEqual(back.skipped, []);
+  assert.equal(read(dir, 'results'), 'a file\n');
+  assert.ok(fs.lstatSync(path.join(dir, 'dir')).isDirectory(), 'the link went, and a folder came back');
+  assert.equal(read(dir, 'dir/file.txt'), 'in a folder\n');
+  assert.deepEqual(listing(elsewhere), ['file.txt']);
+  assert.equal(read(elsewhere, 'file.txt'), 'outside\n', 'nothing was written through the link');
+  assert.equal(treeName(dir, back.to), treeName(dir, asFiles), '"rewind to" holds the target\'s tree');
+  // The other way: the folder and the link come back.
+  const forth = await history.rewind(project, { sha: asFolders, tip: back.to });
+  assert.equal(forth.ok, true, JSON.stringify(forth));
+  assert.deepEqual(forth.skipped, []);
+  assert.equal(read(dir, 'results/a.csv'), 'x,y\n');
+  assert.ok(fs.lstatSync(path.join(dir, 'dir')).isSymbolicLink());
+  assert.equal(fs.readlinkSync(path.join(dir, 'dir')), elsewhere);
+  assert.equal(read(elsewhere, 'file.txt'), 'outside\n');
+  assert.equal(treeName(dir, forth.to), treeName(dir, asFolders), '"rewind to" holds the target\'s tree');
+});
+
+test('a folder that still holds a file the record does not keep is left, and the file of that name is not written over it', async () => {
+  const dir = folder('swap-kept');
+  const project = await projectAt(dir);
+  write(dir, '.gitignore', '*.log\n');
+  write(dir, 'results', 'a file\n');
+  const asFile = (await project.commit('session open')).hash;
+  fs.rmSync(path.join(dir, 'results'));
+  write(dir, 'results/a.csv', 'x,y\n');
+  write(dir, 'results/cache.log', 'ignored\n');
+  const asFolder = (await project.commit('timer')).hash;
+  const result = await history.rewind(project, { sha: asFile, tip: asFolder });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(result.removed, ['results/a.csv']);
+  assert.deepEqual(result.written, []);
+  assert.deepEqual(result.skipped.map((entry) => entry.path), ['results']);
+  assert.match(result.skipped[0].why, /a folder is there/);
+  assert.equal(read(dir, 'results/cache.log'), 'ignored\n');
+});
+
+test('a failure in the write step after .gitignore is written never lets untracked/ into the record', async () => {
+  const dir = folder('step-two');
+  const project = await projectAt(dir);
+  write(dir, '.gitignore', 'build/\n');
+  write(dir, 'a.txt', 'a\n');
+  write(dir, 'locked/b.txt', 'b\n');
+  sh(dir, 'add', '.gitignore', 'a.txt', 'locked/b.txt');
+  at(dir, now() - 100, 'commit', '-q', '-m', 'Before the record');
+  const old = sh(dir, 'rev-parse', 'HEAD');
+  write(dir, 'a.txt', 'a, later\n');
+  write(dir, 'locked/b.txt', 'b, later\n');
+  write(dir, 'untracked/huge.bin', 'huge\n');
+  const tip = (await project.commit('session open')).hash;
+  assert.match(read(dir, '.gitignore'), /^\/untracked\/$/m);
+  // checkout-index writes .gitignore (the target's, without the line), then
+  // cannot replace a file in a folder it may not write.
+  fs.chmodSync(path.join(dir, 'locked'), 0o555);
+  try {
+    const result = await history.rewind(project, { sha: old, tip });
+    assert.equal(result.refused, 'failed', JSON.stringify(result));
+    assert.match(result.detail, /^write: /);
+    assert.match(read(dir, '.gitignore'), /^build\/\n/, "the target's .gitignore was written");
+    assert.match(read(dir, '.gitignore'), /^\/untracked\/$/m, 'and the record put its line back at once');
+    const next = await project.commit('timer');
+    assert.equal(next.committed, true, JSON.stringify(next));
+    const kept = sh(dir, 'ls-tree', '-r', '--name-only', next.hash).split('\n');
+    assert.ok(!kept.some((file) => file.startsWith('untracked/')), 'untracked/ stayed out of the record');
+    assert.ok(kept.includes(MANIFEST), 'and its manifest pins it');
+  } finally {
+    fs.chmodSync(path.join(dir, 'locked'), 0o755);
+  }
+});
+
+test('a .gitignore that is a symbolic link in the target is left alone, so untracked/ keeps its line', async () => {
+  const dir = folder('linked-ignore');
+  const project = await projectAt(dir);
+  write(dir, 'a.txt', 'a\n');
+  write(dir, 'untracked/data.csv', 'x,y\n');
+  const tip = (await project.commit('session open')).hash;
+  const gitignore = read(dir, '.gitignore');
+  // A commit elsewhere whose .gitignore is a link (to a file outside, say).
+  const tree = treeNamed(dir, [...topOf(dir, treeName(dir, tip)).filter(([, name]) => name !== '.gitignore'), ['120000', '.gitignore', blobNamed(dir, '/etc/hosts')]]);
+  const side = at(dir, now(), 'commit-tree', tree, '-m', 'Elsewhere');
+  write(dir, 'a.txt', 'a, later\n');
+  const result = await history.rewind(project, { sha: side, tip: (await project.commit('timer')).hash });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(result.skipped.map((entry) => entry.path), ['.gitignore']);
+  assert.equal(read(dir, '.gitignore'), gitignore);
+  assert.ok(!fs.lstatSync(path.join(dir, '.gitignore')).isSymbolicLink());
+  assert.ok(!sh(dir, 'ls-tree', '-r', '--name-only', result.to).split('\n').some((file) => file.startsWith('untracked/')));
+});
+
+test('a crafted commit is refused whole, before anything is recorded or removed', async () => {
+  const outside = folder('outside');
+  write(outside, 'victim.txt', 'victim\n');
+  const crafted = [
+    ['a .. folder', (dir, evil) => [['40000', '..', treeNamed(dir, [['100644', 'victim.txt', evil]])]], '../victim.txt'],
+    ['a name with slashes', (dir, evil) => [['100644', 'x/../../evil.txt', evil]], 'x/../../evil.txt'],
+    ['.git/hooks', (dir, evil) => [['40000', '.git', treeNamed(dir, [['40000', 'hooks', treeNamed(dir, [['100755', 'post-commit', evil]])]])]], '.git/hooks/post-commit'],
+    ['.GIT', (dir, evil) => [['100644', '.GIT', evil]], '.GIT'],
+    ['an HFS+ spelling of .git', (dir, evil) => [['40000', '.g\u200cit', treeNamed(dir, [['100644', 'config', evil]])]], '.g\u200cit/config'],
+    ['a path under a link of the same commit', (dir, evil) => [['120000', 'lnk', blobNamed(dir, outside)], ['40000', 'lnk', treeNamed(dir, [['100644', 'victim.txt', evil]])]], 'lnk/victim.txt'],
+    ['a .gitmodules link, which git itself refuses', (dir) => [['120000', '.gitmodules', blobNamed(dir, outside)]], null],
+  ];
+  for (const [what, extra, bad] of crafted) {
+    const { dir, project, second } = await recorded(`crafted-${counter}`);
+    const hooks = listing(path.join(dir, '.git', 'hooks'));
+    const evil = blobNamed(dir, 'evil\n');
+    const tree = treeNamed(dir, [...topOf(dir, treeName(dir, second)), ...extra(dir, evil)]);
+    // Someone moved the record onto it, and the record went on from there.
+    const commit = sh(dir, 'commit-tree', tree, '-p', second, '-m', 'fixture: timer');
+    sh(dir, 'update-ref', BRANCH, commit);
+    write(dir, 'later.txt', 'later\n');
+    const tip = (await project.commit('timer')).hash;
+    assert.ok(tip, what);
+    const gitignore = read(dir, '.gitignore');
+    const before = subjects(dir).length;
+    if (bad) {
+      const preview = await history.compare(project, commit);
+      assert.deepEqual([preview.invalid?.path, preview.write, preview.remove], [bad, [], []], `${what}: the card says so`);
+    }
+    let saved = false;
+    const result = await history.rewind(project, { sha: commit, tip }, { save: async () => ((saved = true), null) });
+    assert.equal(result.refused, 'invalid', `${what}: ${JSON.stringify(result)}`);
+    if (bad) assert.equal(result.path, bad, what);
+    assert.equal(saved, false, `${what}: refused before the save step`);
+    assert.equal(subjects(dir).length, before, `${what}: nothing recorded`);
+    assert.equal(read(dir, 'later.txt'), 'later\n', `${what}: nothing removed`);
+    assert.equal(read(dir, 'c.txt'), 'c\n', `${what}: nothing removed`);
+    assert.equal(read(dir, '.gitignore'), gitignore, `${what}: nothing written`);
+    assert.deepEqual(listing(path.join(dir, '.git', 'hooks')), hooks, `${what}: .git/hooks untouched`);
+    assert.deepEqual(listing(outside), ['victim.txt'], `${what}: nothing outside`);
+    assert.ok(!fs.readdirSync(project.stateDir).some((name) => name.startsWith('rewind-')), `${what}: no throwaway index left`);
+  }
+  assert.equal(read(outside, 'victim.txt'), 'victim\n');
+});
+
+test('on a volume that ignores case, Untracked/ is untracked/ and the manifest in any case is the manifest', async (t) => {
+  const dir = folder('caseless');
+  const project = await projectAt(dir);
+  if (!fs.existsSync(path.join(dir, '.GIT'))) {
+    t.skip('this volume keeps case apart');
+    return;
+  }
+  write(dir, 'a.txt', 'a\n');
+  sh(dir, 'add', 'a.txt');
+  at(dir, now() - 100, 'commit', '-q', '-m', 'start');
+  write(dir, 'untracked/data.csv', 'x,y\n');
+  write(dir, 'a.txt', 'a, later\n');
+  const tip = (await project.commit('session open')).hash;
+  // A commit on a user branch (made elsewhere, say) that names untracked/
+  // and the manifest in other cases.
+  const index = path.join(work, `case-index-${counter++}`);
+  const env = { ...process.env, GIT_INDEX_FILE: index };
+  execFileSync(binary, ['read-tree', 'HEAD'], { cwd: dir, env });
+  for (const [name, text] of [['Untracked/new.csv', 'new\n'], ['.Claerbout/Untracked.json', '{}\n']]) {
+    execFileSync(binary, ['update-index', '--add', '--cacheinfo', `100644,${blobNamed(dir, text)},${name}`], { cwd: dir, env });
+  }
+  const tree = execFileSync(binary, ['write-tree'], { cwd: dir, env, encoding: 'utf8' }).trim();
+  const side = at(dir, now(), 'commit-tree', tree, '-p', 'HEAD', '-m', 'Elsewhere');
+  const manifest = read(dir, MANIFEST);
+  const preview = await history.compare(project, side);
+  assert.deepEqual(preview.write.map((entry) => entry.path), ['a.txt']);
+  const result = await history.rewind(project, { sha: side, tip });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(result.written, ['a.txt']);
+  assert.deepEqual(listing(path.join(dir, 'untracked')), ['data.csv'], 'nothing was written into untracked/');
+  assert.equal(read(dir, MANIFEST), manifest, 'the manifest was not written');
+});
+
+test('nothing is removed or written through a link that takes a folder\'s place during the rewind', async () => {
+  const dir = folder('links');
+  const project = await projectAt(dir);
+  const outside = folder('outside');
+  write(outside, 'y.txt', 'outside y\n');
+  write(dir, 'keep.txt', 'keep\n');
+  write(dir, 'notes/x.txt', 'x\n');
+  const first = (await project.commit('session open')).hash;
+  fs.rmSync(path.join(dir, 'notes'), { recursive: true });
+  write(dir, 'out/y.txt', 'y\n');
+  const second = (await project.commit('timer')).hash;
+  // Between the "rewind from" commit and the write, both folders become
+  // links to a folder outside the project.
+  const swap = (step, state) => {
+    if (step !== 'write' || state !== 'doing') return;
+    fs.rmSync(path.join(dir, 'out'), { recursive: true });
+    fs.symlinkSync(outside, path.join(dir, 'out'));
+    fs.symlinkSync(outside, path.join(dir, 'notes'));
+  };
+  const result = await history.rewind(project, { sha: first, tip: second }, { onStep: swap });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(result.removed, []);
+  assert.deepEqual(result.written, []);
+  assert.deepEqual(result.skipped.map((entry) => entry.path).sort(), ['notes/x.txt', 'out/y.txt']);
+  assert.ok(result.skipped.every((entry) => /symbolic link/.test(entry.why)));
+  assert.deepEqual(listing(outside), ['y.txt']);
+  assert.equal(read(outside, 'y.txt'), 'outside y\n');
+  // removePath on its own: a link along the way is never gone through, and
+  // folders left empty go, never past the root.
+  const root = folder('remove');
+  fs.symlinkSync(outside, path.join(root, 'a'));
+  assert.match(await history.removePath(root, 'a/y.txt'), /a is a symbolic link here/);
+  assert.equal(read(outside, 'y.txt'), 'outside y\n');
+  write(root, 'b/c/file.txt', 'f\n');
+  assert.equal(await history.removePath(root, 'b/c/file.txt'), true);
+  assert.deepEqual(listing(root), ['a']);
+  assert.equal(await history.removePath(root, 'gone.txt'), false);
+});
+
+test('a file past 1 MB is not read, and one huge file costs only itself its patch', async () => {
+  const dir = folder('large');
+  const project = await projectAt(dir);
+  write(dir, 'a.txt', 'one\n');
+  write(dir, 'big.txt', 'small at first\n');
+  await project.commit('session open');
+  write(dir, 'a.txt', 'two\n');
+  write(dir, 'big.txt', `${'x'.repeat(2 * 1024 * 1024)}\n`);
+  const run = (await project.commit('cell run [1]')).hash;
+  assert.deepEqual(await history.blob(project, run, 'big.txt'), { large: true, size: 2 * 1024 * 1024 + 1 });
+  const detail = await history.commitDetail(project, run);
+  const files = new Map(detail.files.map((file) => [file.path, file]));
+  assert.match(files.get('a.txt').patch, /-one\n\+two$/);
+  assert.equal(files.get('big.txt').large, true);
+  assert.equal(files.get('big.txt').patch, undefined);
+});
+
+test('a window that does not answer save is named, and the rewind goes on and says which', async () => {
+  const { dir, project, first, second } = await recorded('silent');
+  const steps = [];
+  const silent = [path.join(dir, 'a.txt')];
+  const result = await history.rewind(project, { sha: first, tip: second }, { save: async () => ({ silent }), onStep: (step, state, detail) => steps.push([step, state, detail]) });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(result.silent, silent);
+  assert.deepEqual(steps[1], ['save', 'done', { silent }]);
+  const again = await history.rewind(project, { sha: result.from ?? second, tip: result.to });
+  assert.deepEqual(again.silent, [], 'every window answered');
 });
