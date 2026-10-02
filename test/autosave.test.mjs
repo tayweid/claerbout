@@ -1142,7 +1142,18 @@ test('a document path in its firmlink form (/System/Volumes/Data/…) is judged 
   assert.equal(notProjectFolder(path.join(long, 'Desktop'), { home }), 'the Desktop folder itself');
   assert.equal(secretPlace(path.join(long, '.config', 'gh'), home), 'a hidden folder of the home folder');
   assert.equal(notProjectFolder(path.join(long, 'Projects', 'plan'), { home }), null);
+  // The positive control: a project folder through the firmlink form is
+  // recorded as itself, on the main record branch, not as a linked
+  // worktree of its own repository.
+  const plan = path.join(home, 'Projects', 'plan');
+  await autosave.setDocument(window, path.join(long, 'Projects', 'plan', 'plan.typ'));
+  assert.ok(autosave.project(window), 'a project folder opened through the firmlink form is recorded');
+  const found = await repositoryOf(binary, path.join(long, 'Projects', 'plan'));
+  assert.equal(found.linked, false, 'not a linked worktree of itself');
+  assert.equal(branchFor(found), BRANCH_NAME);
   await autosave.quit();
+  assert.doesNotThrow(() => sh(plan, 'rev-parse', '--verify', '-q', BRANCH), 'the record is on the main record branch');
+  assert.throws(() => sh(plan, 'rev-parse', '--verify', '-q', `${BRANCH}-git`), 'and not on a worktree branch');
 });
 
 test('a repository whose root git reports in a hidden folder of the home folder is refused, whatever folder led to it', async () => {

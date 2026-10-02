@@ -349,7 +349,9 @@ async function repositoryOf(binary, dir) {
   const [insideGitDir, bare, root, gitDir, commonDir] = stdout.trim().split('\n');
   if (insideGitDir === 'true' || bare === 'true' || !root) return 'unusable';
   const common = commonDir ? realpath(path.resolve(dir, commonDir)) : realpath(gitDir);
-  const linked = common !== realpath(gitDir);
+  // Two spellings of one folder (the data volume's firmlink form, a case
+  // the file system ignores) are not a linked worktree.
+  const linked = common !== realpath(gitDir) && !sameFile(common, gitDir);
   return { root, gitDir, commonDir: common, linked };
 }
 
@@ -420,6 +422,15 @@ function sameFile(a, b) {
 /** A folder's forms: as given, as the disk keeps it (realpath: /tmp is
  *  /private/tmp on a Mac, ~/DESKTOP is ~/Desktop), and, for a path on the
  *  data volume's mount, the path it is firmlinked to. */
+/** The folder as the disk keeps it, with the data volume's firmlink prefix
+ *  dropped when it names the same folder: the one spelling every guard and
+ *  git see, so a repository is never taken for a linked worktree of itself. */
+function canonical(file) {
+  const real = realpath(file);
+  if (real.startsWith(`${DATA_VOLUME}/`) && sameFile(real, real.slice(DATA_VOLUME.length))) return real.slice(DATA_VOLUME.length);
+  return real;
+}
+
 function forms(file) {
   const found = new Set([path.resolve(file), realpath(file)]);
   for (const form of [...found]) {
@@ -1151,7 +1162,7 @@ class Autosave {
    *  opens; the log names it as given. */
   async rootFor(given) {
     if (this.roots.has(given)) return this.roots.get(given);
-    const dir = realpath(given);
+    const dir = canonical(given);
     let root = null;
     try {
       const secret = secretPlace(dir, this.places.home);
