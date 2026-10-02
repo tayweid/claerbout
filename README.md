@@ -172,7 +172,14 @@ Requests: `open` and `saveAs {name}` (the native panels; `{path}` or
 shaped like Knuth's engine's), `choose {python}` (the setup page's
 answer), `status {state}` and `error {message}` (logged), `ready` (the
 page is listening for a dropped document; see `openBy`), `update` and
-`update {action: 'install'}` (above).
+`update {action: 'install'}` (above), `focus` (the requesting window
+comes forward: shown, unminimized, focused, the app made active;
+answered `{focused: true}`. A page that keeps one window per file has the
+window holding a file ask this when a second launch of the file finds
+it, and the launch's window closes. Since 0.2.1; an older shell answers
+`null`, which is how a page tells).
+
+A request the shell does not know is logged and answered `null`.
 
 Events: `setup {kind: 'progress' | 'failed', text}` on the setup page;
 `update {state, …}` (above).

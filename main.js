@@ -859,6 +859,20 @@ async function answer(window, message) {
       // the app takes documents by drop.
       if (config.openBy === 'drop' && start) void dropDocument(window, start);
       return null;
+    case 'focus':
+      // The page asks for its own window to come forward: shown,
+      // unminimized, focused, the app made active. A page that keeps one
+      // window per file (Plass) has the window holding a file front
+      // itself when a second launch of that file finds it, and the
+      // launch's window closes. The shell knows windows and the pages
+      // know handles, so the holder asks for itself and no window id
+      // crosses the protocol. An older shell answers null here, which is
+      // how a page tells it cannot ask.
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+      if (isMac) app.focus({ steal: true });
+      return { focused: true };
     case 'status':
       log(`page: Python is ${message.state ?? '?'} (${window.getTitle()})`);
       return null;

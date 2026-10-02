@@ -179,6 +179,32 @@ const title = await page.title();
 // titles its window its own way (Plass) is not held to the file's name.
 if (!updating && title !== path.basename(doc)) await fail(`the document did not open (title: ${title})`);
 
+if (!updating) {
+  // The `focus` request: a second open of the document (an open-file
+  // event, as Finder sends one) puts a new window in front; the first
+  // page asks to come forward and is answered {focused: true}, and its
+  // window is the focused one again. A runner whose app is not the
+  // active one has no focused window at all; that is said, not failed.
+  const first = await (await app.browserWindow(page)).evaluate((window) => window.id);
+  const opened = app.waitForEvent('window', { timeout: 30_000 });
+  await app.evaluate(({ app: electronApp }, file) => electronApp.emit('open-file', { preventDefault() {} }, file), doc);
+  const second = await opened;
+  const secondWindow = await app.browserWindow(second);
+  const secondId = await secondWindow.evaluate((window) => window.id);
+  // The new window is shown, and takes the front, once its page has
+  // painted: ask only after that, or its show() would undo the answer.
+  const focused = () => app.evaluate(({ BrowserWindow }) => BrowserWindow.getFocusedWindow()?.id ?? null);
+  for (let i = 0; i < 40 && (await focused()) !== secondId; i++) await page.waitForTimeout(250);
+  const answered = await page.evaluate(() => window.claerbout.request({ type: 'focus' }));
+  if (answered?.focused !== true) await fail(`the focus request was answered ${JSON.stringify(answered)}`);
+  const front = await focused();
+  if (front === null) console.log(`smoke (${NAME}, ${mode}): no window is focused here (the app is not active); the fronting is not checked`);
+  else if (front !== first) await fail(`after the focus request the focused window is ${front}, not the first (${first})`);
+  await secondWindow.evaluate((window) => window.close());
+  for (let i = 0; i < 40 && !second.isClosed(); i++) await page.waitForTimeout(250);
+  if (!second.isClosed()) await fail('the second window did not close');
+}
+
 if (updating) {
   // The page asks, as its update button would: the site's build is not
   // this one, the install runs (its steps arrive as events), the bundle
