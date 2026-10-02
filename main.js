@@ -142,6 +142,14 @@ const updater = require('./update.js')({ app, net, config, env, log });
  *  since, so a page can show its update button. */
 let latestKnown = null;
 
+// MARK: - The autosave record
+
+/** The git record of every project a window is on (autosave.js; Knuth's
+ *  docs/AUTOSAVE.md), when the config asks for it: the shell is the git
+ *  runner, since it knows each window's document; a page only says when
+ *  something happened. Off, this is an object that does nothing. */
+const autosave = require('./autosave.js').attach({ config, env, log, stateDir });
+
 function broadcast(name, detail) {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) window.webContents.send('claerbout:event', name, detail);
@@ -577,6 +585,39 @@ const FileOps = {
 
 /** window → the document it was opened with, for dialogs' start folder. */
 const documents = new Map();
+/** The files the pages' File System Access handles have lately touched:
+ *  path → when. Chromium asks the permission check handler
+ *  (grantPermissions) about every read and write of a handle, with the
+ *  file's path but no webContents, which is the one way a page that keeps
+ *  files by handle (Plass) can be followed by path: a File from a
+ *  handle's getFile() is blob-backed and has no path for the preload's
+ *  pathOf (both measured 2026-10-02; a dropped File has one). A page's
+ *  `document` request names its file, with the File's size and mtime,
+ *  and is matched here, newest first. */
+const touched = new Map();
+const TOUCHED_KEPT = 64;
+
+function touch(file) {
+  touched.delete(file);
+  touched.set(file, Date.now());
+  if (touched.size > TOUCHED_KEPT) touched.delete(touched.keys().next().value);
+}
+
+/** The touched file a page's report names: the newest whose name, size
+ *  and mtime agree, else the newest of that name, else null. */
+function touchedFile({ name, size, modified }) {
+  const named = [...touched.keys()].reverse().filter((file) => path.basename(file) === name);
+  const stamped = typeof size === 'number' && typeof modified === 'number';
+  for (const file of named) {
+    try {
+      const info = fs.statSync(file);
+      if (!stamped || (info.size === size && Math.abs(info.mtimeMs - modified) < 1)) return file;
+    } catch {
+      // Gone since: not this one.
+    }
+  }
+  return named[0] ?? null;
+}
 /** nil until a Python is chosen and ready: documents wait in `pending`. */
 let mode = null;
 let pending = [];
@@ -624,6 +665,7 @@ function isOwnURL(url) {
 function setDocument(window, file) {
   documents.set(window, file);
   if (isMac) window.setRepresentedFilename(file ?? '');
+  void autosave.setDocument(window, file);
 }
 
 /** The window's title bar, from the config: the native one (`default`),
@@ -700,6 +742,7 @@ function openWindow(url, document = null) {
   window.on('closed', () => {
     documents.delete(window);
     origins.delete(window);
+    void autosave.closed(window);
   });
   load(window, url);
   return window;
@@ -901,6 +944,26 @@ async function answer(window, message) {
       return { focused: true };
     case 'status':
       log(`page: Python is ${message.state ?? '?'} (${window.getTitle()})`);
+      return null;
+    case 'document': {
+      // A page that keeps its documents by handle (Plass) tells the shell
+      // which file its window holds: {path} when the preload's pathOf
+      // knew it (a path-backed File), else {name, size, modified},
+      // matched against the files handles have lately touched
+      // (`touched`); {path: null} for none. The window's represented
+      // file, and the project the autosave record follows for it. A
+      // report that matches nothing is none, never a stale path. Knuth
+      // opens by path and never needs to.
+      let file = typeof message.path === 'string' && path.isAbsolute(message.path) ? message.path : null;
+      if (!file && typeof message.name === 'string' && message.name) file = touchedFile(message);
+      setDocument(window, file);
+      return { path: file };
+    }
+    case 'autosave':
+      // Something happened in the page worth a commit on the project's
+      // record (a cell ran): {trigger: 'cell run [4]'}. Only if anything
+      // changed, and only when the window is on a project.
+      void autosave.notice(window, message.trigger);
       return null;
     case 'update': {
       // {action: 'install'} starts the install (the page follows it by
@@ -1166,10 +1229,19 @@ function grantPermissions() {
     }
     return granted;
   };
-  session.defaultSession.setPermissionCheckHandler((_contents, permission, origin) => decide(origin, permission));
-  session.defaultSession.setPermissionRequestHandler((contents, permission, callback) =>
-    callback(decide(contents.getURL(), permission)),
-  );
+  // A fileSystem question names the file (and no window): remembered, so
+  // a page's `document` request can be matched to a path (`touched`).
+  const noticed = (permission, details) => {
+    if (permission === 'fileSystem' && typeof details?.filePath === 'string' && !details.isDirectory) touch(details.filePath);
+  };
+  session.defaultSession.setPermissionCheckHandler((_contents, permission, origin, details) => {
+    noticed(permission, details);
+    return decide(origin, permission);
+  });
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+    noticed(permission, details);
+    callback(decide(contents.getURL(), permission));
+  });
 }
 
 // MARK: - The application
@@ -1214,14 +1286,15 @@ if (!app.requestSingleInstanceLock()) {
     if (!isMac) app.quit();
   });
 
+  // Quitting flushes the autosave record (every open session closes) and
+  // stops the engine, then quits for real. A second quit while that is
+  // under way goes through at once.
   let stopped = false;
   app.on('before-quit', (event) => {
-    if (stopped || !engine.isRunning) return;
+    if (stopped || (!engine.isRunning && !autosave.enabled)) return;
     event.preventDefault();
-    void engine.stop().finally(() => {
-      stopped = true;
-      app.quit();
-    });
+    stopped = true;
+    void Promise.allSettled([autosave.quit(), engine.stop()]).finally(() => app.quit());
   });
 
   app.whenReady().then(() => {

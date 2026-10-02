@@ -152,7 +152,7 @@ rmSync(stage, { recursive: true, force: true });
 // The shell, with the app's config beside it as app.json.
 const appDir = path.join(stage, 'app');
 mkdirSync(appDir, { recursive: true });
-for (const file of ['main.js', 'preload.js', 'update.js']) cpSync(path.join(here, file), path.join(appDir, file));
+for (const file of ['main.js', 'preload.js', 'update.js', 'autosave.js']) cpSync(path.join(here, file), path.join(appDir, file));
 cpSync(configPath, path.join(appDir, 'app.json'));
 // The engine's requirements file (an exact export of the app's lockfile,
 // say) rides beside the config; main.js reads it there when packaged.

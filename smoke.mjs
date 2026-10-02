@@ -300,6 +300,39 @@ if (smoke.run) {
   }
 }
 
+// The autosave record (autosave.js), when the config keeps one: the
+// document's folder, in none of anyone's repositories, got one of its own,
+// and its claerbout-autosave branch has the commits the config's
+// `smoke.autosave` names ("<app>: session open", and for an app whose run
+// commits, "<app>: cell run [1]"). The user's side of that repository is
+// untouched: HEAD is still unborn.
+if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.length > 0) {
+  const folder = path.dirname(doc);
+  const recorded = () => {
+    try {
+      return execFileSync('git', ['-C', folder, 'log', '--format=%s', 'claerbout-autosave'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+        .split('\n')
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+  let subjects = [];
+  for (let i = 0; i < 120; i++) {
+    subjects = recorded();
+    if (smoke.autosave.every((wanted) => subjects.some((subject) => subject.includes(wanted)))) break;
+    await page.waitForTimeout(500);
+  }
+  for (const wanted of smoke.autosave) {
+    if (!subjects.some((subject) => subject.includes(wanted))) {
+      await fail(`the autosave record has no "${wanted}" commit (it has: ${subjects.join(' | ') || 'no branch'})`);
+    }
+  }
+  const head = spawnSync('git', ['-C', folder, 'rev-parse', '--verify', '-q', 'HEAD'], { encoding: 'utf8' });
+  if (head.status === 0) await fail(`the autosave record touched the user's HEAD (${head.stdout.trim()})`);
+  console.log(`smoke (${NAME}, ${mode}): autosave record: ${subjects.join(' | ')}`);
+}
+
 await app.close();
 if (mode === 'uv') {
   await new Promise((resolve) => setTimeout(resolve, 1000));

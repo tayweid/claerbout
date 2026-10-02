@@ -90,7 +90,8 @@ copies it into the bundle as `app.json`.
 | `documentTypes` | Finder's Open With: `name`, `role`, `rank` (`Alternate` unless you mean to take the type), and `contentTypes` (UTIs) or `extensions`. |
 | `site` | The URL the install line downloads from (`https://knuth.tayweid.io`); the zips and `latest.json` live at `<site>/app/`, and the app checks there for updates. |
 | `elsewhere` | A sentence the install line adds when run off macOS. |
-| `smoke` | What `smoke.mjs` checks: `document` (name), `text` (contents), `ready` (a selector) and `readyText` (its text, or per mode `{uv, browser}`), `run` (a selector to click), `written` (a file expected beside the document), and `json` (keys it must hold) or `contains` (text it must hold). |
+| `autosave` | `true` keeps the autosave record of every project a window is on (below). Knuth and Plass set it; ManimLive does not. |
+| `smoke` | What `smoke.mjs` checks: `document` (name), `text` (contents), `ready` (a selector) and `readyText` (its text, or per mode `{uv, browser}`), `run` (a selector to click), `written` (a file expected beside the document), `json` (keys it must hold) or `contains` (text it must hold), and `autosave` (subjects the document folder's `claerbout-autosave` branch must show by the end, `["knuth: session open", "knuth: cell run [1]"]`). |
 
 ## What the shell expects of an engine
 
@@ -160,11 +161,63 @@ page request the install and checks that the bundle on disk becomes the
 site's build, that the app relaunches into it, and that the old bundle is
 cleaned up.
 
+## The autosave record
+
+With `"autosave": true` in the config, the shell keeps a full, unpruned
+git record of every project a window is on (`autosave.js`; the spec is
+Knuth's `docs/AUTOSAVE.md`): a GPX track for research. The shell is the
+git runner for every app, since it has the filesystem and knows which
+document each window holds; a page only says when something happened.
+
+- A document's project is the git repository its folder is in (`git
+  rev-parse --show-toplevel`). A folder in none gets one, quietly, once
+  (`git init`, with `untracked/` in its `.gitignore`).
+- The record is one branch per repository, `refs/heads/claerbout-autosave`,
+  shared by every app on it, written with plumbing only: a temporary
+  index (`GIT_INDEX_FILE`) filled by `git add -A` over the working tree,
+  so `.gitignore` applies, then `write-tree`, `commit-tree` with the
+  branch's tip as parent, and `update-ref`. The user's HEAD, branch,
+  index and working tree are never touched. Nothing is committed while
+  `.git/index.lock` exists or a merge, rebase, cherry-pick or revert is
+  in progress, and nothing when the tree equals the tip's.
+- Commits are `<app>: <trigger>`: `knuth: cell run [4]`, `plass: timer`,
+  `knuth: session open`, `plass: session close`. The author is the
+  repository's git identity when it has one, else `Claerbout Autosave
+  <autosave@claerbout.local>`; commits are not signed.
+- Triggers: a page's `autosave {trigger}` request (Knuth sends `cell run
+  [n]` once a run's writes have landed); a one-minute timer per open
+  project; `session open` when the first window on a project opens and
+  `session close` when the last closes; quitting flushes.
+- `untracked/` in the project, for large data, caches and scratch, is
+  ignored but pinned: `.claerbout/untracked.json` lists every file in it
+  with its path, size, mtime and SHA-256, rewritten before every commit
+  so the manifest is inside the track. A file is hashed again only when
+  its size or mtime changed; the hashes are cached under the app's state
+  folder (`autosave/<project>/hashes.json`).
+- Common secret files are kept out of the temporary index by pathspec,
+  in every folder: `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `*.p12`,
+  `credentials.json`, `.npmrc`, `.netrc`. Nothing scans file contents.
+- The log gets one line per commit (`autosave: knuth: cell run [4] →
+  <hash> (<project>)`), and one when a repository is initialised or
+  `.gitignore` gains `untracked/`.
+- Nothing is pushed. The spec's outside witness (the branch pushed to a
+  remote on a schedule) is not built; see "Built" in Knuth's
+  `docs/AUTOSAVE.md`.
+
+`<PREFIX>_AUTOSAVE=0` turns the record off for a test;
+`<PREFIX>_AUTOSAVE_INTERVAL` (seconds) sets the timer. Without git on the
+machine (on a Mac, without the developer tools) the record is off and the
+log says so. The tests (`npm run test:autosave`) run real git in
+temporary repositories.
+
 ## The protocol
 
-The preload exposes `window.claerbout.request(message) → Promise` and
-`window.claerbout.on(event, listener) → unsubscribe`. Requests are answered
-only from the origin the shell loaded into that window.
+The preload exposes `window.claerbout.request(message) → Promise`,
+`window.claerbout.on(event, listener) → unsubscribe` and
+`window.claerbout.pathOf(file) → string` (the path of a File the page
+holds, from a handle's `getFile()`, a picker or a drop: Electron's
+`webUtils.getPathForFile`; `''` when Chromium has none). Requests are
+answered only from the origin the shell loaded into that window.
 
 Requests: `open` and `saveAs {name}` (the native panels; `{path}` or
 `{path: null}`), `read {path}`, `write {path, text}`, `stat {path}`,
@@ -177,7 +230,21 @@ comes forward: shown, unminimized, focused, the app made active;
 answered `{focused: true}`. A page that keeps one window per file has the
 window holding a file ask this when a second launch of the file finds
 it, and the launch's window closes. Since 0.2.1; an older shell answers
-`null`, which is how a page tells).
+`null`, which is how a page tells), `document {path?, name?, size?,
+modified?}` (which file this window holds now, or `path: null` for none:
+the window's represented file, and the project the autosave record
+follows. For a page that keeps files by handle (Plass), which sends it
+whenever its open file changes: `path` from `pathOf` when the File has
+one, else the handle's `name` and the File's `size` and `lastModified`,
+which the shell matches against the files handles have lately touched —
+Chromium asks the shell's permission handler about every read and write
+of a handle, with the path but no window, and a File from a handle's
+`getFile()` is blob-backed, so `pathOf` has nothing for it (both measured
+2026-10-02; a dropped File has a path). Newest first, by name and the
+file's size and mtime; nothing matching is none. A page opened by path
+never needs to. Answered `{path}`), `autosave {trigger}` (something
+happened in the page worth a commit on the record, `cell run [4]`; a
+notice).
 
 A request the shell does not know is logged and answered `null`.
 
@@ -186,9 +253,11 @@ Events: `setup {kind: 'progress' | 'failed', text}` on the setup page;
 
 ## Testing here
 
-`npm test` runs the smoke test on `test/fixture`, a page with no Python
-that reads its document through the shell and writes a copy beside it,
-and then the update test: the fixture built twice under two build ids
-(`CLAERBOUT_BUILD`), the first installed and updating itself to the
-second from a site folder. `npm run fixture:build` packages it. All need
-macOS.
+`npm test` runs the autosave tests (`test/autosave.test.mjs`, real git in
+temporary repositories), the smoke test on `test/fixture`, a page with no
+Python that reads its document through the shell and writes a copy beside
+it (and, the fixture keeping the record, checks its `session open`
+commit), and then the update test: the fixture built twice under two
+build ids (`CLAERBOUT_BUILD`), the first installed and updating itself to
+the second from a site folder. `npm run fixture:build` packages it. All
+need macOS.
