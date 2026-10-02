@@ -711,7 +711,9 @@ function setDocument(window, file) {
  *  which is published only when the title bar is not native, so a page
  *  that pads its bar by `env(titlebar-area-x, 0px)` is right under either
  *  bar and asks the shell nothing. `trafficLightPosition` ({x, y}, macOS)
- *  moves the lights; the overlay's height follows (2·y + 14 px). The
+ *  moves the lights; the overlay's height follows (2·y plus the lights,
+ *  14 px on macOS 26 and 16 on macOS 15, so a page sets its bar from
+ *  env(titlebar-area-height), never from the number). The
  *  setup page gets the same bar. */
 /** macOS's rubber band at the end of a scroll, which Electron turns off
  *  unless asked (`webPreferences.scrollBounce`). On by default here: a

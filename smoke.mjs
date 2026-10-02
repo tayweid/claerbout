@@ -192,8 +192,14 @@ if (process.platform === 'darwin') {
     return { visible: overlay?.visible === true, x: rect?.x ?? 0, height: rect?.height ?? 0 };
   });
   if (overlay.visible !== hidden) await fail(`the title bar is ${hidden ? 'hidden' : 'native'} but the overlay is ${overlay.visible ? '' : 'not '}visible`);
+  // The overlay is as tall as the lights' band, 2·y plus the lights
+  // themselves, and the lights' size is the OS's: 14 px on macOS 26, 16
+  // on a macOS 15 runner (an overlay of 46 at y 15, seen in Knuth's
+  // deploy). A page that sets its bar from env(titlebar-area-height) is
+  // right under either, so the check allows the OS its lights.
   const lights = config.window?.trafficLightPosition;
-  if (hidden && lights && (overlay.x <= lights.x || overlay.height !== 2 * lights.y + 14)) {
+  const band = overlay.height - 2 * (lights?.y ?? 0);
+  if (hidden && lights && (overlay.x <= lights.x || band < 12 || band > 18)) {
     await fail(`the lights at ${JSON.stringify(lights)} give an overlay of x ${overlay.x}, height ${overlay.height}`);
   }
 }
