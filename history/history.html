@@ -86,13 +86,16 @@
       #title .ico { color: var(--frame-ink-soft); display: inline-flex; }
       #title .name { font: 15px/1 var(--serif); letter-spacing: 0.06em; color: var(--frame-ink); white-space: nowrap; }
       /* the project's name whole, its parent folder dimmed and cut from its start, and the meta
-         giving way before either (fitPath, which also keeps the bar wide enough for the name) */
+         giving way before either (fitPath, which also keeps the bar wide enough for the name, but
+         never so wide that the zoom beside it leaves the window: past that, `long`, the name
+         itself ends in an ellipsis) */
       #title .path { display: flex; min-width: 0; color: var(--frame-ink-soft); font: 12px var(--sans); white-space: nowrap; overflow: hidden; }
       #title .path .par { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
       #title .path .nm { flex: none; color: var(--frame-ink); }
+      #title.long .nm { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
       #title .meta { margin-left: auto; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--frame-ink-soft); font: 11.5px var(--mono); white-space: nowrap; padding-left: 10px; }
       /* while fitPath measures, nothing shrinks: what does not fit runs past the bar's end */
-      #title.fitting .path, #title.fitting .par, #title.fitting .meta { flex: none; min-width: auto; }
+      #title.fitting .path, #title.fitting .par, #title.fitting .nm, #title.fitting .meta { flex: none; min-width: auto; }
       #zoom { display: flex; height: 30px; padding: 3px; gap: 2px; border-radius: 8px; background: var(--pill); flex: 0 0 auto; }
       #zoom button { border: 0; border-radius: 6px; background: transparent; color: var(--frame-ink-soft); font: 12px var(--sans); padding: 0 10px; cursor: pointer; }
       #zoom button:hover { color: var(--frame-ink); }
@@ -108,6 +111,12 @@
       #here .app.elsewhere { background: rgba(201, 138, 29, 0.35); }
       #here .doc { color: var(--frame-ink); font: 11.5px var(--mono); margin-right: 4px; }
       #here:empty { display: none; }
+      /* where the bar keeps too little room for the documents' names, the apps' squares alone
+         (each one's title names its document), never a name cut short */
+      #here.tight .doc { display: none; }
+      /* and where even their padding would cut the project's name, the pills beside give way
+         altogether (the river's "now" and the card still say the record is paused) */
+      #topbar.crowded #here, #topbar.crowded #rec { display: none; }
       /* the record's state, only when it is not simply recording */
       #rec { height: 30px; border-radius: 8px; background: var(--pill); flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 0 11px; font: 12px var(--sans); color: var(--frame-ink-soft); white-space: nowrap; overflow: hidden; }
       #rec[hidden] { display: none; }
@@ -889,9 +898,10 @@
         // Where the bar is short, things give way in turn so the project's name is the last thing
         // lost: the record's branch; then the folder the project is in, cut from its start; then
         // the counts; then the folder altogether. The bar itself keeps room for the icon, "History"
-        // and the name, so the pills beside it give way first. Measured with nothing shrinking, in
-        // fractions of a pixel: text that overflows its box by less than one still ends in an
-        // ellipsis, and cuts the name.
+        // and the name, so the pills beside it give way first (the documents' names before their
+        // apps' squares, and then the pills altogether), but never more room than the zoom leaves
+        // it: a name longer than that ends in an ellipsis. Measured with nothing shrinking, in fractions of a pixel: text that
+        // overflows its box by less than one still ends in an ellipsis, and cuts the name.
         function fitPath() {
           const title = $('#title'), el = $('#t-path'), par = el.querySelector('.par'), meta = $('#t-meta');
           const full = par ? par.dataset.full : '';
@@ -904,7 +914,32 @@
           if (par) par.hidden = true;
           meta.hidden = true;
           title.style.minWidth = '';
-          title.style.minWidth = Math.ceil(el.getBoundingClientRect().right - title.getBoundingClientRect().left + parseFloat(getComputedStyle(title).paddingRight)) + 'px';
+          const need = Math.ceil(el.getBoundingClientRect().right - title.getBoundingClientRect().left + parseFloat(getComputedStyle(title).paddingRight));
+          // The room the bar can have: all of it but the zoom, whole, and each pill beside it at
+          // its narrowest (its padding), so nothing leaves the window; and where that is too
+          // little for the name, the pills go, and it has all but the zoom.
+          const bar = title.parentElement, bs = getComputedStyle(bar), gap = parseFloat(bs.columnGap) || 0;
+          const roomBeside = () => {
+            let left = bar.getBoundingClientRect().right - parseFloat(bs.paddingRight) - title.getBoundingClientRect().left;
+            for (const other of bar.children) {
+              const os = getComputedStyle(other);
+              if (other === title || os.display === 'none') continue;
+              left -= gap + (other.id === 'zoom' ? other.getBoundingClientRect().width : parseFloat(os.paddingLeft) + parseFloat(os.paddingRight) + parseFloat(os.borderLeftWidth) + parseFloat(os.borderRightWidth));
+            }
+            return Math.max(0, Math.floor(left));
+          };
+          bar.classList.remove('crowded');
+          let room = roomBeside();
+          if (need > room) {
+            bar.classList.add('crowded');
+            room = roomBeside();
+          }
+          title.style.minWidth = Math.min(need, room) + 'px';
+          // The documents' names give way before the title is measured, since their width is its
+          // room: where they would be cut, only the apps' squares.
+          const here = $('#here');
+          here.classList.remove('tight');
+          if (here.scrollWidth > here.clientWidth + 0.5) here.classList.add('tight');
           // Each stage: the meta shown (null: none), and whether the folder may be cut.
           const metas = [...new Set([meta.dataset.full || '', meta.dataset.short || ''])].filter(Boolean);
           const stages = [...(metas.length > 1 ? [[metas[0], false]] : []), [metas.length ? metas[metas.length - 1] : null, true], ...(metas.length ? [[null, true]] : [])];
@@ -932,12 +967,13 @@
             break;
           }
           if (!fitted && par) par.hidden = true;
+          title.classList.toggle('long', need > room);
           title.classList.remove('fitting');
         }
         function paintHere() {
           const g = S.graph;
-          const own = (g.windows || []).map((file) => `<span class="app" title="${esc(capital(g.app))}">${esc((g.app || '?').charAt(0).toUpperCase())}</span><span class="doc">${esc(base(file))}</span>`);
-          const others = (g.others || []).flatMap((o) => o.documents.map((file) => `<span class="app elsewhere" title="${esc(capital(o.app))}">${esc(o.app.charAt(0).toUpperCase())}</span><span class="doc">${esc(base(file))}</span>`));
+          const own = (g.windows || []).map((file) => `<span class="app" title="${esc(capital(g.app))}: ${esc(base(file))}">${esc((g.app || '?').charAt(0).toUpperCase())}</span><span class="doc">${esc(base(file))}</span>`);
+          const others = (g.others || []).flatMap((o) => o.documents.map((file) => `<span class="app elsewhere" title="${esc(capital(o.app))}: ${esc(base(file))}">${esc(o.app.charAt(0).toUpperCase())}</span><span class="doc">${esc(base(file))}</span>`));
           $('#here').innerHTML = own.concat(others).join('');
           $('#here').title = 'Open on this project: a rewind asks this app’s windows to save first, and reloads the documents it rewinds';
         }
@@ -946,6 +982,8 @@
           const paused = S.graph && S.graph.state === 'paused';
           rec.hidden = !paused;
           if (paused) rec.querySelector('.why2').textContent = S.graph.reason || '';
+          // The reason whole, where the bar cuts it short.
+          rec.title = paused ? `The record is paused: ${S.graph.reason || ''}` : '';
         }
 
         /* ---------- the card ---------- */
@@ -956,7 +994,15 @@
           card.hidden = false;
           card.style.left = S.cardX + 'px';
           card.style.width = G.cardW + 'px';
-          if (!S.busy) card.innerHTML = cardHTML(c);
+          if (!S.busy) {
+            // A redraw (a resize, a commit arriving, a figure worked out) keeps the keyboard where
+            // it was: on the same box, or the same button.
+            const a = document.activeElement;
+            const keep = a && card.contains(a) ? (a.dataset.path != null ? `input[data-path="${CSS.escape(a.dataset.path)}"]` : a.dataset.act ? `[data-act="${CSS.escape(a.dataset.act)}"]` : null) : null;
+            card.innerHTML = cardHTML(c);
+            const again = keep && card.querySelector(keep);
+            if (again) again.focus({ preventScroll: true });
+          }
           const need = r.cy + card.offsetHeight + 60;
           if (need > river.offsetHeight) river.style.height = need + 'px';
           fitCard();
@@ -1336,7 +1382,7 @@
                <p class="fine rwfine">${say.fine}</p>`;
           const action = paused
             ? `<div class="act foot"><button class="rw" type="button" disabled>${BACK}<span class="rwl">Rewind waits</span></button></div>
-               <p class="why"><b>The record is paused:</b> ${esc(paused)}, and git’s work comes first. Nothing is recorded or rewound until it ends.</p>`
+               <p class="why"><b>The record is paused:</b> ${esc(paused)}, and ${/ is rewinding this project$/.test(paused) ? 'that rewind' : 'git’s work'} comes first. Nothing is recorded or rewound until it ends.</p>`
             : refusal
               ? refusal.html + (refusal.replaces ? '' : button)
               : button;
@@ -1347,7 +1393,9 @@
         function invalidHTML(v) {
           const what = v.path ? `It holds <span class="eq">${esc(v.path)}</span>: ${esc(v.why || 'a path no rewind writes')}.` : `${esc(capital(v.why || 'it holds a path no rewind writes'))}.`;
           const how = v.absent
-            ? 'A partial clone fetches a file only when it is asked for, and the record never asks.'
+            ? v.partial
+              ? 'A partial clone fetches a file only when it is asked for, and the record never asks.'
+              : 'The repository has lost that file’s contents, or never had them; git fsck says more.'
             : 'The record never makes such a commit, so this one was made some other way.';
           return `<b>No rewind to this commit.</b> ${what} ${how}`;
         }
@@ -1524,6 +1572,9 @@
           // The refusal, and what can be done about it, in sight at the card's foot (again as each
           // figure above it finishes drawing: the card's load listener).
           card.scrollTop = card.scrollHeight;
+          // The button the keyboard was on is gone: the refusal's first choice takes its place.
+          const first = card.querySelector('.refuse button');
+          if (first && (!document.activeElement || document.activeElement === document.body)) first.focus({ preventScroll: true });
         }
         function refusalHTML(result, ctx) {
           const block = (text, buttons) => `<div class="refuse">${text}${buttons ? `<div class="act">${buttons}</div>` : ''}</div>`;

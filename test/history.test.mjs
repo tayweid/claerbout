@@ -14,13 +14,20 @@
 // refuses it; from the third pass: a commit whose file is a tree, or whose
 // contents the repository lacks (a crafted one, a partial clone's), or
 // whose tree git cannot list, is refused whole, and the working tree never
-// holds a .gitignore without /untracked/ while another app commits.
+// holds a .gitignore without /untracked/ while another app commits; and from
+// its review: the graph still draws such commits (a partial clone's among
+// them), git's refusal names a path with a quote or a newline whole, one
+// rewind at a time writes a working tree while every other shell's commits
+// wait, the new .gitignore is made in the state folder, and a file named
+// untracked, or a folder named .gitignore, in a commit is left alone and
+// named.
 // Everything lives under os.tmpdir(); the user's git configuration is kept
 // out (GIT_CONFIG_GLOBAL points at an empty file).
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
@@ -616,7 +623,7 @@ test('a .gitignore that is a symbolic link in the target is left alone, so untra
   assert.ok(!sh(dir, 'ls-tree', '-r', '--name-only', result.to).split('\n').some((file) => file.startsWith('untracked/')));
 });
 
-test('a crafted commit is refused whole, before anything is recorded or removed', async () => {
+test('a crafted commit is refused whole, before anything is recorded or removed, and the graph still draws it', async () => {
   const outside = folder('outside');
   write(outside, 'victim.txt', 'victim\n');
   const crafted = [
@@ -627,6 +634,9 @@ test('a crafted commit is refused whole, before anything is recorded or removed'
     ['an HFS+ spelling of .git', (dir, evil) => [['40000', '.g\u200cit', treeNamed(dir, [['100644', 'config', evil]])]], '.g\u200cit/config'],
     ['a path under a link of the same commit', (dir, evil) => [['120000', 'lnk', blobNamed(dir, outside)], ['40000', 'lnk', treeNamed(dir, [['100644', 'victim.txt', evil]])]], 'lnk/victim.txt'],
     ['a .gitmodules link, which git itself refuses', (dir) => [['120000', '.gitmodules', blobNamed(dir, outside)]], '.gitmodules'],
+    // git names these as they are, a quote or a newline included.
+    ["a .gitmodules link in a folder named it's", (dir) => [['40000', "it's", treeNamed(dir, [['120000', '.gitmodules', blobNamed(dir, outside)]])]], "it's/.gitmodules"],
+    ['a .gitmodules link in a folder whose name holds a newline', (dir) => [['40000', 'x\ny', treeNamed(dir, [['120000', '.gitmodules', blobNamed(dir, outside)]])]], 'x\ny/.gitmodules'],
     // checkout-index finds these out only as it writes, after it has
     // removed what it replaces: checked first, with git's own objects.
     ['a tree where the commit says a file', (dir, evil) => [['100644', 'notafile.txt', treeNamed(dir, [['100644', 'x.txt', evil]])]], 'notafile.txt'],
@@ -650,6 +660,10 @@ test('a crafted commit is refused whole, before anything is recorded or removed'
     const preview = await history.compare(project, commit);
     assert.ok(preview.invalid, `${what}: the card says so: ${JSON.stringify(preview)}`);
     assert.deepEqual([preview.invalid.path, preview.write, preview.remove], [bad, [], []], `${what}: the card says so`);
+    assert.equal(preview.invalid.partial, undefined, `${what}: no partial clone here`);
+    // The page loads all the same: the graph draws the commit, whose card says why.
+    const drawn = await history.graph(project);
+    assert.ok(drawn.commits.some((entry) => entry.sha === commit), `${what}: the graph draws it`);
     let saved = false;
     const result = await history.rewind(project, { sha: commit, tip }, { save: async () => ((saved = true), null) });
     assert.equal(result.refused, 'invalid', `${what}: ${JSON.stringify(result)}`);
@@ -689,7 +703,15 @@ test("a commit whose files a partial clone never fetched is refused whole, and n
   const before = userSide(dir);
   const preview = await history.compare(project, v1);
   assert.equal(preview.invalid?.absent, true, JSON.stringify(preview));
+  assert.equal(preview.invalid.partial, true, 'and the card can say why: a partial clone');
   assert.deepEqual([preview.write, preview.remove], [[], []]);
+  // The page loads all the same: the graph names v1's files (counting them
+  // would read their blobs), and its detail lists them, uncounted.
+  const drawn = await history.graph(project);
+  assert.deepEqual(drawn.commits.find((entry) => entry.sha === v1)?.changed.sort(), ['a.txt', 'b.txt', 'z.txt']);
+  assert.ok(drawn.commits.some((entry) => entry.line === 'record'), 'beside the record');
+  const detail = await history.commitDetail(project, v1);
+  assert.deepEqual(detail.files.map((file) => [file.path, file.plus, file.patch]), ['a.txt', 'b.txt', 'z.txt'].map((name) => [name, 0, undefined]));
   let saved = false;
   const result = await history.rewind(project, { sha: v1, tip }, { save: async () => ((saved = true), null) });
   assert.equal(result.refused, 'invalid', JSON.stringify(result));
@@ -864,4 +886,137 @@ test('a window that does not answer save is named, and the rewind goes on and sa
   assert.deepEqual(steps[1], ['save', 'done', { silent }]);
   const again = await history.rewind(project, { sha: result.from ?? second, tip: result.to });
   assert.deepEqual(again.silent, [], 'every window answered');
+});
+
+// From the third pass's review.
+
+test('one rewind at a time on a working tree: another shell\'s rewind and commits wait while it writes, and a lock its holder left is taken over', async () => {
+  const { dir, project: knuth, first, second } = await recorded('lock');
+  const found = await repositoryOf(binary, dir);
+  const plass = new Project({ binary, root: found.root, gitDir: found.gitDir, commonDir: found.commonDir, appName: 'plass', stateDir: folder('state'), log });
+  const holding = 'Fixture is rewinding this project';
+  let during = null;
+  const result = await history.rewind(knuth, { sha: first, tip: second }, {
+    save: async () => {
+      // Plass's timer, its rewind and its card, while this one holds the lock.
+      write(dir, 'b.txt', 'plass wrote this\n');
+      during = {
+        commit: await plass.commit('timer'),
+        rewind: await history.rewind(plass, { sha: second, tip: second }),
+        compare: (await history.compare(plass, second)).blocked,
+        lock: await plass.lockRewind(),
+      };
+      return null;
+    },
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(during, {
+    commit: { skipped: holding, message: 'plass: timer' },
+    rewind: { refused: 'paused', reason: holding },
+    compare: holding,
+    lock: holding,
+  });
+  assert.ok(!fs.existsSync(knuth.rewindLock), 'the lock goes with the rewind');
+  assert.equal(subjects(dir).filter((subject) => subject.startsWith('plass:')).length, 0, 'plass recorded nothing meanwhile');
+  write(dir, 'b.txt', 'plass again\n');
+  assert.equal((await plass.commit('timer')).committed, true, 'and records again after it');
+
+  const lock = (pid, app) => fs.writeFileSync(knuth.rewindLock, JSON.stringify({ pid, app }));
+  // Another shell, running, holds it: refused before anything is saved or recorded.
+  lock(process.ppid, 'plass');
+  let saved = false;
+  const before = subjects(dir).length;
+  const refused = await history.rewind(knuth, { sha: second, tip: await knuth.tip() }, { save: async () => ((saved = true), null) });
+  assert.deepEqual(refused, { refused: 'paused', reason: 'Plass is rewinding this project' });
+  assert.deepEqual([saved, subjects(dir).length], [false, before]);
+  assert.ok(fs.existsSync(knuth.rewindLock), "and the other shell's lock is left as it is");
+  // Older than any rewind, its pid is no witness (the system may have given
+  // it to another process).
+  const old = new Date(Date.now() - 11 * 60 * 1000);
+  fs.utimesSync(knuth.rewindLock, old, old);
+  assert.equal(await knuth.blocked(), null);
+  // Left by a shell that died: taken over.
+  lock(spawnSync(process.execPath, ['-e', '']).pid, 'plass');
+  assert.equal(await knuth.blocked(), null);
+  const over = await history.rewind(knuth, { sha: second, tip: await knuth.tip() });
+  assert.equal(over.ok, true, JSON.stringify(over));
+  assert.ok(!fs.existsSync(knuth.rewindLock));
+});
+
+test('the new .gitignore is made in the state folder, never in the working tree, so no fill or git status sees it', async () => {
+  const dir = folder('staged-ignore');
+  const project = await projectAt(dir);
+  write(dir, '.gitignore', 'build/\n');
+  write(dir, 'a.txt', 'a\n');
+  sh(dir, 'add', '.');
+  at(dir, now() - 100, 'commit', '-q', '-m', 'Before the record');
+  const old = sh(dir, 'rev-parse', 'HEAD');
+  write(dir, 'a.txt', 'a, later\n');
+  const tip = (await project.commit('session open')).hash;
+  const top = listing(dir);
+  const renames = [];
+  const rename = fsp.rename;
+  fsp.rename = async (from, to) => {
+    renames.push({ from, to, top: listing(dir), status: sh(dir, '--no-optional-locks', 'status', '--porcelain', '--untracked-files=all') });
+    return rename(from, to);
+  };
+  let result;
+  try {
+    result = await history.rewind(project, { sha: old, tip });
+  } finally {
+    fsp.rename = rename;
+  }
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const ignore = renames.find((entry) => entry.to === path.join(project.root, '.gitignore'));
+  assert.ok(ignore, 'the rewind wrote .gitignore itself');
+  assert.equal(path.dirname(ignore.from), project.stateDir, 'made in the state folder');
+  assert.deepEqual(ignore.top, top, 'nothing new in the working tree as it lands');
+  assert.ok(!/claerbout-/.test(ignore.status), `nor in git status (${ignore.status})`);
+  assert.equal(read(dir, '.gitignore'), `build/\n${IGNORE_LINES}`);
+  assert.deepEqual(listing(dir), top);
+});
+
+test('a file named untracked in a commit, where the record keeps its folder, is left alone and named', async () => {
+  const dir = folder('named-untracked');
+  const project = await projectAt(dir);
+  write(dir, 'a.txt', 'a\n');
+  write(dir, 'untracked', 'a file of that name\n');
+  sh(dir, 'add', '.');
+  at(dir, now() - 100, 'commit', '-q', '-m', 'Before the record');
+  const old = sh(dir, 'rev-parse', 'HEAD');
+  fs.rmSync(path.join(dir, 'untracked'));
+  write(dir, 'untracked/data.csv', 'x,y\n');
+  write(dir, 'a.txt', 'a, later\n');
+  const tip = (await project.commit('session open')).hash;
+  const preview = await history.compare(project, old);
+  assert.deepEqual([preview.write.map((entry) => entry.path), preview.skipped.map((entry) => entry.path)], [['a.txt'], ['untracked']]);
+  assert.match(preview.skipped[0].why, /the record keeps the name untracked for its own folder/);
+  const result = await history.rewind(project, { sha: old, tip });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual([result.written, result.skipped.map((entry) => entry.path)], [['a.txt'], ['untracked']]);
+  assert.equal(read(dir, 'untracked/data.csv'), 'x,y\n', 'the folder is as it was');
+});
+
+test('what a commit holds in a folder named .gitignore is left alone and named, the card and the rewind agreeing', async () => {
+  const dir = folder('ignore-folder');
+  const project = await projectAt(dir);
+  write(dir, 'a.txt', 'a\n');
+  write(dir, 'untracked/data.csv', 'x,y\n');
+  const start = (await project.commit('session open')).hash;
+  // A record commit whose .gitignore is a folder (crafted: the record keeps a file there).
+  const tree = treeNamed(dir, [
+    ...topOf(dir, treeName(dir, start)).filter(([, name]) => name !== '.gitignore'),
+    ['40000', '.gitignore', treeNamed(dir, [['100644', 'x', blobNamed(dir, 'x\n')]])],
+  ]);
+  const crafted = sh(dir, 'commit-tree', tree, '-p', start, '-m', 'fixture: timer');
+  sh(dir, 'update-ref', BRANCH, crafted);
+  write(dir, 'a.txt', 'a, later\n');
+  const tip = (await project.commit('timer')).hash;
+  const preview = await history.compare(project, crafted);
+  assert.deepEqual([preview.write.map((entry) => entry.path), preview.remove, preview.skipped.map((entry) => entry.path)], [['a.txt'], ['.gitignore'], ['.gitignore/x']]);
+  const result = await history.rewind(project, { sha: crafted, tip });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual([result.written, result.removed, result.skipped.map((entry) => entry.path)], [['a.txt'], ['.gitignore'], ['.gitignore/x']]);
+  assert.equal(read(dir, '.gitignore'), IGNORE_LINES, "a .gitignore the target lacks is the record's line alone");
+  assert.ok(!sh(dir, 'ls-tree', '-r', '--name-only', result.to).split('\n').some((file) => file.startsWith('untracked/')));
 });

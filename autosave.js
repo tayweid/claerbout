@@ -31,17 +31,22 @@
 // --no-deref. The user's HEAD, branch and index are never touched: nothing
 // is committed while the record's branch is checked out in any worktree or
 // being rebased in one, while it is a symbolic ref, while git itself is at
-// work (index.lock), or while a merge, rebase, cherry-pick or revert is in
-// progress; all of that is checked again just before the ref moves, so
-// only a few milliseconds of race remain. A commit lands only when the
-// tree differs from the tip's. In the working tree the record does write
+// work (index.lock), while another shell rewinds the working tree (the
+// lock its rewind holds beside index.lock, history.js), or while a merge,
+// rebase, cherry-pick or revert is in progress; all of that is checked
+// again just before the ref moves, so only a few milliseconds of race
+// remain. A commit lands only when the tree differs from the tip's. In the
+// working tree the record does write
 // untracked/, a /untracked/ line in .gitignore (anchored, so a folder
 // named untracked deeper down is the user's as ever; none when the rules
 // already ignore untracked/) and .claerbout/untracked.json, never through
 // a symbolic link: a link (or anything else that is not a folder or a
 // file) at any of those names turns the manifest off for that project,
 // said once. While the manifest is kept, a fill leaves the top untracked/
-// out by pathspec as well, whatever .gitignore says at that moment.
+// out by pathspec as well, whatever .gitignore says at that moment. The
+// manifest is made in the shell's state folder and renamed into place, so
+// no fill (another app's included) ever finds half of one, or a new file
+// beside it.
 //
 // Triggers: a page's `autosave` notice ("cell run [4]"), a timer per open
 // project (a tick while a job runs is dropped), `session open` when the
@@ -130,6 +135,13 @@ const UNTRACKED = 'untracked';
 const IGNORE_LINES = `# Claerbout: large data, caches and scratch, pinned by .claerbout/untracked.json\n/${UNTRACKED}/\n`;
 const MANIFEST = path.join('.claerbout', 'untracked.json');
 const MANIFEST_PATH = MANIFEST.split(path.sep).join('/');
+/** The lock a rewind holds in the working tree's git dir while it writes
+ *  (history.js), as git holds index.lock there: {pid, app}. */
+const REWIND_LOCK = 'claerbout-rewind.lock';
+/** A rewind lock older than this is stale whatever its pid says, so a pid
+ *  the system has since given to another process cannot keep a record
+ *  paused: no rewind takes ten minutes. */
+const REWIND_LOCK_STALE_MS = 10 * 60 * 1000;
 const DEFAULT_INTERVAL_MS = 60 * 1000;
 /** Files in .git that mean a merge, rebase, cherry-pick or revert is
  *  under way, and what the record calls each in the sentence it gives. */
@@ -322,6 +334,18 @@ function filterFailure(stderr) {
 }
 
 const nulList = (text) => text.split('\0').filter(Boolean);
+
+/** Whether a process is running (one that is not ours to signal is). */
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+const capital = (word) => word.charAt(0).toUpperCase() + word.slice(1);
 
 /** A path as the disk keeps it: links resolved, and each name in the case
  *  and Unicode form it is stored in. The native realpath, since the JS one
@@ -589,18 +613,60 @@ async function kindOf(file) {
 }
 
 /**
+ * `bytes` put at `file` whole: written to a new file and renamed over it,
+ * so no reader ever sees half of it, and a link at its name is replaced,
+ * never followed. The new file is made in `stage`, the shell's state
+ * folder, outside the working tree: no fill (another app's included) and
+ * no `git status` ever sees it, even when the shell dies before the
+ * rename (named `staged-<pid>-…`, for sweep()). Beside `file` only when
+ * `stage` is on another volume (EXDEV), or none is given.
+ */
+async function replaceFile(file, bytes, { mode = 0o666, stage = null } = {}) {
+  const tag = `${process.pid}-${randomBytes(4).toString('hex')}`;
+  const beside = path.join(path.dirname(file), `${path.basename(file)}.claerbout-${tag}`);
+  for (const staged of [...(stage ? [path.join(stage, `staged-${tag}`)] : []), beside]) {
+    try {
+      if (staged !== beside) await fsp.mkdir(stage, { recursive: true });
+      await fsp.writeFile(staged, bytes, { flag: 'wx', mode });
+      await fsp.rename(staged, file);
+      return;
+    } catch (error) {
+      if (error.code !== 'EXDEV' || staged === beside) throw error;
+    } finally {
+      await fsp.rm(staged, { force: true });
+    }
+  }
+}
+
+/** What a shell that died left in a state folder, removed: every
+ *  `<kind>-<pid>-…` (a staged file, a rewind's throwaway index, a scratch
+ *  folder, history.js) whose process is gone. */
+async function sweep(dir) {
+  let names = [];
+  try {
+    names = await fsp.readdir(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const pid = Number(name.match(/^(?:staged|rewind|ignore)-(\d+)-/)?.[1]);
+    if (pid && pid !== process.pid && !alive(pid)) await fsp.rm(path.join(dir, name), { recursive: true, force: true });
+  }
+}
+
+/**
  * .claerbout/untracked.json: every file under untracked/ with its size,
  * mtime and SHA-256, so the data the record leaves out is still pinned by
  * it. A file is hashed again only when its size or mtime changed; the
  * hashes live in `cacheFile`, outside the project. A file that cannot be
  * read is left out and named to `unreadable`; a file the secrets list
  * matches is left out, neither named nor hashed, and counted to `secrets`.
- * The manifest is written to a new file beside it and renamed over it, so
- * a link there is replaced, never followed, and a reader never sees half
- * of one; but a link (or anything not a file) at its name, or at
- * .claerbout's, means no manifest: null, and nothing written.
+ * The manifest is written whole (replaceFile, made in `stage`, the shell's
+ * state folder), so a link there is replaced, never followed, and a reader
+ * never sees half of one; but a link (or anything not a file) at its name,
+ * or at .claerbout's, means no manifest: null, and nothing written.
  */
-async function writeManifest(root, cacheFile, { unreadable = () => {}, secrets = () => {} } = {}) {
+async function writeManifest(root, cacheFile, { unreadable = () => {}, secrets = () => {}, stage = null } = {}) {
   const manifest = path.join(root, MANIFEST);
   const folder = await kindOf(path.dirname(manifest));
   if (folder === 'missing') await fsp.mkdir(path.dirname(manifest));
@@ -644,15 +710,7 @@ async function writeManifest(root, cacheFile, { unreadable = () => {}, secrets =
   } catch {
     // Not there yet.
   }
-  if (current !== text) {
-    const fresher = `${manifest}.${process.pid}-${randomBytes(4).toString('hex')}.tmp`;
-    try {
-      await fsp.writeFile(fresher, text, { flag: 'wx' });
-      await fsp.rename(fresher, manifest);
-    } finally {
-      await fsp.rm(fresher, { force: true });
-    }
-  }
+  if (current !== text) await replaceFile(manifest, text, { stage });
   await fsp.mkdir(path.dirname(cacheFile), { recursive: true });
   await fsp.writeFile(cacheFile, JSON.stringify(fresh));
   return entries;
@@ -725,6 +783,8 @@ class Project {
     /** Nested repositories without a commit, left out of the record. */
     this.excluded = new Set();
     this.secretsShown = false;
+    /** What a shell that died left in the state folder, removed once. */
+    this.swept = false;
   }
 
   git(args, options) {
@@ -869,12 +929,85 @@ class Project {
     return ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : null;
   }
 
+  /** The rewind lock: in this working tree's own git dir, beside git's
+   *  index.lock, where every shell on the working tree finds it. */
+  get rewindLock() {
+    return path.join(path.resolve(this.root, this.gitDir), REWIND_LOCK);
+  }
+
+  /** Who holds the rewind lock, {pid, app}; null when no one does or its
+   *  holder is gone (the pid not running, or the lock older than any
+   *  rewind). One caught half-written, this instant, is held. */
+  rewinder() {
+    let info;
+    let text;
+    try {
+      info = fs.statSync(this.rewindLock);
+      text = fs.readFileSync(this.rewindLock, 'utf8');
+    } catch {
+      return null;
+    }
+    const age = Date.now() - info.mtimeMs;
+    if (age > REWIND_LOCK_STALE_MS) return null;
+    let held = null;
+    try {
+      held = JSON.parse(text);
+    } catch {
+      // Half-written, or not one of ours.
+    }
+    if (!Number.isInteger(held?.pid)) return age < 5000 ? { pid: null, app: 'another app' } : null;
+    if (!alive(held.pid)) return null;
+    return { pid: held.pid, app: typeof held.app === 'string' && held.app ? held.app : 'another app' };
+  }
+
+  /** Whether a holder of the rewind lock is this shell's own rewind. */
+  mine(holder) {
+    return holder?.pid === process.pid && holder.app === this.appName;
+  }
+
+  /** Take the rewind lock: null when this shell holds it now; else why
+   *  not, the sentence blocked() gives ("Plass is rewinding this
+   *  project"). A lock whose holder is gone is replaced, and so is this
+   *  shell's own, left by a rewind that never got to drop it. */
+  async lockRewind() {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        // Made and written in one go (no await between), so another shell
+        // seldom finds it empty.
+        fs.writeFileSync(this.rewindLock, JSON.stringify({ pid: process.pid, app: this.appName }), { flag: 'wx' });
+        return null;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+      }
+      const holder = this.rewinder();
+      if (holder && !this.mine(holder)) return `${capital(holder.app)} is rewinding this project`;
+      await fsp.rm(this.rewindLock, { force: true });
+    }
+    return 'Another app is rewinding this project';
+  }
+
+  /** Drop the rewind lock, when it is still this shell's (however long
+   *  the rewind took). */
+  async unlockRewind() {
+    let held = null;
+    try {
+      held = JSON.parse(await fsp.readFile(this.rewindLock, 'utf8'));
+    } catch {
+      return;
+    }
+    if (this.mine(held)) await fsp.rm(this.rewindLock, { force: true });
+  }
+
   /** Why no commit can be made right now, or null: a sentence the log and
    *  the history view both say as it is ("not recorded while a merge is
    *  in progress on main", "the record is paused: git holds index.lock").
    *  Asked before a commit and again just before its ref moves. */
   async blocked() {
     if (fs.existsSync(path.join(this.gitDir, 'index.lock'))) return 'git holds index.lock';
+    // Another shell's rewind is writing the working tree: a commit now
+    // would record it half written.
+    const rewinder = this.rewinder();
+    if (rewinder && !this.mine(rewinder)) return `${capital(rewinder.app)} is rewinding this project`;
     for (const [marker, what] of IN_PROGRESS) {
       if (fs.existsSync(path.join(this.gitDir, marker))) {
         const branch = this.branchAtWork(marker);
@@ -958,15 +1091,18 @@ class Project {
    * manifest is kept, the top untracked/ is left out by pathspec too, not
    * only by its .gitignore line: a moment in which .gitignore lacks the
    * line (another tool rewriting it, or another shell's rewind) cannot let
-   * it in, and once in, the record never prunes it. A clean filter that
-   * cannot run (git-lfs not installed, with filter.<name>.required) is a
-   * Skip, said once.
+   * it in, and once in, the record never prunes it. The folder's contents
+   * only, as the line matches: a file named untracked, made after this
+   * launch kept the manifest, is the project's and is recorded. A clean
+   * filter that cannot run (git-lfs not installed, with
+   * filter.<name>.required) is a Skip, said once.
    */
   async fill(env) {
     await this.recheckExcluded();
-    // The top untracked/ as a pathspec, `exclude,` for git add, '' to match it.
+    // The top untracked/ folder as a pathspec, `exclude,` for git add, '' to
+    // match it; the trailing slash keeps a file of that name out of it.
     const icase = this.manifest && (await this.caseless()) ? ',icase' : '';
-    const own = (magic) => (this.manifest ? [`:(${magic}top,literal${icase})${UNTRACKED}`] : []);
+    const own = (magic) => (this.manifest ? [`:(${magic}top,literal${icase})${UNTRACKED}/`] : []);
     const add = () =>
       this.git(
         [
@@ -1059,11 +1195,16 @@ class Project {
    * cannot run is a Skip.
    */
   async snapshot() {
+    if (!this.swept) {
+      this.swept = true;
+      await sweep(this.stateDir);
+    }
     await this.prepare();
     if (this.manifest) {
       const written = await writeManifest(this.root, path.join(this.stateDir, 'hashes.json'), {
         unreadable: (file) => this.once(`unhashed ${file}`, `autosave: ${file} cannot be read, so the manifest leaves it out (${this.root})`),
         secrets: (count) => (this.manifestSecrets = count),
+        stage: this.stateDir,
       });
       if (written === null) {
         this.manifest = false;
@@ -1456,6 +1597,8 @@ module.exports = {
   secretPlace,
   isSecret,
   writeManifest,
+  replaceFile,
+  alive,
   errorLine,
   filterFailure,
   gitEnvironment,
