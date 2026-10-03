@@ -518,6 +518,81 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
     if (!holds()) await fail(`the autosave record does not hold ${smoke.written} after a notice`);
   }
 
+  // The History view opened from the document is the document's: the
+  // document is changed alone and recorded, the tile pressed, and the
+  // switch reads "This document" ("Its folder" left out, the document being
+  // at the project's top), the river draws fewer commits than the whole
+  // project's, and the session-open commit's card ticks the document
+  // alone, its button saying so, with the link that ticks every file.
+  // "Whole project" then ticks every file, and is remembered for the
+  // project (preferences.json, `historyScope`).
+  if (rewinds && smoke.history && smoke.room) {
+    fs.appendFileSync(doc, 'a second line, recorded alone\n');
+    await page.evaluate(() => window.claerbout.request({ type: 'autosave', trigger: 'smoke: the document alone' }));
+    const recordedAlone = () => spawnSync('git', ['-C', folder, 'log', '-1', '--format=', '--name-only', 'claerbout-autosave'], { encoding: 'utf8' }).stdout.trim() === path.basename(doc);
+    for (let i = 0; i < 60 && !recordedAlone(); i++) await page.waitForTimeout(250);
+    if (!recordedAlone()) await fail(`the record's tip does not hold ${path.basename(doc)}'s change alone`);
+    const inlineIds = () => app.evaluate(({ webContents }) => webContents.getAllWebContents().filter((contents) => !contents.isDestroyed() && contents.getURL().includes('history.html?inline=1')).map((contents) => contents.id));
+    const inPage = (id, code) => app.evaluate(({ webContents }, [viewId, source]) => webContents.fromId(viewId).executeJavaScript(source), [id, code]);
+    const until = async (id, code, what) => {
+      for (let i = 0; i < 60; i++) {
+        const value = await inPage(id, code);
+        if (value) return value;
+        await page.waitForTimeout(250);
+      }
+      return fail(`the inline History page ${what}`);
+    };
+    await page.click(smoke.history);
+    let id = null;
+    for (let i = 0; i < 60 && id === null; i++) {
+      id = (await inlineIds())[0] ?? null;
+      if (id === null) await page.waitForTimeout(250);
+    }
+    if (id === null) await fail('the History tile laid no History view over the room a second time');
+    await until(id, "!!document.querySelector('#rows .row.t-open')", 'drew no session-open node');
+    const scopeRow = () => inPage(id, "({ hidden: document.getElementById('scope').hidden, on: [...document.querySelectorAll('#scope button.on')].map((b) => b.dataset.s), shown: [...document.querySelectorAll('#scope button')].filter((b) => !b.hidden).map((b) => b.dataset.s), picks: document.querySelectorAll('#rows .row.pick').length })");
+    const opened = await scopeRow();
+    if (opened.hidden || opened.on.join() !== 'document' || opened.shown.join() !== 'document,project') await fail(`the scope switch opened as ${JSON.stringify(opened)}, not "This document" of document and project`);
+    const ticks = () => inPage(id, "({ boxes: Object.fromEntries([...document.querySelectorAll('#card input[data-path]')].map((b) => [b.dataset.path, b.checked])), button: (document.querySelector('#card .rwl') || {}).textContent || '', all: (document.querySelector('#card .lnk[data-act=\"all\"]') || {}).textContent || null })");
+    await inPage(id, "document.querySelector('#rows .row.t-open').click()");
+    await until(id, "document.querySelectorAll('#card input[data-path]').length >= 2", 'offered no rewind of two files on the session-open card');
+    const name = path.basename(doc);
+    const mine = await ticks();
+    const others = Object.keys(mine.boxes).filter((file) => file !== name);
+    if (mine.boxes[name] !== true || others.length === 0 || others.some((file) => mine.boxes[file]) || !mine.button.startsWith('Rewind 1 file') || mine.all !== `all ${others.length + 1} files`) {
+      await fail(`under "This document" the card ticks ${JSON.stringify(mine)}, not ${name} alone`);
+    }
+    // The view alone, with the card open, for a person to look at.
+    if (process.env.CLAERBOUT_SMOKE_SHOTS) {
+      const shot = path.join(path.resolve(process.env.CLAERBOUT_SMOKE_SHOTS), `${NAME.toLowerCase()}-inline-history-document.png`);
+      const png = await app.evaluate(async ({ webContents }, viewId) => (await webContents.fromId(viewId).capturePage()).toPNG().toString('base64'), id);
+      fs.writeFileSync(shot, Buffer.from(png, 'base64'));
+      console.log(`smoke (${NAME}, ${mode}): history: the view on "This document", ${shot}`);
+    }
+    await inPage(id, "document.querySelector('#scope button[data-s=\"project\"]').click()");
+    const whole = await until(id, "(() => { const b = document.querySelector('#scope button.on'); return b && b.dataset.s === 'project' && document.querySelectorAll('#rows .row.pick').length; })()", 'did not switch to "Whole project"');
+    if (whole <= opened.picks) await fail(`the whole project's river draws ${whole} commits, the document's ${opened.picks}: no fewer`);
+    await until(id, "document.querySelectorAll('#card input[data-path]').length >= 2", 'lost the session-open card on "Whole project"');
+    const every = await ticks();
+    if (Object.values(every.boxes).some((ticked) => !ticked) || !every.button.startsWith(`Rewind all ${Object.keys(every.boxes).length} files`) || every.all !== null) {
+      await fail(`under "Whole project" the card ticks ${JSON.stringify(every)}, not every file`);
+    }
+    const remembered = () => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(work, 'config', 'preferences.json'), 'utf8')).historyScope ?? {};
+      } catch {
+        return {};
+      }
+    };
+    for (let i = 0; i < 20 && !Object.values(remembered()).includes('project'); i++) await page.waitForTimeout(100);
+    if (!Object.values(remembered()).includes('project')) await fail(`"Whole project" was not remembered for the project (${JSON.stringify(remembered())})`);
+    await inPage(id, "window.claerbout.request({ type: 'history', action: 'close' })");
+    for (let i = 0; i < 40 && (await inlineIds()).length > 0; i++) await page.waitForTimeout(100);
+    if ((await inlineIds()).length > 0) await fail('the scoped History view did not close');
+    console.log(`smoke (${NAME}, ${mode}): history: opened from ${name}, "This document": ${opened.picks} commits drawn, the card ticks ${name} alone ("${mine.button}", ${mine.all} a click away)`);
+    console.log(`smoke (${NAME}, ${mode}): history: "Whole project": ${whole} commits drawn, every file ticked ("${every.button}"), remembered for the project`);
+  }
+
   // The window form: a `history` request without the room's box opens the
   // project's History window.
   const opened = await page.evaluate(() => window.claerbout.request({ type: 'history' }));

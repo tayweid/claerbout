@@ -1020,3 +1020,67 @@ test('what a commit holds in a folder named .gitignore is left alone and named, 
   assert.equal(read(dir, '.gitignore'), IGNORE_LINES, "a .gitignore the target lacks is the record's line alone");
   assert.ok(!sh(dir, 'ls-tree', '-r', '--name-only', result.to).split('\n').some((file) => file.startsWith('untracked/')));
 });
+
+test("a graph scoped to one document: each commit's scope, the files changed beside it, from the one log", async (t) => {
+  // A course in one repository: two lectures, each a document with what its
+  // runs write beside it, and a README at the top.
+  const dir = folder('scoped');
+  const project = await projectAt(dir);
+  write(dir, 'README.md', 'the course\n');
+  write(dir, 'lectures/l1/l1.py', '# %%\nx = 1\n');
+  write(dir, 'lectures/l1/values.json', '{"x": 1}\n');
+  write(dir, 'lectures/l2/l2.py', '# %%\ny = 2\n');
+  const open = (await project.commit('session open')).hash;
+  // A run of lecture 1: the document, its values and a figure beside it.
+  write(dir, 'lectures/l1/l1.py', '# %%\nx = 3\n');
+  write(dir, 'lectures/l1/values.json', '{"x": 3}\n');
+  write(dir, 'lectures/l1/figs/a.svg', '<svg/>\n');
+  const run = (await project.commit('cell run [1]')).hash;
+  // Lecture 2 alone, then a note in lecture 1's folder alone.
+  write(dir, 'lectures/l2/l2.py', '# %%\ny = 4\n');
+  const other = (await project.commit('timer')).hash;
+  write(dir, 'lectures/l1/notes.md', 'notes\n');
+  const note = (await project.commit('timer')).hash;
+  // A rewind that wrote lecture 1 back, and lecture 2 with it.
+  write(dir, 'lectures/l1/l1.py', '# %%\nx = 1\n');
+  write(dir, 'lectures/l2/l2.py', '# %%\ny = 2\n');
+  const back = (await project.commit(history.rewindToTrigger(open, null))).hash;
+
+  const document = 'lectures/l1/l1.py';
+  const answer = await history.graph(project, { document });
+  const by = new Map(answer.commits.map((commit) => [commit.sha, commit]));
+  assert.deepEqual(
+    [open, run, other, note, back].map((sha) => by.get(sha).scope),
+    ['document', 'document', null, 'folder', 'document'],
+  );
+  // Beside the document: what its run changed in its folder, the document
+  // among them; nothing from the first fill, which holds everything, nor
+  // from the rewind, which wrote whatever differed.
+  assert.deepEqual(by.get(run).beside.sort(), ['lectures/l1/figs/a.svg', 'lectures/l1/l1.py', 'lectures/l1/values.json']);
+  assert.deepEqual(by.get(open).beside, []);
+  assert.deepEqual(by.get(back).beside, []);
+  assert.equal(by.get(other).beside, undefined);
+  assert.ok(answer.commits.every((commit) => !('paths' in commit)), 'the full lists stay in the shell');
+  // Without a document, the commits as they were: no scope, no lists.
+  const plain = await history.graph(project);
+  assert.ok(plain.commits.every((commit) => !('scope' in commit) && !('paths' in commit)));
+  assert.deepEqual(plain.commits.find((commit) => commit.sha === run).changed.sort(), ['lectures/l1/figs/a.svg', 'lectures/l1/l1.py', 'lectures/l1/values.json']);
+  // A document at the project's top: its folder is the whole project.
+  const top = await history.graph(project, { document: 'README.md' });
+  assert.deepEqual(top.commits.map((commit) => commit.scope), ['folder', 'folder', 'folder', 'folder', 'document']);
+  // The record's new commits keep their lists until the shell scopes them
+  // for each page; scoped takes them off either way.
+  const since = await history.recordSince(project, other, back);
+  assert.deepEqual(since.map((commit) => commit.paths.length), [2, 1]);
+  assert.deepEqual(history.scoped(project.root, since, document).map((commit) => [commit.sha, commit.scope]), [[back, 'document'], [note, 'folder']]);
+  assert.deepEqual(history.scoped(project.root, since, 'lectures/l2/l2.py').map((commit) => commit.scope), ['document', null]);
+  assert.ok(history.scoped(project.root, since).every((commit) => !('paths' in commit) && !('scope' in commit)));
+  // A path no tree could hold scopes nothing.
+  assert.ok(history.scoped(project.root, since, '../l1.py').every((commit) => !('scope' in commit)));
+  // Compared as the volume compares names.
+  if (!fs.existsSync(path.join(dir, '.GIT'))) {
+    t.diagnostic('this volume keeps case apart: no caseless check');
+    return;
+  }
+  assert.deepEqual(history.scoped(project.root, since, 'Lectures/L1/l1.py').map((commit) => commit.scope), ['document', 'folder']);
+});

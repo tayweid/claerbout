@@ -55,6 +55,8 @@ const LIMIT = 2000;
 const MOST = 5000;
 /** How many changed paths a graph commit names. */
 const CHANGED_KEPT = 20;
+/** How many paths beside its document a commit names (scoped). */
+const BESIDE_KEPT = 200;
 /** Record commits a tie looks through for a user commit. */
 const TIE_CANDIDATES = 200;
 /** A patch's lines per file, and its bytes in all. */
@@ -335,7 +337,8 @@ async function partialClone(project) {
 // MARK: - The graph
 
 /** Commits from one `git log` with the graph's format and numstat, newest
- *  first, shaped as the graph's commits (without ties). */
+ *  first, shaped as the graph's commits (without ties), each with `paths`,
+ *  every path it changed, which scoped() reads and takes off. */
 async function logCommits(project, revisions, { limit, until } = {}) {
   const args = (shape) => [
     'log',
@@ -382,6 +385,7 @@ async function logCommits(project, revisions, { limit, until } = {}) {
       plus: 0,
       minus: 0,
       changed: [],
+      paths: [],
     };
     if (!record) commit.author = author;
     for (const entry of end === -1 ? [] : nul(chunk.slice(end + 1).replace(/^\n/, ''))) {
@@ -394,12 +398,46 @@ async function logCommits(project, revisions, { limit, until } = {}) {
         file = stat[3];
       }
       commit.files += 1;
+      commit.paths.push(file);
       if (commit.changed.length < CHANGED_KEPT) commit.changed.push(file);
     }
     if (record) Object.assign(commit, parseSubject(subject));
     commits.push(commit);
   }
   return commits;
+}
+
+/**
+ * The commits as a History page opened from one document sees them, from
+ * the file lists the graph's one log already read (logCommits), so no
+ * scope costs another git: each without `paths`, and, when `document` is
+ * that document's path in the project ('/'-separated, as the record's
+ * trees name it), with `scope`: 'document' for a commit that changed the
+ * document itself, 'folder' for one that changed anything else under the
+ * document's folder (at any depth; the whole project when the document is
+ * at its top), null for the rest. A commit that changed the document also
+ * names `beside`: the paths it changed in the document's folder, the
+ * document's own among them, as git spells them (at most 200), which is
+ * what a run writes beside its document (Knuth's values.json and figs/);
+ * none for a root commit, whose first fill holds everything, nor for a
+ * "rewind to", which writes whatever differed. Paths are compared as the
+ * volume compares them. Without a document, the commits as they are.
+ */
+function scoped(root, commits, document = null) {
+  const fold = foldFor(root);
+  const doc = typeof document === 'string' && !badPath(document) ? fold(document) : null;
+  const cut = doc ? doc.lastIndexOf('/') : -1;
+  const folder = cut > 0 ? `${doc.slice(0, cut)}/` : '';
+  return commits.map(({ paths = [], ...commit }) => {
+    if (doc === null) return commit;
+    const folded = paths.map(fold);
+    if (folded.includes(doc)) {
+      const plain = commit.parents.length === 0 || (commit.line === 'record' && commit.trigger === 'rewind-to');
+      const beside = plain ? [] : paths.filter((_file, i) => folded[i].startsWith(folder)).slice(0, BESIDE_KEPT);
+      return { ...commit, scope: 'document', beside };
+    }
+    return { ...commit, scope: folded.some((file) => file.startsWith(folder)) ? 'folder' : null };
+  });
 }
 
 /** The user's local branches (no record's), and HEAD. */
@@ -504,9 +542,10 @@ async function tieOf(project, commit, cache, began) {
  * more, total}; each commit is {sha, parents, line ('record' or the
  * branch it was reached by), refs, time, subject, files, plus, minus,
  * changed}, a record commit with its message parsed (parseSubject), a
- * user commit with its author and its `tie`.
+ * user commit with its author and its `tie`; with `document` (a path in
+ * the project), each with its `scope` and `beside` too (scoped).
  */
-async function graph(project, { before = null, limit = LIMIT, ties = new Map() } = {}) {
+async function graph(project, { before = null, limit = LIMIT, ties = new Map(), document = null } = {}) {
   const most = Math.max(1, Math.min(MOST, Number.isInteger(limit) ? limit : LIMIT));
   const tip = await project.tip();
   let until = null;
@@ -531,11 +570,12 @@ async function graph(project, { before = null, limit = LIMIT, ties = new Map() }
     if (commit.line !== 'record') commit.tie = await tieOf(project, commit, ties, began);
   }
   const total = tip ? Number(ok(await project.git(['rev-list', '--count', project.ref, '--']), 'rev-list').trim()) : 0;
-  return { tip, head, branches, commits, more, total };
+  return { tip, head, branches, commits: scoped(project.root, commits, document), more, total };
 }
 
 /** The record's commits after `from` up to `to`, newest first, shaped as
- *  the graph's (for the `history {kind: 'commit'}` event). */
+ *  the graph's (for the `history {kind: 'commit'}` event), each still with
+ *  its `paths`: the shell scopes them for each page (scoped). */
 async function recordSince(project, from, to, limit = 500) {
   if (!to) return [];
   checkedSha(to, 'tip');
@@ -1325,6 +1365,7 @@ module.exports = {
   graph,
   refs,
   recordSince,
+  scoped,
   recordTip,
   touched,
   commitDetail,
