@@ -389,7 +389,7 @@ node again, or the card's button, to rewind.
   and the frame shows at its corners. Inline, the page has no title strip
   (the app's bar names the document and its folder) and no rail: one 44 px
   row at the top of the panel holds the zoom (Days, Runs, Every commit),
-  the apps' chips and the paused pill at its left, the rail's tiles and a
+  the scope (below), the apps' chips and the paused pill at its left, the rail's tiles and a
   close tile at its right, and the river and the card are below it, as
   in the window. Escape puts the card away, and with no card open, the
   page. A resize of the window moves nothing by itself: the page measures
@@ -410,6 +410,36 @@ node again, or the card's button, to rewind.
   windows are told apart), with its own remembered size (`historySize`)
   and a hidden title bar in the suite's frame; a second open brings it
   forward with `history {kind: 'focus', at}`.
+- **The document's history.** A course keeps many lectures, notebooks and
+  scenes in one repository, and a rewind touches the whole tree unless the
+  card's ticks say "just this lecture". So the page opened from a document
+  (inline, or the window from a document's window; the shell knows the
+  window's document, and a window brought forward from another document's
+  window is told `history {kind: 'document'}` and reads that one's) opens
+  on that document. A switch beside the zoom says which: **This
+  document** draws only the commits that changed the document itself;
+  **Its folder**, those that changed anything under its folder, at any
+  depth (left out for a document at the project's top, where it would be
+  the whole project); **Whole project**, every commit, as before.
+  Commits outside the scope are not drawn, not dimmed: the river reads as
+  the document's history, its days' counts and the bar's ("12 of 340
+  commits") follow it, and a commit asked for by `at` outside it widens
+  the look to the whole project. The card ticks by the same scope: the
+  document and what its runs write beside it (the files changed in the
+  same commits as the document, in its folder: Knuth's `values.json` and
+  `figs/`; never from a root commit, whose first fill holds everything,
+  nor from a "rewind to", which writes whatever differed), or everything
+  under the folder, or every file. The other files stay listed, unticked;
+  the button says the count ("Rewind 1 file to 14:05", "Rewind all 5
+  files to 14:05"), and the fine print says why and offers **all N files**,
+  one click that ticks the rest. A box ticked by hand stays so while the
+  record moves on; a change of scope ticks afresh. The switch holds for
+  as long as the page is open and is not remembered: the page opens on
+  "This document" every time, so a look at the whole project from one
+  lecture never changes what the next lecture opens on. A window opened with no document (View › History… from a
+  window that is not a document page) has no switch: the whole project.
+  The ticks are the partial rewind's `paths`, so nothing of the rewind's
+  checks changes.
 - **Its requests,** answered only from a History page, in a window or in
   the room (the shell knows a view by its webContents, and its window and
   project with it), and always for that page's project (the page never
@@ -418,7 +448,17 @@ node again, or the card's button, to rewind.
   - `history {action: 'graph', before?, limit?}`: `{state: 'on' | 'paused'
     | 'none', reason, detail?, project: {root, name, display, branch}, app,
     tip, head: {branch, sha}, branches: [{name, tip, head}], commits, more,
-    total, windows, others}`. The commits come from one `git log
+    total, windows, others, scope}`, `scope` for a page opened from a
+    document `{document, folder}` (the document's path in the project and
+    its folder's, `''` at the top), else null. `windows` (this app's
+    documents on the project) and `others` (`[{app, documents}]`, another
+    app's) name each document by its path in the project, as the record's
+    trees do, resolved through any link on the way: a project reached
+    through one (`~/Projects/week-3` a link, or macOS's `/var`, which is
+    `/private/var`) still finds its documents, and the page never matches
+    an absolute path against the root as text. So do `compare`'s `others`,
+    the rewind's `silent` and `other-app` `documents`, and the steps'
+    `silent`. The commits come from one `git log
     --date-order --parents --source --numstat -z` over `--branches` with the
     records excluded (`--exclude=claerbout-autosave
     --exclude='claerbout-autosave-*'`) and this working tree's record by
@@ -439,7 +479,12 @@ node again, or the card's button, to rewind.
     and its `tie`: the newest record commit at or before it that holds every
     file it holds, byte for byte (`{sha, exact: true}`), else the nearest of
     200 (`{sha, exact: false, differs}`), else null; cached by sha for the
-    launch.
+    launch. With a document, each commit also has its `scope`
+    (`'document'`, `'folder'` or null) and, where it changed the document,
+    `beside` (the paths it changed in the document's folder, the
+    document's own among them, at most 200), worked out from the same log's
+    file lists: no scope costs another git. The record's new commits are
+    scoped for each page as they arrive.
   - `history {action: 'commit', sha}`: `{sha, parents, time, subject,
     author, files: [{path, status, plus, minus, binary, patch?, large?,
     size?}]}` against its first parent (the empty tree for a root), from
@@ -596,7 +641,8 @@ node again, or the card's button, to rewind.
   `{silent: [path]}` when a window did not answer), and `history {kind: 'commit',
   commits}` (the record grew), `{kind: 'refs', branches, head}` (a branch
   or HEAD moved), `{kind: 'state', state, reason}` (paused, or recording
-  again) and `{kind: 'focus', at}`. Every two seconds the shell looks at
+  again), `{kind: 'focus', at}` and `{kind: 'document'}` (the window
+  brought forward from another document's window). Every two seconds the shell looks at
   each project a window of its is on: the record's tip (the loose ref file,
   read; `git rev-parse` for a packed one), and with a History page open
   the branches, HEAD and the guards. The History events go to every
@@ -618,7 +664,12 @@ node again, or the card's button, to rewind.
 
 The tests (`npm run test:history`) run real git in temporary repositories
 under `os.tmpdir()`: the graph with the record, a user branch and a fork,
-the ties and paging; a commit's detail and a blob, and a file past 1 MB
+the ties and paging; the graph scoped to one document of a course with
+two lectures (each commit's scope, what a run changed beside the document,
+nothing from the first fill or a rewind, a document at the top whose
+folder is the project, the record's new commits scoped as they arrive,
+names compared as the volume compares them); documents named by their
+paths in a project reached through a link; a commit's detail and a blob, and a file past 1 MB
 that is not read and costs no other file its patch; and the rewind, its
 three steps and its refusals: a file that becomes a folder and a folder
 that becomes a link, both ways, landing on the target's own tree; a folder
@@ -745,7 +796,14 @@ presses the page's History tile and checks the History view over its room:
 at the room's box, its page given a graph with that commit and drawing it,
 laid out inline, following the room when the window grows, closed by
 Escape with the page told, toggled from View › History… and gone with a
-reload of its page, nothing left behind; then the History window, the
+reload of its page, nothing left behind; then, with `note.txt` changed
+and recorded alone, the view opened again from it: the switch on "This
+document" ("Its folder" left out), fewer commits drawn than the whole
+project's, the session-open card ticking `note.txt` alone ("Rewind 1
+file", "all 2 files" a click away, the fine print saying `note.txt` is
+saved first and reloads although the temporary folder is reached through
+`/var`), "Whole project" ticking both, and the view opened once more on
+"This document", the switch not remembered; then the History window, the
 same graph, and the session-open commit's card, whose rewind's fine print
 says nothing of a kernel's memory with `note.txt` open and says it once
 another app's presence file lists a notebook on the project), and then the

@@ -955,11 +955,13 @@ const appName = NAME.toLowerCase();
  *  project, so a rewind can name another app's windows (history.js,
  *  presence). CLAERBOUT_PRESENCE_DIR is for a test's throwaway folder. */
 const presence = history.presence(process.env.CLAERBOUT_PRESENCE_DIR || path.join(app.getPath('appData'), 'Claerbout', 'presence'));
-/** History window → {key, root, reason, detail, document}. */
+/** History window → {key, root, reason, detail, document}: `document` the
+ *  one of the window it was opened from (or brought forward from), which
+ *  the page is scoped to. */
 const historyWindows = new Map();
 /** Document window → its inline History view: {view, contents, origin,
- *  css (the room's last box, CSS px), detach, and the target's root,
- *  reason, detail and document once known}. */
+ *  host (that window), css (the room's last box, CSS px), detach, and the
+ *  target's root, reason, detail and document once known}. */
 const historyViews = new Map();
 /** Ties, cached by sha for the launch: root → Map. */
 const ties = new Map();
@@ -980,10 +982,32 @@ function openOn(root) {
 /** The History pages on a project, as webContents: its History windows'
  *  and the inline views in its document windows. */
 function viewersOf(root) {
+  return pagesOn(root).map(({ contents }) => contents);
+}
+
+/** The History pages on a project, each with its entry: [{contents,
+ *  entry}]. */
+function pagesOn(root) {
   return [
-    ...[...historyWindows].filter(([window, entry]) => entry.root === root && !window.isDestroyed()).map(([window]) => window.webContents),
-    ...[...historyViews.values()].filter((entry) => entry.root === root && !entry.contents.isDestroyed()).map((entry) => entry.contents),
+    ...[...historyWindows].filter(([window, entry]) => entry.root === root && !window.isDestroyed()).map(([window, entry]) => ({ contents: window.webContents, entry })),
+    ...[...historyViews.values()].filter((entry) => entry.root === root && !entry.contents.isDestroyed()).map((entry) => ({ contents: entry.contents, entry })),
   ];
+}
+
+/** The document a History page is scoped to, as a path in its project
+ *  ('/'-separated), or null: the document its window has now, inline (a
+ *  Save As moves it), else the one it was opened from. */
+function scopeDocument(entry) {
+  if (!entry?.root) return null;
+  const host = entry.host && !entry.host.isDestroyed() ? entry.host : null;
+  const file = (host ? documents.get(host) : null) ?? entry.document ?? null;
+  return file ? history.relativeTo(entry.root, file) : null;
+}
+
+/** Another app's documents on a project, as the History page compares
+ *  them: each one's path in the project (history.js, pagePaths). */
+function pageOthers(root) {
+  return presence.others(root, appName).map((other) => ({ ...other, documents: history.pagePaths(root, other.documents) }));
 }
 
 /** An event to each of some windows or webContents (a view's). */
@@ -1021,7 +1045,15 @@ async function openHistory(source, at = null) {
   if (source && historyWindows.has(source)) return front(source);
   const target = source && !source.isDestroyed() ? await historyTarget(source) : { root: null, reason: 'unsaved', document: null };
   const key = target.root ?? `none ${target.reason} ${target.document ?? ''}`;
-  for (const [window, entry] of historyWindows) if (entry.key === key && !window.isDestroyed()) return front(window);
+  for (const [window, entry] of historyWindows) {
+    if (entry.key !== key || window.isDestroyed()) continue;
+    // Brought forward from another document's window: scoped to that one now.
+    if (target.root && target.document && target.document !== entry.document) {
+      entry.document = target.document;
+      window.webContents.send('claerbout:event', 'history', { kind: 'document' });
+    }
+    return front(window);
+  }
   const size = readPreferences().historySize;
   const window = new BrowserWindow({
     width: size?.[0] ?? 1100,
@@ -1118,7 +1150,7 @@ async function openInline(host, css, at = null) {
   const view = new WebContentsView({ webPreferences: pagePreferences() });
   view.setBackgroundColor('#00000000');
   const contents = view.webContents;
-  const entry = { view, contents, origin: appOrigin, css, root: null, reason: null, detail: null, document: null, detach: () => {} };
+  const entry = { view, contents, origin: appOrigin, host, css, root: null, reason: null, detail: null, document: null, detach: () => {} };
   historyViews.set(host, entry);
   // The page goes nowhere: links out open in the default browser.
   contents.setWindowOpenHandler(({ url }) => {
@@ -1217,26 +1249,36 @@ function projectFor(entry) {
 }
 
 /** `history {action: 'graph', before?, limit?}`: the graph, with the
- *  record's state and why there is none. */
+ *  record's state and why there is none, and for a page opened from a
+ *  document, `scope: {document, folder}`: the document's path in the
+ *  project and its folder's ('' at the top), with each commit's `scope`
+ *  and `beside` (history.js, scoped). The page opens on that document
+ *  every time. `windows` and `others` name documents by their paths in the
+ *  project, resolved through any link, as the record's trees do. */
 async function historyGraph(entry, message) {
-  const shape = { app: appName, project: null, tip: null, head: null, branches: [], commits: [], more: false, total: 0, windows: [], others: [] };
+  const shape = { app: appName, project: null, tip: null, head: null, branches: [], commits: [], more: false, total: 0, windows: [], others: [], scope: null };
   const project = projectFor(entry);
   if (!project) return { ...shape, state: 'none', reason: entry?.reason ?? 'refused', detail: entry?.detail ?? null, document: entry?.document ?? null };
   if (!ties.has(project.root)) ties.set(project.root, new Map());
   const reason = await project.blocked();
+  const document = scopeDocument(entry);
   const answer = await history.graph(project, {
     before: message.before ?? null,
     limit: Number.isInteger(message.limit) ? message.limit : history.LIMIT,
     ties: ties.get(project.root),
+    document,
   });
   return {
     ...shape,
     ...answer,
     state: reason ? 'paused' : 'on',
     reason,
+    scope: document
+      ? { document, folder: document.includes('/') ? document.slice(0, document.lastIndexOf('/')) : '' }
+      : null,
     project: { root: project.root, name: path.basename(project.root), display: tilde(project.root), branch: project.branchName },
-    windows: openOn(project.root).map((window) => documents.get(window)).filter(Boolean),
-    others: presence.others(project.root, appName),
+    windows: history.pagePaths(project.root, openOn(project.root).map((window) => documents.get(window))),
+    others: pageOthers(project.root),
   };
 }
 
@@ -1304,7 +1346,8 @@ async function historyRewind(entry, message) {
     { sha: message.sha, tip: message.tip ?? null, paths: Array.isArray(message.paths) ? message.paths : null, anyway: message.anyway === true },
     {
       save: () => saveAll(openOn(root)),
-      onStep: (step, state, detail) => tell(viewers(), 'rewind', { step, state, ...(detail ? { detail } : {}) }),
+      // The page compares paths in the project, never absolute ones.
+      onStep: (step, state, detail) => tell(viewers(), 'rewind', { step, state, ...(detail ? { detail: detail.silent ? { ...detail, silent: history.pagePaths(root, detail.silent) } : detail } : {}) }),
       others: () => presence.others(root, appName),
     },
   );
@@ -1317,12 +1360,15 @@ async function historyRewind(entry, message) {
       const relative = history.relativeTo(root, file);
       return relative !== null && rewound.has(relative);
     });
-    tell(viewers(), 'rewind', { step: 'reload', state: 'done', ...(silent.length ? { detail: { silent } } : {}) });
+    tell(viewers(), 'rewind', { step: 'reload', state: 'done', ...(silent.length ? { detail: { silent: history.pagePaths(root, silent) } } : {}) });
     log(`history: rewound ${root} to ${result.target.slice(0, 10)}: ${result.written.length} written, ${result.removed.length} removed`);
     void watchProjects();
   } else if (result) {
     log(`history: no rewind of ${root}: ${result.same ? 'nothing to change' : `${result.refused}${result.reason || result.detail ? ` (${result.reason ?? result.detail})` : ''}`}`);
   }
+  // To the page, documents by their paths in the project.
+  if (result?.silent) return { ...result, silent: history.pagePaths(root, result.silent) };
+  if (result?.refused === 'other-app') return { ...result, documents: history.pagePaths(root, result.documents) };
   return result;
 }
 
@@ -1346,7 +1392,7 @@ async function answerHistory(entry, message, { open, close }) {
           return project
             ? await history.compare(project, message.sha, {
                 paths: Array.isArray(message.paths) ? message.paths : null,
-                others: () => presence.others(project.root, appName),
+                others: () => pageOthers(project.root),
               })
             : null;
         case undefined:
@@ -1400,7 +1446,8 @@ async function watchProjects() {
         next.tip = await history.recordTip(project);
         if ('tip' in last && next.tip && next.tip !== last.tip) {
           const commits = await history.recordSince(project, last.tip, next.tip);
-          if (commits.length > 0) tell(viewers, 'history', { kind: 'commit', commits });
+          // Each page hears them scoped to its own document.
+          if (commits.length > 0) for (const { contents, entry } of pagesOn(root)) tell([contents], 'history', { kind: 'commit', commits: history.scoped(root, commits, scopeDocument(entry)) });
           for (const commit of commits) {
             if (commit.trigger !== 'rewind-to' || commit.app === appName) continue;
             const paths = (await history.touched(project, commit.sha)).map((file) => path.join(root, ...file.split('/')));
