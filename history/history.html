@@ -9,6 +9,10 @@
       content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'"
     />
     <title>History</title>
+    <script>
+      // Inline, the shell's view over an app's room: decided before the first paint.
+      if (new URLSearchParams(location.search).get('inline') === '1') document.documentElement.classList.add('inline');
+    </script>
     <style>
       /* THE HISTORY WINDOW (Knuth's docs/mockups/history.md, the
          recommended mockup history-recommended.html). The shell's own page,
@@ -35,7 +39,18 @@
          commit, a file at a commit, the rewind's preview and the rewind;
          the page works out cells, values.json names and words from blob
          text. The frame is the suite's: #18181a, a 48px rail of 32px tiles,
-         the room rounded 12px inside one 8px edge. */
+         the room rounded 12px inside one 8px edge.
+
+         INLINE (?inline=1): the same page laid over an app's room, in the
+         document's own window, by the shell (a WebContentsView with a
+         transparent background). The app's bar above it already names the
+         document and its folder, so there is no title strip and no rail of
+         its own: one 44px row at the top of a panel rounded 12px, the zoom,
+         the apps' chips and the paused pill at its left, the rail's tiles
+         and a close tile at its right, and the river and the card below.
+         The body is transparent, so the app's frame shows at the corners.
+         Escape puts the card away, and with no card, the page
+         ({type:'history', action:'close'}). */
       :root {
         --frame: #18181a;
         --frame-ink: #d5d3cf;
@@ -391,6 +406,36 @@
 
       @media (max-width: 980px) { #here { display: none; } #title .meta { display: none; } }
       @media (max-width: 720px) { #zoom button { padding: 0 7px; } }
+
+      /* ---------- inline: a panel over the app's room ---------- */
+      #tools, #close { display: none; }
+      html.inline { --topbar: 44px; --edge: 0px; }
+      /* nothing painted outside the panel: the root's own background is what a body's would
+         propagate to, so the panel is drawn by the body's ::before, never by its background */
+      html.inline, html.inline body { background: transparent; }
+      html.inline body { position: relative; isolation: isolate; }
+      html.inline body::before {
+        content: ''; position: absolute; inset: 0; z-index: -1; border-radius: 12px; background: var(--bg);
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+      }
+      html.inline #rail, html.inline #title { display: none; }
+      html.inline #topbar {
+        padding: 0 7px 0 8px; gap: 6px; -webkit-app-region: no-drag;
+        border-bottom: 1px solid var(--room-line);
+      }
+      html.inline #topbar > * { -webkit-app-region: no-drag; }
+      html.inline #here { display: flex; background: rgba(0, 0, 0, 0.16); }
+      html.inline #here:empty { display: none; }
+      html.inline #zoom, html.inline #rec { background: rgba(0, 0, 0, 0.16); }
+      html.inline #tools { display: flex; align-items: center; gap: 2px; margin-left: auto; flex: 0 0 auto; }
+      html.inline #tools .rb, html.inline #close { width: 30px; height: 30px; border-radius: 8px; }
+      html.inline #tools .rb .i, html.inline #close .i { width: 16px; height: 16px; }
+      html.inline #close { display: inline-flex; margin-left: 2px; flex: 0 0 auto; }
+      html.inline #tools .rule { width: 1px; height: 16px; margin: 0 5px; }
+      html.inline #topbar [data-label]::after { top: calc(100% + 8px); right: 0; }
+      html.inline #room {
+        top: 44px; left: 0; right: 0; bottom: 0; border-radius: 0 0 12px 12px; background: transparent; box-shadow: none;
+      }
     </style>
   </head>
   <body>
@@ -412,6 +457,8 @@
       </div>
       <div id="rec" hidden><i></i><span class="st">paused</span><span class="sep"></span><span class="why2"></span></div>
       <div id="here"></div>
+      <div id="tools"></div>
+      <button class="rb" id="close" type="button" data-label="Close (Esc)" aria-label="Close"><svg class="i" viewBox="0 0 24 24"><line x1="6.5" y1="6.5" x2="17.5" y2="17.5"/><line x1="17.5" y1="6.5" x2="6.5" y2="17.5"/></svg></button>
     </div>
 
     <nav id="rail" aria-label="Toolbar">
@@ -458,6 +505,14 @@
         const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
         const esc = (t) => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         const shell = window.claerbout || null;
+        // Over an app's room (the shell's inline view): the rail's tiles move into the row.
+        const INLINE = document.documentElement.classList.contains('inline');
+        if (INLINE) {
+          const tools = $('#tools');
+          ['rb-branch', 'rb-now', 'rb-start'].forEach((id) => tools.appendChild($('#' + id)));
+          tools.appendChild(Object.assign(document.createElement('div'), { className: 'rule' }));
+          tools.appendChild($('#rb-about'));
+        }
         const ask = (message) => (shell ? shell.request(message).catch((error) => ({ error: String(error && error.message ? error.message : error) })) : Promise.resolve(null));
         window.addEventListener('error', (event) => void ask({ type: 'error', message: `${event.message} (${event.lineno})` }));
         window.addEventListener('unhandledrejection', (event) => void ask({ type: 'error', message: String(event.reason && event.reason.stack ? event.reason.stack : event.reason) }));
@@ -903,6 +958,13 @@
         // it: a name longer than that ends in an ellipsis. Measured with nothing shrinking, in fractions of a pixel: text that
         // overflows its box by less than one still ends in an ellipsis, and cuts the name.
         function fitPath() {
+          if (INLINE) {
+            // No title to keep: only the documents' names give way to their apps' squares.
+            const here = $('#here');
+            here.classList.remove('tight');
+            if (here.scrollWidth > here.clientWidth + 0.5) here.classList.add('tight');
+            return;
+          }
           const title = $('#title'), el = $('#t-path'), par = el.querySelector('.par'), meta = $('#t-meta');
           const full = par ? par.dataset.full : '';
           title.classList.add('fitting');
@@ -1793,6 +1855,16 @@
           if (S.sel) select(null);
           hideToast();
         });
+        // Inline, the page is put away by the shell: its close tile, or Escape with no card open.
+        const closeInline = () => void ask({ type: 'history', action: 'close' });
+        $('#close').addEventListener('click', closeInline);
+        document.addEventListener('keydown', (e) => {
+          if (!INLINE || e.key !== 'Escape' || S.busy) return;
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          if (S.sel || !toast.hidden) { if (S.sel) select(null); hideToast(); }
+          else closeInline();
+        });
         document.addEventListener('keydown', (e) => {
           if (!S.data || S.busy || (e.target && e.target.closest && e.target.closest('input'))) return;
           const picks = S.rows.filter((r) => r.item && PICK.has(r.type));
@@ -1962,7 +2034,7 @@
             'no-git': { main: false, title: 'No git on this Mac', body: `<p>The record is kept with git, and ${esc(app)} found none. On a Mac, the developer tools bring it: <b>xcode-select --install</b> in a terminal, then open the document again.</p>`, foot: 'the record looks for git in the app’s PATH, Homebrew’s folders and /usr/bin' },
             waiting: { main: users.length > 0, title: 'Waiting to begin', body: `<p><b>${esc(g && g.project ? g.project.name : 'This project')}</b> has no record yet, and ${esc((g && g.reason) || 'git is at work')}, so its first commit waits. It lands when that ends${users.length ? ', beside your branch, tied to it wherever they hold the same files' : ''}.</p>${users.length ? `<ul class="ucs">${users.map((u) => `<li><span class="t">${esc(dayInfo(dayKey(Date.parse(u.time))).short)}</span><span class="m">${esc(u.subject)}</span></li>`).join('')}</ul>` : ''}`, foot: `${esc(g && g.project ? g.project.branch : 'claerbout-autosave')}: no commits yet · paused while git is at work` },
             begins: { main: false, title: 'The record begins', body: `<p><b>${esc(g && g.project ? g.project.name : 'This project')}</b> has no record commit yet. The first lands when a window moves onto the project, then every cell run and every minute something changes.</p>`, foot: `${esc(g && g.project ? g.project.branch : 'claerbout-autosave')}: no commits yet` },
-            error: { main: false, title: 'The history could not be read', body: `<p>${esc((g && g.error) || 'The shell did not answer.')}</p><p>The record itself is untouched; the log has more.</p>`, foot: shell ? 'View › Reload tries again' : 'this page is the shell’s own: open it from the app, View › History…' },
+            error: { main: false, title: 'The history could not be read', body: `<p>${esc((g && g.error) || 'The shell did not answer.')}</p><p>The record itself is untouched; the log has more.</p>`, foot: shell ? (INLINE ? 'closing it and opening it again tries again' : 'View › Reload tries again') : 'this page is the shell’s own: open it from the app, View › History…' },
           }[v] || null;
           const view = V || { main: false, title: 'No record here', body: `<p>${esc(String(v))}</p>`, foot: '' };
           const ys = view.main ? users.map((_u, k) => 40 + k * 55) : [];

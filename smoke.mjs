@@ -341,29 +341,186 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
   if (head.status === 0) await fail(`the autosave record touched the user's HEAD (${head.stdout.trim()})`);
   console.log(`smoke (${NAME}, ${mode}): autosave record: ${subjects.join(' | ')}`);
 
-  // The history view (history.js, history/history.html): the page asks
-  // for its project's History window, which the shell serves itself at
-  // <scheme>://app/_claerbout/history.html; that window's page asks for
-  // the graph and gets the record with its session-open commit, and draws
-  // it. The document page itself is not given the graph.
-  const opened = await page.evaluate(() => window.claerbout.request({ type: 'history' }));
-  if (opened?.opened !== true) await fail(`the history request was answered ${JSON.stringify(opened)}`);
+  // The history view (history.js, history/history.html): the shell's own
+  // page, served at <scheme>://app/_claerbout/history.html, which asks for
+  // its project's graph and gets the record with its session-open commit,
+  // and draws it. The document page itself is not given the graph.
+  const sessionOpen = `${NAME.toLowerCase()}: session open`;
+  const checkGraph = async (graph, where) => {
+    const opening = graph?.commits?.find((commit) => commit.line === 'record' && commit.subject === sessionOpen);
+    if (graph?.state !== 'on' || !opening || opening.trigger !== 'open' || graph.project?.branch !== 'claerbout-autosave') {
+      await fail(`the ${where} History page's graph has no "${sessionOpen}" commit on the record (${JSON.stringify(graph).slice(0, 300)})`);
+    }
+  };
   const refused = await page.evaluate(() => window.claerbout.request({ type: 'history', action: 'graph' }));
   if (refused !== null) await fail(`a document page was given the graph (${JSON.stringify(refused).slice(0, 80)})`);
+  const counted = (graph) => `${graph.commits.length} ${graph.commits.length === 1 ? 'commit' : 'commits'}, tip ${graph.tip.slice(0, 10)}`;
+
+  // Inline, where the config names the page's History tile (`smoke.history`)
+  // and the room it opens over (`smoke.room`): the tile has the shell lay
+  // the History page over the room's box in the same window, as a
+  // WebContentsView at that box in DIP; its page counts the commits; the
+  // view follows the room when the window grows (the page's `bounds`); a
+  // second `open` changes nothing; Escape in it puts it away, destroyed,
+  // and the page hears {kind: 'inline', state: 'closed'}. Then View ›
+  // History… toggles it (the page asked, `toggle`), and the page's reload
+  // takes it away too.
+  if (smoke.history && smoke.room) {
+    const host = await app.browserWindow(page);
+    const windowId = await host.evaluate((win) => win.id);
+    const views = () =>
+      host.evaluate((win) =>
+        win.contentView.children
+          .filter((view) => view.webContents && view.webContents !== win.webContents && !view.webContents.isDestroyed())
+          .map((view) => ({ id: view.webContents.id, url: view.webContents.getURL(), bounds: view.getBounds() })),
+      );
+    const historyView = async (want = true) => {
+      for (let i = 0; i < 60; i++) {
+        const found = (await views()).find((view) => view.url.includes('/_claerbout/history.html?inline=1')) ?? null;
+        if (want ? found : !found && (await views()).length === 0) return found;
+        await page.waitForTimeout(250);
+      }
+      return want ? null : (await views())[0] ?? { url: '?' };
+    };
+    const roomInDIP = async () => {
+      const zoom = await host.evaluate((win) => win.webContents.getZoomFactor());
+      const r = await page.evaluate((selector) => {
+        const box = document.querySelector(selector).getBoundingClientRect();
+        return { x: box.left, y: box.top, width: box.width, height: box.height };
+      }, smoke.room);
+      return { x: Math.round(r.x * zoom), y: Math.round(r.y * zoom), width: Math.round(r.width * zoom), height: Math.round(r.height * zoom) };
+    };
+    const same = (a, b) => ['x', 'y', 'width', 'height'].every((key) => Math.abs(a[key] - b[key]) <= 1);
+    const inView = (id, code) => app.evaluate(({ webContents }, [viewId, source]) => webContents.fromId(viewId).executeJavaScript(source), [id, code]);
+    const inlineStates = () => page.evaluate(() => window.__inline);
+    const listen = () =>
+      page.evaluate(() => {
+        window.__inline = [];
+        window.claerbout.on('history', (detail) => {
+          if (detail && detail.kind === 'inline') window.__inline.push(detail.state);
+        });
+      });
+    await listen();
+
+    await page.click(smoke.history);
+    const view = await historyView();
+    if (!view) await fail(`the History tile (${smoke.history}) laid no History view over the room (views: ${JSON.stringify(await views())})`);
+    const room = await roomInDIP();
+    if (!same(view.bounds, room)) await fail(`the History view is at ${JSON.stringify(view.bounds)}, not the room's ${JSON.stringify(room)}`);
+    if (!(await inlineStates()).includes('open')) await fail(`the page did not hear the view open (${JSON.stringify(await inlineStates())})`);
+    const graph = await inView(view.id, "window.claerbout.request({ type: 'history', action: 'graph' })");
+    await checkGraph(graph, 'inline');
+    let drawn = false;
+    for (let i = 0; i < 60 && !drawn; i++) {
+      drawn = await inView(view.id, "!!document.querySelector('#rows .row.t-open')");
+      if (!drawn) await page.waitForTimeout(250);
+    }
+    if (!drawn) await fail('the inline History page drew no session-open node');
+    const layout = await inView(
+      view.id,
+      "({ inline: document.documentElement.classList.contains('inline'), title: getComputedStyle(document.getElementById('title')).display, rail: getComputedStyle(document.getElementById('rail')).display, close: getComputedStyle(document.getElementById('close')).display, row: document.getElementById('topbar').getBoundingClientRect().height })",
+    );
+    if (!layout.inline || layout.title !== 'none' || layout.rail !== 'none' || layout.close === 'none' || layout.row !== 44) {
+      await fail(`the inline History page is not laid out inline (${JSON.stringify(layout)})`);
+    }
+    console.log(`smoke (${NAME}, ${mode}): history: ${counted(graph)}, inline at ${view.bounds.x},${view.bounds.y} ${view.bounds.width}×${view.bounds.height}`);
+
+    // A picture of the window with the view over its room, for a person to
+    // look at: CLAERBOUT_SMOKE_SHOTS names the folder.
+    if (process.env.CLAERBOUT_SMOKE_SHOTS) {
+      const shot = path.join(path.resolve(process.env.CLAERBOUT_SMOKE_SHOTS), `${NAME.toLowerCase()}-inline-history.png`);
+      fs.mkdirSync(path.dirname(shot), { recursive: true });
+      const png = await app.evaluate(async ({ BrowserWindow, webContents, nativeImage }, [windowId, viewId, box]) => {
+        const win = BrowserWindow.fromId(windowId);
+        const under = await win.webContents.capturePage();
+        const over = await webContents.fromId(viewId).capturePage();
+        const scale = under.getSize().width / win.getContentSize()[0];
+        const { width, height } = under.getSize(scale);
+        const base = Buffer.from(under.toBitmap({ scaleFactor: scale }));
+        const top = over.toBitmap({ scaleFactor: scale });
+        const ow = over.getSize(scale).width, oh = over.getSize(scale).height;
+        const ox = Math.round(box.x * scale), oy = Math.round(box.y * scale);
+        for (let y = 0; y < oh && oy + y < height; y++) {
+          for (let x = 0; x < ow && ox + x < width; x++) {
+            const s = (y * ow + x) * 4, d = ((oy + y) * width + ox + x) * 4, a = top[s + 3] / 255;
+            for (let c = 0; c < 3; c++) base[d + c] = Math.round(top[s + c] + base[d + c] * (1 - a));
+          }
+        }
+        return nativeImage.createFromBitmap(base, { width, height, scaleFactor: scale }).toPNG().toString('base64');
+      }, [windowId, view.id, view.bounds]);
+      fs.writeFileSync(shot, Buffer.from(png, 'base64'));
+      console.log(`smoke (${NAME}, ${mode}): history: the window with the view over its room, ${shot}`);
+    }
+
+    // The room moves with the window, by the page's `bounds`.
+    await host.evaluate((win) => {
+      const [width, height] = win.getContentSize();
+      win.setContentSize(width + 80, height + 60);
+    });
+    let moved = null;
+    for (let i = 0; i < 40; i++) {
+      moved = await historyView();
+      if (moved && same(moved.bounds, await roomInDIP()) && !same(moved.bounds, view.bounds)) break;
+      await page.waitForTimeout(125);
+    }
+    if (!moved || !same(moved.bounds, await roomInDIP()) || same(moved.bounds, view.bounds)) {
+      await fail(`after the window grew the History view is at ${JSON.stringify(moved?.bounds)}, not the room's ${JSON.stringify(await roomInDIP())}`);
+    }
+    const again = await page.evaluate(async (selector) => {
+      const box = document.querySelector(selector).getBoundingClientRect();
+      return window.claerbout.request({ type: 'history', action: 'open', inline: { x: box.left, y: box.top, width: box.width, height: box.height } });
+    }, smoke.room);
+    if (again?.opened !== true || again.inline !== true || (await views()).length !== 1) await fail(`a second open was answered ${JSON.stringify(again)} with ${(await views()).length} views`);
+
+    // Escape in the view puts it away.
+    await app.evaluate(({ webContents }, id) => {
+      const contents = webContents.fromId(id);
+      contents.focus();
+      contents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+      contents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+    }, view.id);
+    const left = await historyView(false);
+    if (left) await fail(`Escape left a view over the room (${left.url})`);
+    for (let i = 0; i < 20 && (await inlineStates()).at(-1) !== 'closed'; i++) await page.waitForTimeout(100);
+    if ((await inlineStates()).at(-1) !== 'closed') await fail(`after Escape the page heard ${JSON.stringify(await inlineStates())}, not {kind: 'inline', state: 'closed'}`);
+    const leaked = () => app.evaluate(({ webContents }) => webContents.getAllWebContents().filter((contents) => contents.getURL().includes('history.html?inline=1')).length);
+    if ((await leaked()) !== 0) await fail('the inline History page outlived its view');
+
+    // View › History… toggles it in a document window, and the page's
+    // reload takes it away.
+    const menuHistory = () =>
+      app.evaluate(({ BrowserWindow, Menu }, id) => {
+        const win = BrowserWindow.fromId(id);
+        const view = Menu.getApplicationMenu().items.find((item) => item.label === 'View');
+        view.submenu.items.find((item) => item.label === 'History…').click({}, win, win.webContents);
+      }, windowId);
+    await menuHistory();
+    if (!(await historyView())) await fail('View › History… laid no History view over the room');
+    await menuHistory();
+    if (await historyView(false)) await fail('View › History… a second time left the History view up');
+    await menuHistory();
+    if (!(await historyView())) await fail('View › History… a third time laid no History view over the room');
+    await page.reload();
+    if (await historyView(false)) await fail("the page's reload left the History view up");
+    if ((await leaked()) !== 0) await fail('the inline History page outlived its window\'s page');
+    if (smoke.ready) await page.waitForSelector(smoke.ready, { timeout: 30_000 });
+    console.log(`smoke (${NAME}, ${mode}): history: inline followed the room, closed on Escape, toggled from View › History…, gone with its page`);
+  }
+
+  // The window form: a `history` request without the room's box opens the
+  // project's History window.
+  const opened = await page.evaluate(() => window.claerbout.request({ type: 'history' }));
+  if (opened?.opened !== true) await fail(`the history request was answered ${JSON.stringify(opened)}`);
   let viewer = null;
   for (let i = 0; i < 60 && !viewer; i++) {
-    viewer = app.windows().find((window) => window.url().includes('/_claerbout/history.html')) ?? null;
+    viewer = app.windows().find((window) => window.url().includes('/_claerbout/history.html') && !window.url().includes('inline=1')) ?? null;
     if (!viewer) await page.waitForTimeout(250);
   }
   if (!viewer) await fail('the history request opened no History window');
-  const graph = await viewer.evaluate(() => window.claerbout.request({ type: 'history', action: 'graph' }));
-  const sessionOpen = `${NAME.toLowerCase()}: session open`;
-  const opening = graph?.commits?.find((commit) => commit.line === 'record' && commit.subject === sessionOpen);
-  if (graph?.state !== 'on' || !opening || opening.trigger !== 'open' || graph.project?.branch !== 'claerbout-autosave') {
-    await fail(`the History page's graph has no "${sessionOpen}" commit on the record (${JSON.stringify(graph).slice(0, 300)})`);
-  }
+  const windowGraph = await viewer.evaluate(() => window.claerbout.request({ type: 'history', action: 'graph' }));
+  await checkGraph(windowGraph, 'window');
   await viewer.waitForSelector('#rows .row.t-open', { timeout: 15_000 }).catch(() => fail('the History page drew no session-open node'));
-  console.log(`smoke (${NAME}, ${mode}): history: ${graph.commits.length} ${graph.commits.length === 1 ? 'commit' : 'commits'}, tip ${graph.tip.slice(0, 10)}`);
+  console.log(`smoke (${NAME}, ${mode}): history${smoke.history ? ' (window)' : ''}: ${counted(windowGraph)}`);
 }
 
 await app.close();

@@ -61,7 +61,8 @@ Scripts an app typically has:
 - `smoke.mjs --config … [browser|uv] [App.app]` launches the app (the
   checkout's, or a built bundle, complete or not) on a document in a
   throwaway config folder and checks what the config's `smoke` section
-  says; see below.
+  says; see below. With `CLAERBOUT_SMOKE_SHOTS` naming a folder, it leaves
+  there a picture of the window with the History page in its room.
 
 ## The config
 
@@ -91,7 +92,7 @@ copies it into the bundle as `app.json`.
 | `site` | The URL the install line downloads from (`https://knuth.tayweid.io`); the zips and `latest.json` live at `<site>/app/`, and the app checks there for updates. |
 | `elsewhere` | A sentence the install line adds when run off macOS. |
 | `autosave` | `true` keeps the autosave record of every project a window is on (below). Knuth and Plass set it; ManimLive does not. |
-| `smoke` | What `smoke.mjs` checks: `document` (name), `text` (contents), `ready` (a selector) and `readyText` (its text, or per mode `{uv, browser}`), `run` (a selector to click), `written` (a file expected beside the document), `json` (keys it must hold) or `contains` (text it must hold), and `autosave` (subjects the document folder's `claerbout-autosave` branch must show by the end, `["knuth: session open", "knuth: cell run [1]"]`). |
+| `smoke` | What `smoke.mjs` checks: `document` (name), `text` (contents), `ready` (a selector) and `readyText` (its text, or per mode `{uv, browser}`), `run` (a selector to click), `written` (a file expected beside the document), `json` (keys it must hold) or `contains` (text it must hold), and `autosave` (subjects the document folder's `claerbout-autosave` branch must show by the end, `["knuth: session open", "knuth: cell run [1]"]`), then `history` and `room` (selectors of the page's History tile and of the room it opens over: the History page is opened in the room and checked there before the window form; without them, only the window form). |
 
 ## What the shell expects of an engine
 
@@ -334,26 +335,54 @@ in a strip, the changed lines, a figure drawn) and what a rewind would
 change against now, file by file, with a box to leave a file out; click the
 node again, or the card's button, to rewind.
 
-- **The window.** The shell's own page, served at
+- **The page.** The shell's own, one copy for every app, served at
   `<scheme>://app/_claerbout/history.html` from the `history/` folder
   beside `main.js` (shipped in `files` and copied by `package.mjs`), checked
   before the app's page folder, so no app's page shadows it or is reached
   through it; the scheme is handled in every mode, so it works beside an
-  engine's pages too. One window per project, titled `History — <project>`
-  (the page's own title never replaces it, so two projects' windows are
-  told apart), with its own remembered size (`historySize`) and a hidden
-  title bar in the suite's frame. It is opened
-  by **View › History…** (⇧⌘H) for the focused window's project, or by a
-  page's `history` request (`{type: 'history'}` or `{type: 'history',
-  action: 'open', at?}`, answered `{opened: true}`), and a second open
-  brings it forward with `history {kind: 'focus', at}`. It is never given a
-  document, so the record opens no session for it. A window with no project
-  still gets one, which says why: `unsaved` (no document path), `refused`
-  (the folder rule, in words), `off` (the config or `<PREFIX>_AUTOSAVE=0`),
-  `no-git`.
-- **Its requests,** answered only from a History window and always for
-  that window's project (the page never names a folder; a document page is
-  answered `null`, and the History page cannot read or write files):
+  engine's pages too. It is never given a document, so the record opens no
+  session for it. Where there is no project it still opens, and says why:
+  `unsaved` (no document path), `refused` (the folder rule, in words),
+  `off` (the config or `<PREFIX>_AUTOSAVE=0`), `no-git`.
+- **In the room.** The app's History tile (in its bar, after the name
+  pill) toggles the page in the room of the document's own window, not a
+  window of its own: the shell lays it over the room's box as a
+  `WebContentsView` with the document windows' own preferences
+  (`win.contentView.addChildView`), at the box the page sends in CSS px
+  times the page's zoom factor, rounded, in DIP, and loads
+  `history.html?inline=1` for that window's project. The document stays
+  loaded underneath, so a rewind's `save` and `reload` reach it as they
+  reach any window on the project; the app's bar stays above. The view's
+  background is transparent: the page draws its own panel, rounded 12 px,
+  and the frame shows at its corners. Inline, the page has no title strip
+  (the app's bar names the document and its folder) and no rail: one 44 px
+  row at the top of the panel holds the zoom (Days, Runs, Every commit),
+  the apps' chips and the paused pill at its left, the rail's tiles and a
+  close tile at its right, and the river and the card are below it, as
+  in the window. Escape puts the card away, and with no card open, the
+  page. A resize of the window moves nothing by itself: the page measures
+  its room (a ResizeObserver, coalesced to a frame, and after a zoom step)
+  and sends `bounds`. The view goes, destroyed with its listeners, when the
+  tile is pressed again, on Escape or the close tile, from View ›
+  History…, and when its window closes or its page navigates (a reload, a
+  page of another app's), and the page hears it each time it comes or
+  goes, so the tile reads pressed exactly while it is up.
+  **View › History…** (⇧⌘H) in a document window does what the tile
+  does: the page is told `history {kind: 'toggle'}` and sends `open` with
+  its room's box, or, with the view up, the shell puts it away itself.
+- **The window.** For a window that is not a document page, and for a
+  page's `history` request without the room's box (`{type: 'history'}` or
+  `{type: 'history', action: 'open', at?}`, answered `{opened: true}`;
+  tests and the fixture keep it): one window per project, titled `History
+  — <project>` (the page's own title never replaces it, so two projects'
+  windows are told apart), with its own remembered size (`historySize`)
+  and a hidden title bar in the suite's frame; a second open brings it
+  forward with `history {kind: 'focus', at}`.
+- **Its requests,** answered only from a History page, in a window or in
+  the room (the shell knows a view by its webContents, and its window and
+  project with it), and always for that page's project (the page never
+  names a folder; a document page is answered `null`, and the History page
+  cannot read or write files):
   - `history {action: 'graph', before?, limit?}`: `{state: 'on' | 'paused'
     | 'none', reason, detail?, project: {root, name, display, branch}, app,
     tip, head: {branch, sha}, branches: [{name, tip, head}], commits, more,
@@ -403,6 +432,9 @@ node again, or the card's button, to rewind.
     checks, git's `read-tree` among them, so the card never offers a rewind
     the click would refuse.
   - `rewind {sha, tip, paths?, anyway?}`: the rewind, below.
+  - `history {action: 'close'}`: the page put away (Escape, its close
+    tile): the view removed and destroyed, or the window closed. Answered
+    `{closed: true}`.
 
   Cells, `values.json` names and words written are the page's, worked out
   from blob text (a percent-format file split on its `# %%` lines); the
@@ -527,8 +559,11 @@ node again, or the card's button, to rewind.
   or HEAD moved), `{kind: 'state', state, reason}` (paused, or recording
   again) and `{kind: 'focus', at}`. Every two seconds the shell looks at
   each project a window of its is on: the record's tip (the loose ref file,
-  read; `git rev-parse` for a packed one), and with a History window open
-  the branches, HEAD and the guards.
+  read; `git rev-parse` for a packed one), and with a History page open
+  the branches, HEAD and the guards. The History events go to every
+  History page on the project, a view's webContents as well as a
+  window's; `save` and `reload` go to the document windows, a view's
+  among them, whose page answers under it.
 - **Two apps on one project.** Each shell writes which documents it has
   open on which project to a folder every Claerbout app shares,
   `~/Library/Application Support/Claerbout/presence/` (one file per app and
@@ -602,10 +637,52 @@ and mtime, is none. A `path` is taken only when it is an absolute path to
 an existing regular file (a refusal is logged once). A page opened by
 path never needs to. Answered `{path}`), `autosave {trigger}` (something
 happened in the page worth a commit on the record, `cell run [4]`; a
-notice), `history` and `history {action: 'open', at?}` (the History window
-for this window's project, made or brought forward; answered `{opened:
-true}`; see "The history view"), `saved {id, ok?, error?}` (the answer to a
-`save` event). A History window has requests of its own (above).
+notice), `history` and `history {action: 'open', at?}` without `inline`
+(the History window for this window's project, made or brought forward;
+answered `{opened: true}`; see "The history view"), `saved {id, ok?,
+error?}` (the answer to a `save` event). A History page has requests of
+its own (above).
+
+The History page in the room, from a document page (see "The history
+view"):
+
+`history {action: 'open', inline: {x, y, width, height}, at?}`: the room's
+box in the page's CSS px (its `getBoundingClientRect()`). The shell lays
+the History page for this window's project over that box of the same
+window, as a view, at the box times the page's zoom factor, rounded, in
+DIP, and answers `{opened: true, inline: true}`; where there is no record
+it opens all the same and its page says why, as the window does. A second
+`open` while it is up answers the same and changes nothing (`at` still
+selects a commit, by `history {kind: 'focus', at}` to the view). A box
+that is not four finite numbers with a width and height is answered
+`{opened: false, error}`. Since 0.2.3; an older shell answers `{opened:
+true}` without `inline` and opens the window, which is how a page tells.
+
+`history {action: 'bounds', inline: {x, y, width, height}}`: the view
+moved to the room's box, in the same terms. The page sends it from a
+ResizeObserver on the room, coalesced to a frame, and after a zoom step;
+the window's own resize moves nothing. Answered `{ok: true}`, and `{ok:
+false}` when no view is up or the box is not one.
+
+`history {action: 'close'}`: the view removed and destroyed, from the page
+(its tile pressed again) or from the History page itself (Escape, its
+close tile). Answered `{closed: true}`, whether or not one was up.
+
+`history {kind: 'inline', state: 'open' | 'closed'}`, an event to the
+document page, whenever the view opens or goes, by either side or because
+the window closed or its page navigated: the tile reads pressed exactly
+while it is up. `history {kind: 'toggle'}`, an event to the document page
+from View › History… (⇧⌘H) while the view is not up: the page does what
+its tile does, so the box is the page's own.
+
+The History page in the room asks what a History window asks (`graph`,
+`commit`, `blob`, `compare`, `rewind`, `close`) and is answered the same,
+for its window's project: the shell knows it by its webContents. Its
+events (`history {kind: 'commit' | 'refs' | 'state' | 'focus'}`, `rewind
+{step, state, detail}`) go to that webContents; a rewind's `save` and
+`reload` go to the document windows, its own among them, whose page
+answers under it. When the window closes or its page navigates, the view
+is destroyed and the shell's listeners on the window go with it.
 
 A request the shell does not know is logged and answered `null`.
 
@@ -614,8 +691,8 @@ Events: `setup {kind: 'progress' | 'failed', text}` on the setup page;
 document now, and answer `saved`) and `reload {id, paths, reason:
 'rewind', to, app?}` (re-read the document from disk if its path is in
 `paths`: a rewind wrote or removed it), which the apps' pages answer from
-a later version of each; and to the History page, `history` and `rewind`
-(above).
+a later version of each; `history {kind: 'inline' | 'toggle'}` (above);
+and to the History page, `history` and `rewind` (above).
 
 ## Testing here
 
@@ -623,9 +700,13 @@ a later version of each; and to the History page, `history` and `rewind`
 temporary repositories), the history view's (`test/history.test.mjs`,
 likewise), the smoke test on `test/fixture`, a page with no Python that
 reads its document through the shell and writes a copy beside it (and, the
-fixture keeping the record, checks its `session open` commit, then opens
-the History window and checks that its page gets a graph with that commit
-and draws it), and then the update test: the fixture built twice under two
+fixture keeping the record, checks its `session open` commit, then
+presses the page's History tile and checks the History view over its room:
+at the room's box, its page given a graph with that commit and drawing it,
+laid out inline, following the room when the window grows, closed by
+Escape with the page told, toggled from View › History… and gone with a
+reload of its page, nothing left behind; then the History window, the
+same graph), and then the update test: the fixture built twice under two
 build ids (`CLAERBOUT_BUILD`), the first installed and updating itself to
 the second from a site folder. `npm run fixture:build` packages it. All
 need macOS.

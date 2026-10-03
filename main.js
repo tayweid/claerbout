@@ -19,7 +19,7 @@
 
 'use strict';
 
-const { app, BrowserWindow, Menu, dialog, ipcMain, net, protocol, screen, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, WebContentsView, dialog, ipcMain, net, protocol, screen, session, shell } = require('electron');
 const { execFile, spawn } = require('node:child_process');
 const { createHash, randomUUID } = require('node:crypto');
 const fs = require('node:fs');
@@ -737,6 +737,19 @@ function titleBar() {
   };
 }
 
+/** What every page of the app runs with: the document windows', the
+ *  History window's and the inline History view's alike. */
+function pagePreferences() {
+  return {
+    preload: path.join(__dirname, 'preload.js'),
+    contextIsolation: true,
+    sandbox: true,
+    nodeIntegration: false,
+    spellcheck: false,
+    scrollBounce: scrollBounce(),
+  };
+}
+
 function openWindow(url, document = null) {
   const last = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows().at(-1);
   const size = readPreferences().windowSize;
@@ -748,14 +761,7 @@ function openWindow(url, document = null) {
     ...titleBar(),
     title: document ? path.basename(document) : NAME,
     show: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      sandbox: true,
-      nodeIntegration: false,
-      spellcheck: false,
-      scrollBounce: scrollBounce(),
-    },
+    webPreferences: pagePreferences(),
   });
   if (last) {
     const [x, y] = last.getPosition();
@@ -934,11 +940,15 @@ async function dropDocument(window, file) {
 
 /** The record as a path (history.js, history/history.html; Knuth's
  *  docs/mockups/history.md): the shell's own page, served at
- *  <scheme>://app/_claerbout/history.html, one window per project, opened
- *  from View › History… or a page's `history` request. Its requests are
- *  answered by answerHistory, always for that window's project: the page
- *  never names a folder, a document page cannot ask for a graph, and the
- *  history page cannot read or write files. */
+ *  <scheme>://app/_claerbout/history.html, one copy for every app. It
+ *  shows in the room of the document's own window, as a view laid over
+ *  the room's box (`history {action: 'open', inline}`, the app's History
+ *  tile; View › History…), or in a window of its own, one per project (a
+ *  `history` request without `inline`; View › History… from a window that
+ *  is not a document page). Its requests are answered by answerHistory,
+ *  always for that view's or window's project: the page never names a
+ *  folder, a document page cannot ask for a graph, and the history page
+ *  cannot read or write files. */
 const history = require('./history.js');
 const appName = NAME.toLowerCase();
 /** Where every Claerbout app says which documents it has open on which
@@ -947,6 +957,10 @@ const appName = NAME.toLowerCase();
 const presence = history.presence(process.env.CLAERBOUT_PRESENCE_DIR || path.join(app.getPath('appData'), 'Claerbout', 'presence'));
 /** History window → {key, root, reason, detail, document}. */
 const historyWindows = new Map();
+/** Document window → its inline History view: {view, contents, origin,
+ *  css (the room's last box, CSS px), detach, and the target's root,
+ *  reason, detail and document once known}. */
+const historyViews = new Map();
 /** Ties, cached by sha for the launch: root → Map. */
 const ties = new Map();
 /** How long a document page has to answer `save` before a rewind goes on
@@ -963,13 +977,21 @@ function openOn(root) {
   return [...autosave.windows].filter(([window, on]) => on === root && !window.isDestroyed()).map(([window]) => window);
 }
 
-/** The History windows on a project. */
+/** The History pages on a project, as webContents: its History windows'
+ *  and the inline views in its document windows. */
 function viewersOf(root) {
-  return [...historyWindows].filter(([window, entry]) => entry.root === root && !window.isDestroyed()).map(([window]) => window);
+  return [
+    ...[...historyWindows].filter(([window, entry]) => entry.root === root && !window.isDestroyed()).map(([window]) => window.webContents),
+    ...[...historyViews.values()].filter((entry) => entry.root === root && !entry.contents.isDestroyed()).map((entry) => entry.contents),
+  ];
 }
 
-function tell(windows, name, detail) {
-  for (const window of windows) if (!window.isDestroyed()) window.webContents.send('claerbout:event', name, detail);
+/** An event to each of some windows or webContents (a view's). */
+function tell(targets, name, detail) {
+  for (const target of targets) {
+    const contents = target.webContents ?? target;
+    if (!target.isDestroyed() && !contents.isDestroyed()) contents.send('claerbout:event', name, detail);
+  }
 }
 
 /** The project a document window is on, or why it has none: 'unsaved'
@@ -1011,14 +1033,7 @@ async function openHistory(source, at = null) {
     ...(isMac ? { titleBarStyle: 'hiddenInset', titleBarOverlay: true, trafficLightPosition: { x: 16, y: 15 } } : {}),
     title: target.root ? `History — ${path.basename(target.root)}` : 'History',
     show: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      sandbox: true,
-      nodeIntegration: false,
-      spellcheck: false,
-      scrollBounce: scrollBounce(),
-    },
+    webPreferences: pagePreferences(),
   });
   if (source && !source.isDestroyed()) {
     const [x, y] = source.getPosition();
@@ -1051,6 +1066,149 @@ async function openHistory(source, at = null) {
   load(window, url.toString());
   log(`history: opened for ${target.root ?? `no record (${target.reason})`}`);
   return window;
+}
+
+/** A document page that has a room for the History view: one of the
+ *  app's document windows, not the setup page or a History window. */
+function isDocumentPage(window) {
+  if (!window || window.isDestroyed() || !documents.has(window) || historyWindows.has(window)) return false;
+  try {
+    return new URL(window.webContents.getURL()).pathname !== `/${config.setupPage}`;
+  } catch {
+    return false;
+  }
+}
+
+/** The room's box a page sends, {x, y, width, height} in its CSS px, or
+ *  null when it is not one. */
+function roomBox(box) {
+  if (!box || typeof box !== 'object') return null;
+  const { x, y, width, height } = box;
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+  return { x, y, width, height };
+}
+
+/** The view over the room: the page's CSS px times its zoom, in DIP. A
+ *  resize of the window moves nothing by itself; the page's `bounds`
+ *  does, from its ResizeObserver on the room. */
+function placeInline(host, entry, css) {
+  entry.css = css;
+  const zoom = host.webContents.getZoomFactor() || 1;
+  entry.view.setBounds({
+    x: Math.round(css.x * zoom),
+    y: Math.round(css.y * zoom),
+    width: Math.round(css.width * zoom),
+    height: Math.round(css.height * zoom),
+  });
+}
+
+/** `history {action: 'open', inline}` from a document page: the History
+ *  page laid over the room of the same window as a WebContentsView, for
+ *  the window's project, with the document still loaded underneath (a
+ *  rewind's save and reload reach it there). Transparent, so the page
+ *  draws its own rounded panel and the frame shows at its corners. A
+ *  second open while it is up changes nothing (`at` still selects). */
+async function openInline(host, css, at = null) {
+  const wanted = typeof at === 'string' && /^[0-9a-f]{4,64}$/.test(at) ? at : null;
+  const up = historyViews.get(host);
+  if (up) {
+    if (wanted && !up.contents.isDestroyed()) up.contents.send('claerbout:event', 'history', { kind: 'focus', at: wanted });
+    return { opened: true, inline: true };
+  }
+  const view = new WebContentsView({ webPreferences: pagePreferences() });
+  view.setBackgroundColor('#00000000');
+  const contents = view.webContents;
+  const entry = { view, contents, origin: appOrigin, css, root: null, reason: null, detail: null, document: null, detach: () => {} };
+  historyViews.set(host, entry);
+  // The page goes nowhere: links out open in the default browser.
+  contents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  contents.on('will-navigate', (event, url) => {
+    event.preventDefault();
+    if (/^https?:/i.test(url)) void shell.openExternal(url);
+  });
+  // Each listener puts away this view only, never one opened since.
+  const gone = () => closeInline(host, entry);
+  contents.on('render-process-gone', gone);
+  contents.once('destroyed', gone);
+  // Focused once drawn, so Escape reaches it.
+  contents.once('did-finish-load', () => {
+    if (historyViews.get(host) === entry && !contents.isDestroyed()) contents.focus();
+  });
+  // Gone with the window, and when its page goes (a reload, another
+  // page): the room it was measured from is no longer there.
+  const hostContents = host.webContents;
+  const onNavigation = (details, ...rest) => {
+    const mainFrame = details?.isMainFrame ?? rest[2];
+    const sameDocument = details?.isSameDocument ?? rest[1];
+    if (mainFrame && !sameDocument) gone();
+  };
+  host.once('closed', gone);
+  hostContents.on('did-start-navigation', onNavigation);
+  hostContents.on('render-process-gone', gone);
+  entry.detach = () => {
+    host.removeListener('closed', gone);
+    if (!hostContents.isDestroyed()) {
+      hostContents.removeListener('did-start-navigation', onNavigation);
+      hostContents.removeListener('render-process-gone', gone);
+    }
+  };
+  host.contentView.addChildView(view);
+  placeInline(host, entry, css);
+  tell([host], 'history', { kind: 'inline', state: 'open' });
+  const target = await historyTarget(host);
+  if (historyViews.get(host) !== entry) return { opened: true, inline: true };
+  Object.assign(entry, target);
+  const url = new URL(`${appOrigin}${SHELL_PREFIX}history.html`);
+  url.searchParams.set('inline', '1');
+  if (wanted) url.searchParams.set('at', wanted);
+  void contents.loadURL(url.toString());
+  log(`history: inline in ${host.getTitle()} for ${target.root ?? `no record (${target.reason})`}`);
+  return { opened: true, inline: true };
+}
+
+/** The inline view put away (the tile, Escape, its close control, View ›
+ *  History…, the window or its page going): removed and destroyed, its
+ *  listeners on the window taken off, and the page told. `which`, when
+ *  given, is the view meant: one already gone is not mistaken for a newer. */
+function closeInline(host, which = null) {
+  const entry = historyViews.get(host);
+  if (!entry || (which && entry !== which)) return false;
+  historyViews.delete(host);
+  entry.detach();
+  const hostAlive = !host.isDestroyed();
+  if (hostAlive) {
+    try {
+      host.contentView.removeChildView(entry.view);
+    } catch {
+      // Already gone with the window's views.
+    }
+  }
+  if (!entry.contents.isDestroyed()) entry.contents.close();
+  if (hostAlive && !host.webContents.isDestroyed()) {
+    tell([host], 'history', { kind: 'inline', state: 'closed' });
+    if (host.isFocused()) host.webContents.focus();
+  }
+  return true;
+}
+
+/** The inline view a webContents is, with its window: {host, entry}. */
+function inlineOf(contents) {
+  for (const [host, entry] of historyViews) if (entry.contents === contents) return { host, entry };
+  return null;
+}
+
+/** View › History… (⇧⌘H): in a document window, the inline view, as the
+ *  page's tile does it (the page is asked, since the room's box is its,
+ *  and the view put away directly when it is up); elsewhere, the window. */
+function historyFromMenu(window) {
+  if (isDocumentPage(window)) {
+    if (!closeInline(window)) window.webContents.send('claerbout:event', 'history', { kind: 'toggle' });
+    return;
+  }
+  void openHistory(window);
 }
 
 /** The project a History window is on, or null. */
@@ -1168,10 +1326,11 @@ async function historyRewind(entry, message) {
   return result;
 }
 
-/** A History window's requests: `history {action: 'graph' | 'commit' |
- *  'blob' | 'compare'}` and `rewind`, for its own project only. */
-async function answerHistory(window, message) {
-  const entry = historyWindows.get(window);
+/** A History page's requests, from its window or its inline view:
+ *  `history {action: 'graph' | 'commit' | 'blob' | 'compare' | 'close'}`
+ *  and `rewind`, for its own project only. `close` puts the page away
+ *  (the view destroyed, the window closed). */
+async function answerHistory(entry, message, { open, close }) {
   const type = message?.type;
   try {
     if (type === 'history') {
@@ -1192,8 +1351,10 @@ async function answerHistory(window, message) {
             : null;
         case undefined:
         case 'open':
-          await openHistory(window);
-          return { opened: true };
+          return await open();
+        case 'close':
+          close();
+          return { closed: true };
         default:
           return null;
       }
@@ -1385,13 +1546,39 @@ async function answer(window, message) {
       // changed, and only when the window is on a project.
       void autosave.notice(window, message.trigger);
       return null;
-    case 'history':
-      // The History window for this window's project, made or brought
-      // forward: {at?} selects a commit. Only `open` (or no action) from a
-      // document page; the graph is the History window's alone.
-      if (message.action !== undefined && message.action !== 'open') return null;
-      await openHistory(window, typeof message.at === 'string' ? message.at : null);
-      return { opened: true };
+    case 'history': {
+      // The History page for this window's project: `open` with the room's
+      // box ({inline: {x, y, width, height}}, CSS px) lays it over the room
+      // of this window, `bounds` moves it there, `close` puts it away;
+      // `open` without a box (or no action) makes or brings forward the
+      // History window. {at?} selects a commit. The graph is the History
+      // page's alone.
+      const at = typeof message.at === 'string' ? message.at : null;
+      switch (message.action) {
+        case 'open':
+          if (message.inline !== undefined) {
+            const css = roomBox(message.inline);
+            if (!css) return { opened: false, error: 'inline must be the room\'s box, {x, y, width, height} in CSS px' };
+            return openInline(window, css, at);
+          }
+        // falls through: the window
+        case undefined:
+          await openHistory(window, at);
+          return { opened: true };
+        case 'bounds': {
+          const entry = historyViews.get(window);
+          const css = roomBox(message.inline);
+          if (!entry || !css) return { ok: false };
+          placeInline(window, entry, css);
+          return { ok: true };
+        }
+        case 'close':
+          closeInline(window);
+          return { closed: true };
+        default:
+          return null;
+      }
+    }
     case 'saved': {
       // A page's answer to `save` (a rewind asked it to write its open
       // document first): {id, ok?, error?}; ok: false refuses the rewind.
@@ -1424,12 +1611,34 @@ async function answer(window, message) {
 }
 
 ipcMain.handle('claerbout:request', async (event, message) => {
+  // An inline History view first: its webContents is not its window's.
+  const inline = inlineOf(event.sender);
+  if (inline) {
+    if (originOf(event.senderFrame?.url ?? '') !== inline.entry.origin) {
+      log(`refused a shell request from ${event.senderFrame?.url ?? 'an unknown frame'}`);
+      return null;
+    }
+    return answerHistory(inline.entry, message, {
+      open: async () => ({ opened: true, inline: true }),
+      // After the answer is on its way: the page asking is the one going.
+      close: () => setTimeout(() => closeInline(inline.host, inline.entry), 0),
+    });
+  }
   const window = BrowserWindow.fromWebContents(event.sender);
   if (!window || !trusted(window, event.senderFrame?.url ?? '')) {
     log(`refused a shell request from ${event.senderFrame?.url ?? 'an unknown frame'}`);
     return null;
   }
-  return historyWindows.has(window) ? answerHistory(window, message) : answer(window, message);
+  if (historyWindows.has(window)) {
+    return answerHistory(historyWindows.get(window), message, {
+      open: async () => {
+        await openHistory(window);
+        return { opened: true };
+      },
+      close: () => setTimeout(() => window.isDestroyed() || window.close(), 0),
+    });
+  }
+  return answer(window, message);
 });
 
 // MARK: - Menu
@@ -1549,6 +1758,10 @@ function zoomTo(window, level) {
   const before = contents.getZoomFactor();
   contents.setZoomLevel(level);
   const after = contents.getZoomFactor();
+  // The History view over the room, at the new zoom until the page's own
+  // `bounds` (a window that follows the zoom keeps the room's CSS box).
+  const inline = historyViews.get(window);
+  if (inline && after !== before) placeInline(window, inline, inline.css);
   if (!config.window?.followZoom || window.isFullScreen() || window.isMaximized() || after === before) return;
   const ratio = after / before;
   const bounds = window.getBounds();
@@ -1622,7 +1835,7 @@ function buildMenu() {
       label: 'View',
       submenu: [
         // ⌘Y is redo in both apps and ⌥⌘H is Hide Others.
-        { label: 'History…', accelerator: 'CmdOrCtrl+Shift+H', click: (_item, window) => void openHistory(window ?? BrowserWindow.getFocusedWindow() ?? null) },
+        { label: 'History…', accelerator: 'CmdOrCtrl+Shift+H', click: (_item, window) => historyFromMenu(window ?? BrowserWindow.getFocusedWindow() ?? null) },
         { type: 'separator' },
         { role: 'reload' },
         { role: 'toggleDevTools' },
