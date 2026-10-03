@@ -162,6 +162,8 @@ page request the install and checks that the bundle on disk becomes the
 site's build, that the app relaunches into it, and that the old bundle is
 cleaned up.
 
+A site build that is not newer than the installed one is left alone and said in the log, not offered: both `latest.json` and the bundle's `package.json` carry `built`, so a build installed from a checkout (an app's `npm run install:local`) stays until the site passes it.
+
 ## The autosave record
 
 With `"autosave": true` in the config, the shell keeps a full, unpruned

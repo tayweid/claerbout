@@ -186,18 +186,38 @@ module.exports = function updater({ app, net, config, env, log }) {
     return parsed;
   }
 
-  /** {state, current, latest, site}: `current` (this build), `available`,
-   *  `development` (a checkout: nothing to replace), `unsupported` (not a
-   *  Mac). Throws when the site cannot be read. */
+  /** Whether the site's build is one to take: a different build, and not
+   *  an older one. The site only ever carries its current deploy, but a
+   *  build installed from a checkout (an app's `npm run install:local`)
+   *  can be newer than the site's: both package.json and latest.json carry
+   *  `built`, and a site build that is not later than this one is left
+   *  alone, said in the log, rather than offered as an update that would
+   *  put the older build back. Without a time on either side, any other
+   *  build is taken, as before. */
+  function newer(found) {
+    if (found.build === current.build) return false;
+    const theirs = Date.parse(found.built ?? '');
+    const ours = Date.parse(current.built ?? '');
+    if (Number.isFinite(theirs) && Number.isFinite(ours) && theirs <= ours) {
+      log(`the site's build ${found.build} (${found.built}) is not newer than this ${current.build} (${current.built}); nothing to take`);
+      return false;
+    }
+    return true;
+  }
+
+  /** {state, current, latest, site}: `current` (this build, or a newer one
+   *  than the site's), `available`, `development` (a checkout: nothing to
+   *  replace), `unsupported` (not a Mac). Throws when the site cannot be
+   *  read. */
   async function check() {
     const found = await latest();
     const state = !bundle
       ? app.isPackaged
         ? 'unsupported'
         : 'development'
-      : found.build === current.build
-        ? 'current'
-        : 'available';
+      : newer(found)
+        ? 'available'
+        : 'current';
     return { state, current, latest: summary(found), site: site() };
   }
 
@@ -220,7 +240,7 @@ module.exports = function updater({ app, net, config, env, log }) {
     const incoming = `${bundle}.incoming`;
     try {
       const found = await latest();
-      if (found.build === current.build) return { state: 'current', current, latest: summary(found) };
+      if (!newer(found)) return { state: 'current', current, latest: summary(found) };
       const zipName = found.zips?.[arch] ?? `${NAME}-${arch}.zip`;
       const zip = path.join(work, zipName);
       progress({ state: 'downloading', text: `Downloading ${NAME}…`, percent: 0 });
