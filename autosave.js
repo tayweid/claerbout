@@ -62,6 +62,15 @@
 // are kept out by pathspec, whatever their case, and a file in untracked/
 // that the list matches is left out of the manifest, name and hash.
 //
+// .claerbout/ignore, at the project's root, is the project's own say over
+// the record: gitignore patterns the record keeps out on top of .gitignore
+// and its own rules, never seen by the project's git. It is read again at
+// every fill and copied into the shell's state folder; git add is given
+// the copy, followed by the user's own excludes file, as core.excludesFile
+// (for that one git only), and what the patterns match among the paths
+// the kept index holds (git's ignore rules never apply to those) leaves it
+// by `ls-files -i -X`, before the add, so a matched file is not hashed.
+//
 // git runs with the sparse-checkout rules off (the record is the working
 // tree; git add refuses paths outside the cone otherwise), with no lazy
 // fetch for a partial clone, and with a PATH that has Homebrew's and the
@@ -135,6 +144,13 @@ const UNTRACKED = 'untracked';
 const IGNORE_LINES = `# Claerbout: large data, caches and scratch, pinned by .claerbout/untracked.json\n/${UNTRACKED}/\n`;
 const MANIFEST = path.join('.claerbout', 'untracked.json');
 const MANIFEST_PATH = MANIFEST.split(path.sep).join('/');
+/** The project's own rules for the record, in gitignore syntax, kept out
+ *  on top of .gitignore and the secrets; the project's git never reads it. */
+const RECORD_IGNORE = path.join('.claerbout', 'ignore');
+const RECORD_IGNORE_PATH = RECORD_IGNORE.split(path.sep).join('/');
+/** A .claerbout/ignore past this is no list of patterns (a render saved
+ *  under its name, say). */
+const RECORD_IGNORE_BYTES = 256 * 1024;
 /** The lock a rewind holds in the working tree's git dir while it writes
  *  (history.js), as git holds index.lock there: {pid, app}. */
 const REWIND_LOCK = 'claerbout-rewind.lock';
@@ -716,6 +732,102 @@ async function writeManifest(root, cacheFile, { unreadable = () => {}, secrets =
   return entries;
 }
 
+// MARK: - .claerbout/ignore
+
+/** A gitignore line without its trailing spaces, which git drops unless a
+ *  backslash quotes them. */
+function trimPattern(line) {
+  let end = line.length;
+  while (end > 0 && line[end - 1] === ' ') {
+    let slashes = 0;
+    for (let i = end - 2; i >= 0 && line[i] === '\\'; i--) slashes += 1;
+    if (slashes % 2 === 1) break;
+    end -= 1;
+  }
+  return line.slice(0, end);
+}
+
+/** Why git could never match a pattern as it is written, or null: a
+ *  backslash at its end, a [ never closed, a ! with nothing after it. */
+function patternFault(pattern) {
+  const body = pattern.startsWith('!') ? pattern.slice(1) : pattern;
+  if (body === '') return 'is a ! with no pattern after it';
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === '\\') {
+      if (i === body.length - 1) return 'ends in a backslash, which git never matches';
+      i += 1;
+    } else if (body[i] === '[') {
+      let j = i + 1;
+      if (body[j] === '!' || body[j] === '^') j += 1;
+      if (body[j] === ']') j += 1;
+      while (j < body.length && body[j] !== ']') j += body[j] === '\\' ? 2 : 1;
+      if (j >= body.length) return 'opens a [ it never closes, so git never matches it';
+      i = j;
+    }
+  }
+  return null;
+}
+
+/** .claerbout/ignore's bytes as git is to be given them: {text, count}
+ *  (UTF-8, its line ends LF, a BOM dropped, ending in a newline; count the
+ *  patterns), or {fault} when it is no list of patterns: not text, or a
+ *  line git could never match, which would keep out nothing of what it
+ *  says. The whole file then, not the rest of it: the record keeps more,
+ *  never less, until it is put right. */
+function parseRecordIgnore(bytes) {
+  if (bytes.includes(0)) return { fault: 'is not text (it holds a NUL byte)' };
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return { fault: 'is not text (it is not UTF-8)' };
+  }
+  text = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
+  let count = 0;
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const pattern = trimPattern(lines[i]);
+    if (pattern === '' || pattern.startsWith('#')) continue;
+    const fault = patternFault(pattern);
+    if (fault) return { fault: `line ${i + 1} (${pattern.slice(0, 80)}) ${fault}` };
+    count += 1;
+  }
+  return { text: text === '' || text.endsWith('\n') ? text : `${text}\n`, count };
+}
+
+/** .claerbout/ignore as it is on the disk now: {missing: true}, {fault},
+ *  or {text, count}. Never read through a link, nor when it is not a file
+ *  or is larger than any list of patterns. */
+async function readRecordIgnore(root) {
+  const kind = async (file) => {
+    try {
+      return await kindOf(file);
+    } catch (error) {
+      return error.code ?? 'unusable';
+    }
+  };
+  const folder = await kind(path.join(root, '.claerbout'));
+  if (folder === 'link') return { fault: 'is reached through a symbolic link (.claerbout), so it is not read' };
+  if (folder !== 'folder') return { missing: true };
+  const file = path.join(root, RECORD_IGNORE);
+  const what = await kind(file);
+  if (what === 'missing') return { missing: true };
+  if (what !== 'file') return { fault: what === 'link' ? 'is a symbolic link, so it is not read' : 'is not a file' };
+  let handle;
+  try {
+    handle = await fsp.open(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const info = await handle.stat();
+    if (!info.isFile()) return { fault: 'is not a file' };
+    if (info.size > RECORD_IGNORE_BYTES) return { fault: `is larger than ${RECORD_IGNORE_BYTES / 1024} KB, so it is no list of patterns` };
+    return parseRecordIgnore(await handle.readFile());
+  } catch (error) {
+    if (error.code === 'ENOENT') return { missing: true };
+    return { fault: `cannot be read (${error.code ?? error.message})` };
+  } finally {
+    await handle?.close();
+  }
+}
+
 // MARK: - One project
 
 /** Pathspecs for the secrets, whatever the case: `exclude,` for git add,
@@ -785,6 +897,20 @@ class Project {
     this.secretsShown = false;
     /** What a shell that died left in the state folder, removed once. */
     this.swept = false;
+    /** .claerbout/ignore as last read ('missing', a fault, or its text's
+     *  hash), so a change is said once; undefined before the first fill. */
+    this.ignoreSeen = undefined;
+    /** Its text and the excludes made from it, as last copied into the
+     *  state folder. */
+    this.ignoreCopied = null;
+    /** The user's own excludes file (core.excludesFile, else git's
+     *  default), asked once. */
+    this.excludesFile = undefined;
+    /** Paths .claerbout/ignore matches that a fill's git add took in all
+     *  the same (a .gitignore negation outranks an excludes file), left out
+     *  of every add by name until the file changes, so none is hashed
+     *  again at every fill. */
+    this.ignoreSlipped = new Set();
   }
 
   git(args, options) {
@@ -1081,6 +1207,94 @@ class Project {
     return this.ignoreCase;
   }
 
+  /** The text of the user's own excludes file (core.excludesFile, else
+   *  git's default, $XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore),
+   *  '' when there is none: what .claerbout/ignore's core.excludesFile
+   *  must carry too, since it replaces the user's for that one git. */
+  async userExcludes() {
+    if (this.excludesFile === undefined) {
+      const asked = await this.git(['config', '--path', '--get', 'core.excludesFile']);
+      const xdg = process.env.XDG_CONFIG_HOME;
+      this.excludesFile =
+        asked.status === 0 && asked.stdout.trim()
+          ? path.resolve(this.root, asked.stdout.trim())
+          : path.join(xdg ? xdg : path.join(os.homedir(), '.config'), 'git', 'ignore');
+    }
+    try {
+      const info = await fsp.stat(this.excludesFile);
+      if (!info.isFile() || info.size > 4 * RECORD_IGNORE_BYTES) return '';
+      return await fsp.readFile(this.excludesFile, 'utf8');
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * .claerbout/ignore, read again at every fill (it is small), so an edit
+   * counts from the next commit; said in the log when it is first seen and
+   * whenever it changes ("keeps 3 patterns out of the record"), or when it
+   * is no list of patterns, which leaves it aside. null when there is none
+   * to apply; else {own, excludes, count}: its patterns copied into the
+   * state folder (`own`, for `ls-files -X`) and the same followed by the
+   * user's own excludes file (`excludes`, for core.excludesFile). git
+   * never reads the working tree's file itself, so never through a link.
+   */
+  async ignoreRules() {
+    const read = await readRecordIgnore(this.root);
+    const key = read.missing ? 'missing' : read.fault ? `fault ${read.fault}` : `text ${createHash('sha256').update(read.text).digest('hex')}`;
+    if (key !== this.ignoreSeen) {
+      if (read.fault) this.log(`autosave: ${RECORD_IGNORE_PATH} ${read.fault}; the record leaves it aside until it is put right (${this.root})`);
+      else if (!read.missing) this.log(`autosave: ${RECORD_IGNORE_PATH} keeps ${read.count} ${read.count === 1 ? 'pattern' : 'patterns'} out of the record (${this.root})`);
+      else if (this.ignoreSeen !== undefined) this.log(`autosave: ${RECORD_IGNORE_PATH} is gone; the record keeps out what .gitignore and the secrets list do (${this.root})`);
+      this.ignoreSeen = key;
+      this.ignoreSlipped.clear();
+    }
+    if (read.missing || read.fault) return null;
+    const theirs = await this.userExcludes();
+    const merged = theirs ? `${read.text}${theirs}${theirs.endsWith('\n') ? '' : '\n'}` : read.text;
+    const own = path.join(this.stateDir, 'record-ignore');
+    const excludes = path.join(this.stateDir, 'record-excludes');
+    if (this.ignoreCopied !== `${read.text}\0${merged}` || !fs.existsSync(own) || !fs.existsSync(excludes)) {
+      await fsp.mkdir(this.stateDir, { recursive: true });
+      await fsp.writeFile(own, read.text);
+      await fsp.writeFile(excludes, merged);
+      this.ignoreCopied = `${read.text}\0${merged}`;
+    }
+    return { own, excludes, count: read.count };
+  }
+
+  /**
+   * Which of these paths .claerbout/ignore keeps out of the record, by its
+   * own patterns alone, as a fill judges a path its kept index holds: each
+   * list (one tree's paths; two trees' may clash, a file in one where the
+   * other has a folder) put in a throwaway index in the state folder, and
+   * `ls-files -i -X` asked. For the history view, whose rewind leaves such
+   * a file alone (history.js). An empty set when there is no file.
+   */
+  async keptOut(lists) {
+    const rules = await this.ignoreRules();
+    const found = new Set();
+    if (!rules) return found;
+    const empty = await this.git(['hash-object', '-t', 'blob', '--stdin']);
+    if (empty.status !== 0) throw new Error(`git hash-object: ${errorLine(empty.stderr) || empty.status}`);
+    for (const paths of lists) {
+      if (paths.length === 0) continue;
+      const index = path.join(this.stateDir, `ignore-${process.pid}-${randomBytes(4).toString('hex')}.index`);
+      try {
+        const env = { GIT_INDEX_FILE: index };
+        const filled = await this.git(['update-index', '-z', '--index-info'], { env, input: paths.map((file) => `100644 ${empty.stdout.trim()}\t${file}\0`).join('') });
+        if (filled.status !== 0) throw new Error(`git update-index: ${errorLine(filled.stderr) || filled.status}`);
+        const listed = await this.git(['ls-files', '-z', '-c', '-i', '-X', rules.own], { env });
+        if (listed.status !== 0) throw new Error(`git ls-files: ${errorLine(listed.stderr) || listed.status}`);
+        for (const file of nulList(listed.stdout)) found.add(file);
+      } finally {
+        await fsp.rm(index, { force: true });
+        await fsp.rm(`${index}.lock`, { force: true });
+      }
+    }
+    return found;
+  }
+
   /**
    * The temporary index made to match the working tree; its tree. `git add
    * -A --ignore-errors` skips what it cannot read (exit 1; each file said
@@ -1095,10 +1309,33 @@ class Project {
    * only, as the line matches: a file named untracked, made after this
    * launch kept the manifest, is the project's and is recorded. A clean
    * filter that cannot run (git-lfs not installed, with
-   * filter.<name>.required) is a Skip, said once.
+   * filter.<name>.required) is a Skip, said once. .claerbout/ignore
+   * (ignoreRules) is git's excludes file for every git here that walks the
+   * working tree, so a new file it matches is never hashed; what it
+   * matches among the paths the kept index holds (a file the project
+   * tracks, recorded before the pattern was written) leaves the index
+   * before the add and again after it; and the file itself always goes in,
+   * as .gitignore does.
    */
   async fill(env) {
     await this.recheckExcluded();
+    const rules = await this.ignoreRules();
+    const config = rules ? ['-c', `core.excludesFile=${rules.excludes}`] : [];
+    const drop = async (paths) => {
+      if (paths.length === 0) return;
+      const removed = await this.git(['update-index', '-z', '--force-remove', '--stdin'], { env, input: `${paths.join('\0')}\0` });
+      if (removed.status !== 0) throw new Error(`git update-index: ${errorLine(removed.stderr) || removed.status}`);
+    };
+    // What .claerbout/ignore matches among the paths the kept index holds,
+    // by its own patterns alone: git's ignore rules never apply to a path
+    // an index holds, so git add would hash it again at every change.
+    const keptOut = async () => {
+      if (!rules) return [];
+      const listed = await this.git(['ls-files', '-z', '-c', '-i', '-X', rules.own], { env });
+      if (listed.status !== 0) throw new Error(`git ls-files: ${errorLine(listed.stderr) || listed.status}`);
+      return nulList(listed.stdout);
+    };
+    await drop(await keptOut());
     // The top untracked/ folder as a pathspec, `exclude,` for git add, '' to
     // match it; the trailing slash keeps a file of that name out of it.
     const icase = this.manifest && (await this.caseless()) ? ',icase' : '';
@@ -1106,6 +1343,7 @@ class Project {
     const add = () =>
       this.git(
         [
+          ...config,
           'add',
           '-A',
           '--ignore-errors',
@@ -1114,6 +1352,7 @@ class Project {
           ...secretPathspecs('exclude,'),
           ...own('exclude,'),
           ...[...this.excluded].map((entry) => `:(exclude,literal)${entry}`),
+          ...[...this.ignoreSlipped].map((entry) => `:(exclude,literal)${entry}`),
         ],
         { env },
       );
@@ -1148,23 +1387,34 @@ class Project {
       throw new Error(`git add: ${errorLine(added.stderr) || added.status}`);
     }
     // What the kept index has that the record must not: ignored now, a
-    // secret, inside untracked/ (while the manifest is kept), or inside a
-    // nested repository left out.
-    const ignored = await this.git(['ls-files', '-z', '-c', '-i', '--exclude-standard'], { env });
+    // secret, inside untracked/ (while the manifest is kept), inside a
+    // nested repository left out, or matched by .claerbout/ignore all the
+    // same (a .gitignore negation outranks an excludes file: such a path is
+    // left out of every add by name from now on).
+    const ignored = await this.git([...config, 'ls-files', '-z', '-c', '-i', '--exclude-standard'], { env });
     if (ignored.status !== 0) throw new Error(`git ls-files: ${errorLine(ignored.stderr) || ignored.status}`);
     const matched = await this.git(
       ['ls-files', '-z', '-c', '--', ...secretPathspecs(''), ...own(''), ...[...this.excluded].map((entry) => `:(literal)${entry}`)],
       { env },
     );
     if (matched.status !== 0) throw new Error(`git ls-files: ${errorLine(matched.stderr) || matched.status}`);
-    const drop = [...new Set([...nulList(ignored.stdout), ...nulList(matched.stdout)])];
-    if (drop.length > 0) {
-      const removed = await this.git(['update-index', '-z', '--force-remove', '--stdin'], { env, input: `${drop.join('\0')}\0` });
-      if (removed.status !== 0) throw new Error(`git update-index: ${errorLine(removed.stderr) || removed.status}`);
-    }
+    const slipped = await keptOut();
+    for (const file of slipped) this.ignoreSlipped.add(file);
+    await drop([...new Set([...nulList(ignored.stdout), ...nulList(matched.stdout), ...slipped])]);
     // The manifest is what keeps untracked/ inside the track, and the
-    // .gitignore says what the record leaves out: both always go in.
-    const forced = [...(this.manifest ? [MANIFEST_PATH] : []), '.gitignore'].filter((file) => fs.existsSync(path.join(this.root, file)));
+    // .gitignore and .claerbout/ignore say what the record leaves out: all
+    // three always go in.
+    const isFile = (file) => {
+      try {
+        return fs.lstatSync(path.join(this.root, file)).isFile();
+      } catch {
+        return false;
+      }
+    };
+    const forced = [
+      ...[...(this.manifest ? [MANIFEST_PATH] : []), '.gitignore'].filter((file) => fs.existsSync(path.join(this.root, file))),
+      ...[RECORD_IGNORE_PATH].filter(isFile),
+    ];
     if (forced.length > 0) {
       const forcedAdd = filtered(await this.git(['add', '-f', '--', ...forced.map((file) => `:(literal)${file}`)], { env }));
       if (forcedAdd.status !== 0) throw new Error(`git add -f: ${errorLine(forcedAdd.stderr) || forcedAdd.status}`);
@@ -1174,7 +1424,7 @@ class Project {
       // so a name it catches by mistake (id_map.csv) is seen, and how many
       // files in untracked/ the manifest left out (not their names).
       this.secretsShown = true;
-      const kept = await this.git(['ls-files', '-z', '-o', '--exclude-standard', '--', ...secretPathspecs('')], { env });
+      const kept = await this.git([...config, 'ls-files', '-z', '-o', '--exclude-standard', '--', ...secretPathspecs('')], { env });
       const names = kept.status === 0 ? nulList(kept.stdout) : [];
       const inUntracked = this.manifestSecrets;
       const more = inUntracked > 0 ? `${inUntracked} ${inUntracked === 1 ? 'file' : 'files'} in ${UNTRACKED}/, left out of its manifest` : '';
@@ -1610,6 +1860,7 @@ module.exports = {
   IDENTITY,
   MANIFEST,
   MANIFEST_PATH,
+  RECORD_IGNORE_PATH,
   UNTRACKED,
   IGNORE_LINES,
 };

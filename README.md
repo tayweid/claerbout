@@ -208,8 +208,9 @@ document each window holds; a page only says when something happened.
 - **Plumbing only.** A temporary index (`GIT_INDEX_FILE`, kept between
   commits in the app's state folder, `autosave/<project>/index`, for its
   stat cache, and removed at quit) is filled by `git add -A --ignore-errors`
-  over the working tree, so `.gitignore` applies; entries the ignore rules
-  or the secrets list have come to match since are dropped from it; then
+  over the working tree, so `.gitignore` applies, and `.claerbout/ignore`
+  (below); entries the ignore rules or the secrets list have come to match
+  since are dropped from it; then
   `write-tree`, `commit-tree` with the branch's tip as parent, and
   `update-ref --no-deref` as a compare-and-swap. Every git it runs has
   `core.splitIndex`, `core.fsmonitor` and the add advice off, so nothing
@@ -306,6 +307,35 @@ document each window holds; a page only says when something happened.
   `id_*` also catches `id_map.csv`, and `*.key` a Keynote deck, so the log
   names what the list kept out of a project, once per launch, and such a
   catch is seen.
+- **`.claerbout/ignore`**, at the project's root, is the project's own say
+  over the record: patterns in `.gitignore`'s syntax (negations, `**`,
+  anchored and folder patterns as git reads them) that the record keeps out
+  on top of `.gitignore`, the secrets list and `untracked/`, while the
+  project's own git never sees them. For files git tracks because they are
+  posted, but whose every re-render the record need not keep: `*.mp4`
+  keeps a course's rendered videos in the user's index and commits and out
+  of the record's tree. It is read again at every fill (it is small), so an
+  edit counts from the next commit, and copied into the app's state folder,
+  where git reads it, never through a link: it is the excludes file
+  (`-c core.excludesFile`, followed by the user's own, which still
+  applies) of the record's `git add -A` alone, so a new file it matches is
+  never hashed, and what it matches among the paths the kept index holds
+  (a tracked file recorded before the pattern was written: git's ignore
+  rules never apply to a path an index holds) leaves the index by `git
+  ls-files -i -X` before the add, so a re-render is not hashed on the way
+  out either. A path the project's own `.gitignore` takes back with a
+  negation (`!posted.mp4`, which outranks an excludes file) is dropped
+  after the add and left out of every add by name from then on. The file
+  itself is always recorded, as `.gitignore` is, and may be tracked by the
+  project so it travels. The log says how many patterns it keeps out when
+  it is first seen and whenever it changes ("autosave: .claerbout/ignore
+  keeps 3 patterns out of the record"), and when it goes. One that is no
+  list of patterns (not text, a link, past 256 KB, or a line git could
+  never match, such as a `[` never closed or a trailing backslash) is
+  named in the log and left aside whole until it is put right: the record
+  keeps more, never less. A rewind never writes or removes a file it keeps
+  out, nor the file itself, and the card names each ("kept out by
+  .claerbout/ignore"; "the record's own rules, left as they are").
 - **The log** gets one line per commit (`autosave: knuth: cell run [4] →
   <hash> (<project>)`), and one when a repository is initialised, when
   `.gitignore` gains `/untracked/`, when a folder is refused, and when a
@@ -500,7 +530,10 @@ node again, or the card's button, to rewind.
      or a file where the target has a folder); a file the target holds
      under the name `untracked`, which the record keeps for its folder; and
      whatever the target holds in a folder named `.gitignore` (git would
-     read no `.gitignore` then, and `untracked/` would lose its line). Left
+     read no `.gitignore` then, and `untracked/` would lose its line); a
+     file `.claerbout/ignore` keeps out of the record, on either side
+     ("kept out by .claerbout/ignore"), and that file itself, so a rewind
+     to a day before the rules never lets the next render in. Left
      alone always: `untracked/` and `.claerbout/untracked.json`, compared as
      the volume compares names (`Untracked/` is `untracked/` on a Mac's
      volume, which ignores case). Every removal and every write walks from
@@ -601,7 +634,8 @@ time on a working tree, with another app's commit, rewind and card waiting
 on it, and a lock whose holder is gone taken over; the new `.gitignore`
 made in the state folder, never seen in the working tree or `git status`;
 a file named `untracked`, and a folder named `.gitignore`, in a target,
-left alone and named on the card and in the rewind; another app
+left alone and named on the card and in the rewind, and so a file
+`.claerbout/ignore` keeps out, and the file itself; another app
 committing whenever `.gitignore` lacks the line during two rewinds, which
 never happens, and no record commit holding `untracked/`; `Untracked/`
 on a volume that ignores case; folders replaced by links during the

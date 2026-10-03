@@ -18,7 +18,11 @@
 // named untracked deeper down stays the user's; and from the history view's
 // third pass: untracked/ stays out of a fill while .gitignore lacks the line,
 // but a file named untracked made later is recorded; the manifest is made in
-// the state folder; and what a shell that died left there goes.
+// the state folder; and what a shell that died left there goes; and
+// .claerbout/ignore: a tracked file it matches is out of the record and in
+// the user's index and HEAD, never hashed; a pattern written mid-session
+// counts at the next fill; a negation, a .gitignore negation, a malformed
+// file, and the user's own excludes file beside it.
 // Everything lives under os.tmpdir(); the user's git configuration is kept
 // out (GIT_CONFIG_GLOBAL points at an empty file), so the fallback
 // identity is what a bare machine gets.
@@ -947,6 +951,131 @@ test('the kept index: kept between commits, and a file the ignore rules now matc
   fs.rmSync(path.join(dir, 'doc.py'));
   assert.equal((await project.commit('timer')).committed, true);
   assert.ok(!tree(dir).includes('doc.py'), 'a deleted file leaves the record');
+});
+
+/** A project whose user tracks notes.md and a rendered video.mp4 on main. */
+async function courseAt(name) {
+  const dir = folder(name);
+  fs.writeFileSync(path.join(dir, 'notes.md'), '# Week 1\n');
+  fs.writeFileSync(path.join(dir, 'video.mp4'), 'render 1');
+  const project = await projectAt(dir);
+  sh(dir, 'add', 'notes.md', 'video.mp4');
+  sh(dir, ...as, 'commit', '-q', '-m', 'Week 1, posted');
+  return { dir, project };
+}
+/** Whether git keeps an object for these bytes in the repository. */
+const stored = (dir, text) => {
+  const object = execFileSync(binary, ['hash-object', '--stdin'], { cwd: dir, input: text, encoding: 'utf8' }).trim();
+  return spawnSync(binary, ['cat-file', '-e', object], { cwd: dir }).status === 0;
+};
+
+test('.claerbout/ignore: a tracked file it matches is out of the record, in the user\'s index and HEAD still, and a re-render is never hashed', async () => {
+  const { dir, project } = await courseAt('record-ignore');
+  fs.mkdirSync(path.join(dir, '.claerbout'));
+  fs.writeFileSync(path.join(dir, '.claerbout', 'ignore'), '# rendered, posted, tracked by git\n*.mp4\n');
+  sh(dir, 'add', '.claerbout/ignore');
+  sh(dir, ...as, 'commit', '-q', '-m', 'The record keeps renders out');
+  const head = sh(dir, 'rev-parse', 'HEAD');
+  const index = sh(dir, 'ls-files', '--stage');
+  const before = lines.length;
+  assert.equal((await project.commit('session open')).committed, true);
+  const recorded = tree(dir);
+  assert.ok(!recorded.includes('video.mp4'), 'the render is out of the record');
+  assert.ok(recorded.includes('notes.md'));
+  assert.ok(recorded.includes('.claerbout/ignore'), 'the rules travel with the record');
+  assert.equal(sh(dir, 'rev-parse', 'HEAD'), head);
+  assert.equal(sh(dir, 'ls-files', '--stage'), index, "the user's index still holds the render");
+  assert.ok(sh(dir, 'ls-tree', '--name-only', 'HEAD').split('\n').includes('video.mp4'));
+  assert.equal(spawnSync(binary, ['check-ignore', '-q', '--no-index', 'video.mp4'], { cwd: dir }).status, 1, "the project's git never sees the rules");
+  assert.equal(sh(dir, 'status', '--porcelain', '--', 'video.mp4', '.claerbout/ignore'), '');
+  fs.writeFileSync(path.join(dir, 'video.mp4'), 'render 2');
+  fs.writeFileSync(path.join(dir, 'notes.md'), '# Week 1, again\n');
+  assert.equal((await project.commit('timer')).committed, true);
+  assert.ok(!tree(dir).includes('video.mp4'));
+  assert.ok(!stored(dir, 'render 2'), 'the re-render was never hashed into the repository');
+  assert.equal(sh(dir, 'status', '--porcelain', '--', 'video.mp4'), 'M video.mp4', 'the user sees the re-render as ever');
+  assert.equal(lines.slice(before).filter((line) => line.includes('.claerbout/ignore keeps 1 pattern out of the record')).length, 1, 'said once');
+});
+
+test('.claerbout/ignore: a pattern written mid-session counts from the next fill, and an edit is said again', async () => {
+  const { dir, project } = await courseAt('record-ignore-later');
+  fs.writeFileSync(path.join(dir, 'lecture.mov'), 'take 1');
+  assert.equal((await project.commit('session open')).committed, true);
+  assert.ok(tree(dir).includes('video.mp4'), 'no rules yet: the render is recorded');
+  fs.mkdirSync(path.join(dir, '.claerbout'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claerbout', 'ignore'), '*.mp4\n');
+  fs.writeFileSync(path.join(dir, 'video.mp4'), 'render 2');
+  assert.equal((await project.commit('timer')).committed, true);
+  assert.ok(!tree(dir).includes('video.mp4'), 'the kept index let it go');
+  assert.ok(!stored(dir, 'render 2'), 'and the re-render was not hashed on the way out');
+  assert.ok(tree(dir).includes('lecture.mov'));
+  assert.equal(lines.filter((line) => line.includes('.claerbout/ignore keeps 1 pattern out of the record') && line.includes(dir)).length, 1);
+  fs.appendFileSync(path.join(dir, '.claerbout', 'ignore'), '*.mov\n');
+  assert.equal((await project.commit('timer')).committed, true);
+  assert.ok(!tree(dir).includes('lecture.mov'));
+  assert.ok(lines.some((line) => line.includes('.claerbout/ignore keeps 2 patterns out of the record') && line.includes(dir)));
+  fs.rmSync(path.join(dir, '.claerbout', 'ignore'));
+  fs.writeFileSync(path.join(dir, 'video.mp4'), 'render 3');
+  assert.equal((await project.commit('timer')).committed, true);
+  assert.ok(tree(dir).includes('video.mp4'), 'the file gone, the render is recorded again');
+  assert.ok(lines.some((line) => line.includes('.claerbout/ignore is gone') && line.includes(dir)));
+});
+
+test('.claerbout/ignore: a negation keeps a file in, and a .gitignore negation does not let a matched file in', async () => {
+  const { dir, project } = await courseAt('record-ignore-negation');
+  fs.writeFileSync(path.join(dir, 'keep.mp4'), 'the trailer');
+  fs.writeFileSync(path.join(dir, 'posted.mp4'), 'cut 1');
+  fs.writeFileSync(path.join(dir, '.gitignore'), '!posted.mp4\n');
+  fs.mkdirSync(path.join(dir, '.claerbout'));
+  fs.writeFileSync(path.join(dir, '.claerbout', 'ignore'), '*.mp4\n!keep.mp4\n');
+  assert.equal((await project.commit('session open')).committed, true);
+  let recorded = tree(dir);
+  assert.ok(recorded.includes('keep.mp4'), '!keep.mp4 keeps it in');
+  assert.ok(!recorded.includes('video.mp4'));
+  assert.ok(!recorded.includes('posted.mp4'), "the project's own negation outranks an excludes file, and the record drops it all the same");
+  fs.writeFileSync(path.join(dir, 'posted.mp4'), 'cut 2');
+  assert.equal((await project.commit('timer')).skipped, 'unchanged');
+  assert.ok(!stored(dir, 'cut 2'), 'and leaves it out of the add from then on: never hashed again');
+  recorded = tree(dir);
+  assert.ok(!recorded.includes('posted.mp4'));
+});
+
+test('.claerbout/ignore that is no list of patterns is said in the log and left aside; put right, it counts', async () => {
+  const { dir, project } = await courseAt('record-ignore-malformed');
+  fs.mkdirSync(path.join(dir, '.claerbout'));
+  fs.writeFileSync(path.join(dir, '.claerbout', 'ignore'), '*.mp4\nrenders/[abc\n');
+  assert.equal((await project.commit('session open')).committed, true);
+  assert.ok(tree(dir).includes('video.mp4'), 'left aside: the record keeps more, never less');
+  assert.ok(lines.some((line) => line.includes('.claerbout/ignore line 2 (renders/[abc) opens a [ it never closes') && line.includes('leaves it aside') && line.includes(dir)));
+  const said = lines.length;
+  fs.writeFileSync(path.join(dir, 'notes.md'), '# Week 1, again\n');
+  await project.commit('timer');
+  assert.ok(!lines.slice(said).some((line) => line.includes('.claerbout/ignore')), 'said once');
+  fs.writeFileSync(path.join(dir, '.claerbout', 'ignore'), Buffer.from([0x2a, 0x2e, 0x6d, 0x70, 0x34, 0x0a, 0x00, 0xff]));
+  await project.commit('timer');
+  assert.ok(lines.some((line) => line.includes('.claerbout/ignore is not text') && line.includes(dir)));
+  assert.ok(tree(dir).includes('video.mp4'));
+  fs.writeFileSync(path.join(dir, '.claerbout', 'ignore'), '*.mp4\r\n');
+  await project.commit('timer');
+  assert.ok(!tree(dir).includes('video.mp4'), 'put right (CRLF and all), it counts at the next fill');
+});
+
+test('.claerbout/ignore stays beside the user\'s own excludes file, which still applies to the record', async () => {
+  const dir = folder('record-ignore-global');
+  const excludes = path.join(work, `excludes-${counter++}`);
+  fs.writeFileSync(excludes, '*.log\n');
+  fs.writeFileSync(path.join(dir, 'notes.md'), '# Week 1\n');
+  fs.writeFileSync(path.join(dir, 'render.log'), 'frame 1\n');
+  fs.writeFileSync(path.join(dir, 'video.mp4'), 'render 1');
+  const project = await projectAt(dir);
+  sh(dir, 'config', 'core.excludesFile', excludes);
+  fs.mkdirSync(path.join(dir, '.claerbout'));
+  fs.writeFileSync(path.join(dir, '.claerbout', 'ignore'), '*.mp4\n!render.log\n');
+  assert.equal((await project.commit('session open')).committed, true);
+  const recorded = tree(dir);
+  assert.ok(!recorded.includes('render.log'), "the user's excludes file still keeps its files out, and a negation here cannot let them in");
+  assert.ok(!recorded.includes('video.mp4'));
+  assert.ok(recorded.includes('notes.md'));
 });
 
 test("nothing is written into the user's .git but objects and the record's branch, even with core.splitIndex", async () => {
