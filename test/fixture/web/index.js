@@ -1,7 +1,8 @@
 // The fixture app's page: exercises the shell protocol a browser-only app
 // uses (read, write, the open dialog) and what smoke.mjs checks: the
-// document's name as the title, a readiness text, and a file written when
-// its "run" control is pressed.
+// document's name as the title, a readiness text, a file written when
+// its "run" control is pressed, and a History tile that opens the shell's
+// History page over its room.
 (function () {
   var shell = window.claerbout;
   var status = document.getElementById('status');
@@ -42,4 +43,37 @@
       if (reply && reply.path) shell.request({ type: 'read', path: reply.path }).then(show);
     });
   });
+
+  // The History tile: the shell lays its History page over the room's box
+  // (CSS px) in this window, moves it when the room's box changes, and
+  // says when it opens or goes, so the tile reads pressed exactly then.
+  // View › History… asks the page to do what the tile does (`toggle`).
+  var tile = document.getElementById('history');
+  var room = document.getElementById('room');
+  var shown = false;
+  function box() {
+    var r = room.getBoundingClientRect();
+    return { x: r.left, y: r.top, width: r.width, height: r.height };
+  }
+  function toggleHistory() {
+    if (shown) shell.request({ type: 'history', action: 'close' });
+    else shell.request({ type: 'history', action: 'open', inline: box() });
+  }
+  tile.addEventListener('click', toggleHistory);
+  shell.on('history', function (detail) {
+    if (!detail) return;
+    if (detail.kind === 'inline') {
+      shown = detail.state === 'open';
+      tile.classList.toggle('on', shown);
+      tile.setAttribute('aria-pressed', String(shown));
+    } else if (detail.kind === 'toggle') toggleHistory();
+  });
+  var frame = 0;
+  new ResizeObserver(function () {
+    if (!shown) return;
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(function () {
+      shell.request({ type: 'history', action: 'bounds', inline: box() });
+    });
+  }).observe(room);
 })();

@@ -23,6 +23,8 @@
     "run": "#save",
     "written": "note.txt.copy",
     "contains": "hello from the fixture",
-    "autosave": ["fixture: session open"]
+    "autosave": ["fixture: session open"],
+    "history": "#history",
+    "room": "#room"
   }
 }
