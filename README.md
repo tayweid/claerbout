@@ -92,7 +92,7 @@ copies it into the bundle as `app.json`.
 | `site` | The URL the install line downloads from (`https://knuth.tayweid.io`); the zips and `latest.json` live at `<site>/app/`, and the app checks there for updates. |
 | `elsewhere` | A sentence the install line adds when run off macOS. |
 | `autosave` | `true` keeps the autosave record of every project a window is on (below). Knuth and Plass set it; ManimLive does not. |
-| `smoke` | What `smoke.mjs` checks: `document` (name), `text` (contents), `ready` (a selector) and `readyText` (its text, or per mode `{uv, browser}`), `run` (a selector to click), `written` (a file expected beside the document), `json` (keys it must hold) or `contains` (text it must hold), and `autosave` (subjects the document folder's `claerbout-autosave` branch must show by the end, `["knuth: session open", "knuth: cell run [1]"]`), then `history` and `room` (selectors of the page's History tile and of the room it opens over: the History page is opened in the room and checked there before the window form; without them, only the window form). |
+| `smoke` | What `smoke.mjs` checks: `document` (name), `text` (contents), `ready` (a selector) and `readyText` (its text, or per mode `{uv, browser}`), `run` (a selector to click), `written` (a file expected beside the document), `json` (keys it must hold) or `contains` (text it must hold), and `autosave` (subjects the document folder's `claerbout-autosave` branch must show by the end, `["knuth: session open", "knuth: cell run [1]"]`), then `history` and `room` (selectors of the page's History tile and of the room it opens over: the History page is opened in the room and checked there before the window form; without them, only the window form). With `run` and `written`, the record is asked to hold the written file, and the window form's card for the session-open commit must offer the rewind that removes it, its fine print speaking of a kernel's memory only where a `.py` or `.ipynb` is open. |
 
 ## What the shell expects of an engine
 
@@ -438,7 +438,11 @@ node again, or the card's button, to rewind.
 
   Cells, `values.json` names and words written are the page's, worked out
   from blob text (a percent-format file split on its `# %%` lines); the
-  shell knows git, not the apps' formats.
+  shell knows git, not the apps' formats. The word on a kernel's memory,
+  which no rewind touches, is the page's too: the card's fine print and the
+  note after a rewind say it only where a kernel runs on the project, a
+  `.py` or `.ipynb` open in a window of this app (`windows`) or another
+  (`others`); Plass's paper alone has none.
 - **The rewind** is a step forward that reproduces an older state, never a
   reset: the record only grows. It runs as one job on the project's queue,
   so the record's timer is dropped meanwhile. Refused first: `{refused:
@@ -706,7 +710,9 @@ at the room's box, its page given a graph with that commit and drawing it,
 laid out inline, following the room when the window grows, closed by
 Escape with the page told, toggled from View › History… and gone with a
 reload of its page, nothing left behind; then the History window, the
-same graph), and then the update test: the fixture built twice under two
-build ids (`CLAERBOUT_BUILD`), the first installed and updating itself to
-the second from a site folder. `npm run fixture:build` packages it. All
-need macOS.
+same graph, and the session-open commit's card, whose rewind's fine print
+says nothing of a kernel's memory with `note.txt` open and says it once
+another app's presence file lists a notebook on the project), and then the
+update test: the fixture built twice under two build ids
+(`CLAERBOUT_BUILD`), the first installed and updating itself to the second
+from a site folder. `npm run fixture:build` packages it. All need macOS.

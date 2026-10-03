@@ -507,6 +507,17 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
     console.log(`smoke (${NAME}, ${mode}): history: inline followed the room, closed on Escape, toggled from View › History…, gone with its page`);
   }
 
+  // Where the run wrote a file, the record is asked to hold it (a notice,
+  // as a page sends after a run; nothing is committed if it already does),
+  // so the session-open commit's card below offers a rewind.
+  const rewinds = Boolean(smoke.run && smoke.written);
+  if (rewinds) {
+    await page.evaluate(() => window.claerbout.request({ type: 'autosave', trigger: 'smoke' }));
+    const holds = () => spawnSync('git', ['-C', folder, 'cat-file', '-e', `claerbout-autosave:${smoke.written}`]).status === 0;
+    for (let i = 0; i < 60 && !holds(); i++) await page.waitForTimeout(250);
+    if (!holds()) await fail(`the autosave record does not hold ${smoke.written} after a notice`);
+  }
+
   // The window form: a `history` request without the room's box opens the
   // project's History window.
   const opened = await page.evaluate(() => window.claerbout.request({ type: 'history' }));
@@ -521,6 +532,36 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
   await checkGraph(windowGraph, 'window');
   await viewer.waitForSelector('#rows .row.t-open', { timeout: 15_000 }).catch(() => fail('the History page drew no session-open node'));
   console.log(`smoke (${NAME}, ${mode}): history${smoke.history ? ' (window)' : ''}: ${counted(windowGraph)}`);
+
+  // The session-open commit's card offers the rewind that removes the
+  // written file, and its fine print speaks of a kernel's memory only where
+  // a kernel runs on the project: a .py or .ipynb open in a window, this
+  // app's (the smoke's document) or another app's (a presence file, which
+  // is written here where the document is not one).
+  if (rewinds) {
+    const finePrint = async () => {
+      await viewer.click('#rows .row.t-open');
+      const fine = await viewer.waitForSelector('#card .rwfine', { timeout: 15_000 }).catch(() => null);
+      if (!fine) await fail(`the session-open commit's card offers no rewind (${((await viewer.textContent('#card')) ?? '').slice(0, 200)})`);
+      return fine.textContent();
+    };
+    const cells = (file) => /\.(py|ipynb)$/i.test(file);
+    const kernel = (text) => text.includes('kernel’s memory');
+    const alone = await finePrint();
+    if (kernel(alone) !== cells(doc)) await fail(`with ${path.basename(doc)} open the card's fine print ${kernel(alone) ? 'speaks' : 'does not speak'} of a kernel's memory: ${alone}`);
+    if (!cells(doc)) {
+      const root = windowGraph.project.root;
+      const other = path.join(env.CLAERBOUT_PRESENCE_DIR, 'smoke-other.json');
+      fs.mkdirSync(path.dirname(other), { recursive: true });
+      fs.writeFileSync(other, JSON.stringify({ app: 'Other', pid: process.pid, root, documents: [path.join(root, 'other.ipynb')] }));
+      await viewer.reload();
+      await viewer.waitForSelector('#rows .row.t-open', { timeout: 15_000 }).catch(() => fail('the reloaded History page drew no session-open node'));
+      const shared = await finePrint();
+      fs.rmSync(other, { force: true });
+      if (!kernel(shared)) await fail(`with another app's other.ipynb open on the project the card's fine print does not speak of a kernel's memory: ${shared}`);
+    }
+    console.log(`smoke (${NAME}, ${mode}): history: the rewind's fine print speaks of a kernel's memory ${cells(doc) ? `with ${path.basename(doc)} open` : `only with another app's notebook open`}`);
+  }
 }
 
 await app.close();

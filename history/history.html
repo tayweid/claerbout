@@ -1470,6 +1470,10 @@
         function rewindLabel(c, on, all) {
           return on === all ? `Rewind to ${when(c)}` : on === 0 ? 'Choose a file to rewind' : `Rewind ${plural(on, 'file')} to ${when(c)}`;
         }
+        // A kernel's memory, which no rewind touches, is there only where a kernel runs on the
+        // project: a window, of this app or another, with a .py or .ipynb open. Plass's paper has none.
+        const kernelOn = (g, others = g.others) =>
+          [...(g.windows || []), ...(others || []).flatMap((o) => o.documents || [])].some((p) => /\.(py|ipynb)$/i.test(p));
         // What the card says that follows the files ticked: another app's document matters only
         // while it is ticked, and of this app's windows, only those whose documents are rewound reload.
         function choiceSay(k, chosen) {
@@ -1487,9 +1491,10 @@
             (reloading.length ? `${esc(listNames(reloading, 2))} ${isAre(reloading)} saved first and ${reloading.length === 1 ? 'reloads' : 'reload'}. ` : '') +
             (untouched.length ? `${esc(listNames(untouched, 2))} ${isAre(untouched)} saved first; ${untouched.length === 1 ? 'it is' : 'they are'} not rewound. ` : '');
           const head = g.head && g.head.branch ? `${esc(g.head.branch)} stays where it is, and ` : '';
+          const kernel = kernelOn(g, k.others || g.others) ? ' A kernel’s memory is not rewound: cells come back stale.' : '';
           return {
             held: heldH,
-            fine: `${windowsSay}Now is recorded first, so this can be undone; ${head}HEAD and the index are not touched (git status lists the rewound files as changed). A kernel’s memory is not rewound: cells come back stale.`,
+            fine: `${windowsSay}Now is recorded first, so this can be undone; ${head}HEAD and the index are not touched (git status lists the rewound files as changed).${kernel}`,
           };
         }
         // A box ticked or unticked: the button, the amber box and the fine print say so at once.
@@ -1677,9 +1682,10 @@
           const parts = [];
           if (reloads.length) parts.push(`${esc(listNames(reloads, 2))} ${reloads.length === 1 ? 'reloads' : 'reload'}`);
           if (reopen.length) parts.push(`${parts.length ? 'reopen' : 'Reopen'} <b>${esc(listNames(reopen, 2))}</b>: ${reopen.length === 1 ? 'its window' : 'their windows'} did not reload`);
-          parts.push(`${parts.length ? 'a' : 'A'} kernel’s memory is not rewound`);
+          if (kernelOn(g)) parts.push(`${parts.length ? 'a' : 'A'} kernel’s memory is not rewound`);
+          const said = parts.length ? ` ${parts.join('; ')}.` : '';
           const skipped = result.skipped && result.skipped.length ? ` ${plural(result.skipped.length, 'file was', 'files were')} left as ${result.skipped.length === 1 ? 'it is' : 'they are'}.` : '';
-          showToast(`<span class="k">↺</span><span>${what}. ${parts.join('; ')}.${skipped}</span><button type="button" data-act="undo">Undo</button>`);
+          showToast(`<span class="k">↺</span><span>${what}.${said}${skipped}</span><button type="button" data-act="undo">Undo</button>`);
         }
         async function undo() {
           const last = S.last;
