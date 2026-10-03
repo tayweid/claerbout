@@ -20,7 +20,9 @@
 // rewind at a time writes a working tree while every other shell's commits
 // wait, the new .gitignore is made in the state folder, and a file named
 // untracked, or a folder named .gitignore, in a commit is left alone and
-// named.
+// named; and for the page opened from a document: the graph scoped to it,
+// and a project reached through a link naming its documents by their paths
+// in it.
 // Everything lives under os.tmpdir(); the user's git configuration is kept
 // out (GIT_CONFIG_GLOBAL points at an empty file).
 import assert from 'node:assert/strict';
@@ -1083,4 +1085,31 @@ test("a graph scoped to one document: each commit's scope, the files changed bes
     return;
   }
   assert.deepEqual(history.scoped(project.root, since, 'Lectures/L1/l1.py').map((commit) => commit.scope), ['document', 'folder']);
+});
+
+test('a project reached through a link: its documents are named by their paths in it, as the card names the files a rewind writes', async () => {
+  const real = folder('linked');
+  const project = await projectAt(real);
+  write(real, 'lectures/l1.py', '# %%\nx = 1\n');
+  const start = (await project.commit('session open')).hash;
+  write(real, 'lectures/l1.py', '# %%\nx = 2\n');
+  await project.commit('cell run [1]');
+  // ~/Projects/week-3 as a link to the folder: the windows' documents are
+  // opened through it, and the root is git's own, never the link.
+  const link = path.join(work, `linked-link-${counter++}`);
+  fs.symlinkSync(real, link);
+  const opened = path.join(link, 'lectures', 'l1.py');
+  assert.ok(!opened.startsWith(`${project.root}/`), 'the document is not under the root as text');
+  const preview = await history.compare(project, start);
+  assert.deepEqual(preview.write.map((entry) => entry.path), ['lectures/l1.py']);
+  // What the page is given matches what the card lists.
+  assert.deepEqual(history.pagePaths(project.root, [opened]), ['lectures/l1.py']);
+  // A root given through the link holds the documents too; a document that
+  // is gone still has its path; one outside the project is left as it is.
+  assert.deepEqual(history.pagePaths(link, [path.join(real, 'lectures', 'l1.py'), path.join(link, 'gone.py'), '/elsewhere/x.py']), ['lectures/l1.py', 'gone.py', '/elsewhere/x.py']);
+  assert.equal(history.relativeTo(link, opened), 'lectures/l1.py');
+  assert.equal(history.relativeTo(project.root, path.join(work, 'outside.py')), null);
+  // A scoped graph for that document, as the shell asks for it.
+  const scopedGraph = await history.graph(project, { document: history.relativeTo(project.root, opened) });
+  assert.deepEqual(scopedGraph.commits.map((commit) => commit.scope), ['document', 'document']);
 });

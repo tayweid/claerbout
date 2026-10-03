@@ -33,7 +33,8 @@
          the commits that changed it are drawn, and the card ticks only its
          files (it and what its runs wrote beside it). The switch beside
          the zoom says so, "This document", and widens it to "Its folder"
-         or "Whole project"; the choice is remembered for the project.
+         or "Whole project" while the page is open; it opens on the
+         document every time.
 
          Click a node and a card opens beside it: what that commit changed,
          then what a rewind would change against now, file by file, with a
@@ -511,8 +512,8 @@
       /* The protocol (claerbout/README.md, "The history view"):
            request {type:'history', action:'graph', before?, limit?}
              → {state:'on'|'paused'|'none', reason, detail?, project, app, tip, head, branches, commits, more, total, windows, others, scope}
-             (scope, for a page opened from a document: {document, folder, choice}, and each commit's scope and beside)
-           request {type:'history', action:'scope', scope:'document'|'folder'|'project'}: remembered for the project
+             (scope, for a page opened from a document: {document, folder}, and each commit's scope and beside;
+              windows and others name documents by their paths in the project, as the record does)
            request {type:'history', action:'commit', sha} → {files:[{path, status, plus, minus, binary, patch?, large?, size?}]}
            request {type:'history', action:'blob', sha, path} → {text} | {binary, size} | {large, size} | {missing}
            request {type:'history', action:'compare', sha, paths?}
@@ -614,7 +615,7 @@
           return { run: 'run', timer: 'timer', open: 'open', close: 'close', 'rewind-from': 'rfrom', 'rewind-to': 'rto' }[c.trigger] || 'note';
         }
         /* ---------- the scope: the document's history, its folder's, or the project's ---------- */
-        // The graph's {document, folder, choice} for a page opened from a document, else null.
+        // The graph's {document, folder} for a page opened from a document, else null.
         const scopeOf = () => (S.graph && S.graph.scope) || null;
         // The scope drawn: "Its folder" is the whole project for a document at the project's top.
         function scopeNow() {
@@ -1453,11 +1454,10 @@
           const off = S.card.off.has(entry.path);
           return `<label class="nr${warn ? ' warn' : ''}${off ? ' off' : ''}"><input type="checkbox"${off ? '' : ' checked'} data-path="${esc(entry.path)}"${disabled}><span class="nb"><span class="fp">${esc(entry.path)}</span>${win}<span class="nn">${esc(note)}</span>${strip}${thumb}</span></label>`;
         }
-        // A document's path inside the project, as the record names it.
-        function relative(file) {
-          const root = S.graph.project ? S.graph.project.root : '';
-          return root && file.startsWith(root + '/') ? file.slice(root.length + 1) : file;
-        }
+        // A document's path inside the project, as the record names it: the shell sends it so,
+        // resolved through any link on the way (a project reached through one), so nothing here
+        // matches an absolute path against the project's root as text.
+        const relative = (file) => String(file);
 
         function cardHTML(c) {
           const g = S.graph;
@@ -2024,11 +2024,10 @@
           else scroll.scrollTop = scroll.scrollHeight;
         }));
         // The scope: the river drawn again with only its commits, the card's boxes ticked afresh,
-        // and the choice remembered for the project. A selected commit outside it is put away.
+        // for as long as the page is open. A selected commit outside it is put away.
         $$('#scope button').forEach((b) => b.addEventListener('click', () => {
           if (!S.data || S.busy || b.dataset.s === S.scope) return;
           S.scope = b.dataset.s;
-          void ask({ type: 'history', action: 'scope', scope: S.scope });
           build();
           const s = S.sel && find(S.sel);
           if (s && !inScope(s)) select(null);
@@ -2058,12 +2057,12 @@
           const atBottom = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 80;
           const g = await ask({ type: 'history', action: 'graph' });
           if (!g || g.error) { showEmpty('error', g); return; }
-          // Opened from a document, or from another one now: the scope it opens on.
+          // Opened from a document, or from another one now: that document's history, every time.
           const doc = g.scope ? g.scope.document : null;
           const another = S.scopeFor !== undefined && S.scopeFor !== doc;
           if (S.scopeFor !== doc) {
             S.scopeFor = doc;
-            S.scope = g.scope && ['document', 'folder', 'project'].includes(g.scope.choice) ? g.scope.choice : 'project';
+            S.scope = g.scope ? 'document' : 'project';
           }
           if (S.graph && keep && S.graph.extra && !another) {
             // Older pages already read stay.

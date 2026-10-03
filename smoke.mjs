@@ -524,8 +524,11 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
   // at the project's top), the river draws fewer commits than the whole
   // project's, and the session-open commit's card ticks the document
   // alone, its button saying so, with the link that ticks every file.
-  // "Whole project" then ticks every file, and is remembered for the
-  // project (preferences.json, `historyScope`).
+  // The temporary folder is reached through a link (/var is /private/var),
+  // so the fine print saying the document is saved first and reloads is the
+  // shell naming documents by their real paths in the project. "Whole
+  // project" then ticks every file; and the view, opened once more, is on
+  // "This document" again: the switch is not remembered.
   if (rewinds && smoke.history && smoke.room) {
     fs.appendFileSync(doc, 'a second line, recorded alone\n');
     await page.evaluate(() => window.claerbout.request({ type: 'autosave', trigger: 'smoke: the document alone' }));
@@ -553,7 +556,7 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
     const scopeRow = () => inPage(id, "({ hidden: document.getElementById('scope').hidden, on: [...document.querySelectorAll('#scope button.on')].map((b) => b.dataset.s), shown: [...document.querySelectorAll('#scope button')].filter((b) => !b.hidden).map((b) => b.dataset.s), picks: document.querySelectorAll('#rows .row.pick').length })");
     const opened = await scopeRow();
     if (opened.hidden || opened.on.join() !== 'document' || opened.shown.join() !== 'document,project') await fail(`the scope switch opened as ${JSON.stringify(opened)}, not "This document" of document and project`);
-    const ticks = () => inPage(id, "({ boxes: Object.fromEntries([...document.querySelectorAll('#card input[data-path]')].map((b) => [b.dataset.path, b.checked])), button: (document.querySelector('#card .rwl') || {}).textContent || '', all: (document.querySelector('#card .lnk[data-act=\"all\"]') || {}).textContent || null })");
+    const ticks = () => inPage(id, "({ boxes: Object.fromEntries([...document.querySelectorAll('#card input[data-path]')].map((b) => [b.dataset.path, b.checked])), button: (document.querySelector('#card .rwl') || {}).textContent || '', all: (document.querySelector('#card .lnk[data-act=\"all\"]') || {}).textContent || null, fine: (document.querySelector('#card .rwfine') || {}).textContent || '' })");
     await inPage(id, "document.querySelector('#rows .row.t-open').click()");
     await until(id, "document.querySelectorAll('#card input[data-path]').length >= 2", 'offered no rewind of two files on the session-open card');
     const name = path.basename(doc);
@@ -562,6 +565,7 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
     if (mine.boxes[name] !== true || others.length === 0 || others.some((file) => mine.boxes[file]) || !mine.button.startsWith('Rewind 1 file') || mine.all !== `all ${others.length + 1} files`) {
       await fail(`under "This document" the card ticks ${JSON.stringify(mine)}, not ${name} alone`);
     }
+    if (!mine.fine.includes(`${name} is saved first and reloads`)) await fail(`with ${name} ticked the fine print does not say it is saved first and reloads: ${mine.fine}`);
     // The view alone, with the card open, for a person to look at.
     if (process.env.CLAERBOUT_SMOKE_SHOTS) {
       const shot = path.join(path.resolve(process.env.CLAERBOUT_SMOKE_SHOTS), `${NAME.toLowerCase()}-inline-history-document.png`);
@@ -577,20 +581,26 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
     if (Object.values(every.boxes).some((ticked) => !ticked) || !every.button.startsWith(`Rewind all ${Object.keys(every.boxes).length} files`) || every.all !== null) {
       await fail(`under "Whole project" the card ticks ${JSON.stringify(every)}, not every file`);
     }
-    const remembered = () => {
-      try {
-        return JSON.parse(fs.readFileSync(path.join(work, 'config', 'preferences.json'), 'utf8')).historyScope ?? {};
-      } catch {
-        return {};
-      }
+    const close = async () => {
+      await inPage(id, "window.claerbout.request({ type: 'history', action: 'close' })");
+      for (let i = 0; i < 40 && (await inlineIds()).length > 0; i++) await page.waitForTimeout(100);
+      if ((await inlineIds()).length > 0) await fail('the scoped History view did not close');
     };
-    for (let i = 0; i < 20 && !Object.values(remembered()).includes('project'); i++) await page.waitForTimeout(100);
-    if (!Object.values(remembered()).includes('project')) await fail(`"Whole project" was not remembered for the project (${JSON.stringify(remembered())})`);
-    await inPage(id, "window.claerbout.request({ type: 'history', action: 'close' })");
-    for (let i = 0; i < 40 && (await inlineIds()).length > 0; i++) await page.waitForTimeout(100);
-    if ((await inlineIds()).length > 0) await fail('the scoped History view did not close');
-    console.log(`smoke (${NAME}, ${mode}): history: opened from ${name}, "This document": ${opened.picks} commits drawn, the card ticks ${name} alone ("${mine.button}", ${mine.all} a click away)`);
-    console.log(`smoke (${NAME}, ${mode}): history: "Whole project": ${whole} commits drawn, every file ticked ("${every.button}"), remembered for the project`);
+    await close();
+    // Opened again: the document's history, whatever was looked at last.
+    await page.click(smoke.history);
+    id = null;
+    for (let i = 0; i < 60 && id === null; i++) {
+      id = (await inlineIds())[0] ?? null;
+      if (id === null) await page.waitForTimeout(250);
+    }
+    if (id === null) await fail('the History tile laid no History view over the room a third time');
+    await until(id, "!!document.querySelector('#rows .row.t-open')", 'drew no session-open node when opened again');
+    const reopened = await scopeRow();
+    if (reopened.on.join() !== 'document') await fail(`opened again, the scope switch is on ${JSON.stringify(reopened.on)}, not "This document"`);
+    await close();
+    console.log(`smoke (${NAME}, ${mode}): history: opened from ${name}, "This document": ${opened.picks} commits drawn, the card ticks ${name} alone ("${mine.button}", ${mine.all} a click away), and says it is saved first and reloads`);
+    console.log(`smoke (${NAME}, ${mode}): history: "Whole project": ${whole} commits drawn, every file ticked ("${every.button}"); opened again, "This document"`);
   }
 
   // The window form: a `history` request without the room's box opens the

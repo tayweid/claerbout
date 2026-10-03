@@ -403,10 +403,10 @@ node again, or the card's button, to rewind.
   the button says the count ("Rewind 1 file to 14:05", "Rewind all 5
   files to 14:05"), and the fine print says why and offers **all N files**,
   one click that ticks the rest. A box ticked by hand stays so while the
-  record moves on; a change of scope ticks afresh. The choice is
-  remembered per project in the app's state folder (`historyScope` in
-  `preferences.json`, beside `historySize`), and the first is "This
-  document". A window opened with no document (View › History… from a
+  record moves on; a change of scope ticks afresh. The switch holds for
+  as long as the page is open and is not remembered: the page opens on
+  "This document" every time, so a look at the whole project from one
+  lecture never changes what the next lecture opens on. A window opened with no document (View › History… from a
   window that is not a document page) has no switch: the whole project.
   The ticks are the partial rewind's `paths`, so nothing of the rewind's
   checks changes.
@@ -419,9 +419,16 @@ node again, or the card's button, to rewind.
     | 'none', reason, detail?, project: {root, name, display, branch}, app,
     tip, head: {branch, sha}, branches: [{name, tip, head}], commits, more,
     total, windows, others, scope}`, `scope` for a page opened from a
-    document `{document, folder, choice}` (the document's path in the
-    project, its folder's, `''` at the top, and the scope to open on), else
-    null. The commits come from one `git log
+    document `{document, folder}` (the document's path in the project and
+    its folder's, `''` at the top), else null. `windows` (this app's
+    documents on the project) and `others` (`[{app, documents}]`, another
+    app's) name each document by its path in the project, as the record's
+    trees do, resolved through any link on the way: a project reached
+    through one (`~/Projects/week-3` a link, or macOS's `/var`, which is
+    `/private/var`) still finds its documents, and the page never matches
+    an absolute path against the root as text. So do `compare`'s `others`,
+    the rewind's `silent` and `other-app` `documents`, and the steps'
+    `silent`. The commits come from one `git log
     --date-order --parents --source --numstat -z` over `--branches` with the
     records excluded (`--exclude=claerbout-autosave
     --exclude='claerbout-autosave-*'`) and this working tree's record by
@@ -472,8 +479,6 @@ node again, or the card's button, to rewind.
     checks, git's `read-tree` among them, so the card never offers a rewind
     the click would refuse.
   - `rewind {sha, tip, paths?, anyway?}`: the rewind, below.
-  - `history {action: 'scope', scope}`: `'document'`, `'folder'` or
-    `'project'`, remembered for the page's project; answered `{scope}`.
   - `history {action: 'close'}`: the page put away (Escape, its close
     tile): the view removed and destroyed, or the window closed. Answered
     `{closed: true}`.
@@ -630,7 +635,8 @@ the ties and paging; the graph scoped to one document of a course with
 two lectures (each commit's scope, what a run changed beside the document,
 nothing from the first fill or a rewind, a document at the top whose
 folder is the project, the record's new commits scoped as they arrive,
-names compared as the volume compares them); a commit's detail and a blob, and a file past 1 MB
+names compared as the volume compares them); documents named by their
+paths in a project reached through a link; a commit's detail and a blob, and a file past 1 MB
 that is not read and costs no other file its patch; and the rewind, its
 three steps and its refusals: a file that becomes a folder and a folder
 that becomes a link, both ways, landing on the target's own tree; a folder
@@ -760,8 +766,10 @@ reload of its page, nothing left behind; then, with `note.txt` changed
 and recorded alone, the view opened again from it: the switch on "This
 document" ("Its folder" left out), fewer commits drawn than the whole
 project's, the session-open card ticking `note.txt` alone ("Rewind 1
-file", "all 2 files" a click away), and "Whole project" ticking both and
-remembered for the project; then the History window, the
+file", "all 2 files" a click away, the fine print saying `note.txt` is
+saved first and reloads although the temporary folder is reached through
+`/var`), "Whole project" ticking both, and the view opened once more on
+"This document", the switch not remembered; then the History window, the
 same graph, and the session-open commit's card, whose rewind's fine print
 says nothing of a kernel's memory with `note.txt` open and says it once
 another app's presence file lists a notebook on the project), and then the

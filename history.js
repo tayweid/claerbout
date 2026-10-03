@@ -916,8 +916,16 @@ function heldElsewhere(project, others, set) {
 }
 
 /** A document's path inside the project, '/'-separated, as the record's
- *  trees name it; null when it is outside. */
+ *  trees name it; null when it is outside. Both sides are resolved through
+ *  any link on the way, so a project reached through one (~/Projects/week-3
+ *  a link, macOS's /var → /private/var) still holds its documents. */
 function relativeTo(root, file) {
+  let base = root;
+  try {
+    base = fs.realpathSync.native(root);
+  } catch {
+    // Gone: compared as given.
+  }
   let real = file;
   try {
     real = fs.realpathSync.native(file);
@@ -928,9 +936,17 @@ function relativeTo(root, file) {
       // Gone: compared as given.
     }
   }
-  const relative = path.relative(root, real);
+  const relative = path.relative(base, real);
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return null;
   return relative.split(path.sep).join('/');
+}
+
+/** Documents' paths as the History page compares them with the record's:
+ *  each one's path in the project (relativeTo, through any link), or, for
+ *  one outside it, its path as given. The page never matches an absolute
+ *  path against the project's root as text. */
+function pagePaths(root, files) {
+  return (files ?? []).filter((file) => typeof file === 'string').map((file) => relativeTo(root, file) ?? file);
 }
 
 /**
@@ -1374,6 +1390,7 @@ module.exports = {
   rewind,
   presence,
   relativeTo,
+  pagePaths,
   removePath,
   LIMIT,
 };

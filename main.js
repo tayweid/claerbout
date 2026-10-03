@@ -1004,8 +1004,11 @@ function scopeDocument(entry) {
   return file ? history.relativeTo(entry.root, file) : null;
 }
 
-/** The scopes a History page offers, by what each draws. */
-const SCOPES = ['document', 'folder', 'project'];
+/** Another app's documents on a project, as the History page compares
+ *  them: each one's path in the project (history.js, pagePaths). */
+function pageOthers(root) {
+  return presence.others(root, appName).map((other) => ({ ...other, documents: history.pagePaths(root, other.documents) }));
+}
 
 /** An event to each of some windows or webContents (a view's). */
 function tell(targets, name, detail) {
@@ -1247,10 +1250,11 @@ function projectFor(entry) {
 
 /** `history {action: 'graph', before?, limit?}`: the graph, with the
  *  record's state and why there is none, and for a page opened from a
- *  document, `scope: {document, folder, choice}`: the document's path in
- *  the project and its folder's ('' at the top), each commit's `scope` and
- *  `beside` (history.js, scoped), and the scope the page opens on, the
- *  one last chosen on this project (`historyScope`), else 'document'. */
+ *  document, `scope: {document, folder}`: the document's path in the
+ *  project and its folder's ('' at the top), with each commit's `scope`
+ *  and `beside` (history.js, scoped). The page opens on that document
+ *  every time. `windows` and `others` name documents by their paths in the
+ *  project, resolved through any link, as the record's trees do. */
 async function historyGraph(entry, message) {
   const shape = { app: appName, project: null, tip: null, head: null, branches: [], commits: [], more: false, total: 0, windows: [], others: [], scope: null };
   const project = projectFor(entry);
@@ -1264,18 +1268,17 @@ async function historyGraph(entry, message) {
     ties: ties.get(project.root),
     document,
   });
-  const chosen = readPreferences().historyScope?.[project.root];
   return {
     ...shape,
     ...answer,
     state: reason ? 'paused' : 'on',
     reason,
     scope: document
-      ? { document, folder: document.includes('/') ? document.slice(0, document.lastIndexOf('/')) : '', choice: SCOPES.includes(chosen) ? chosen : 'document' }
+      ? { document, folder: document.includes('/') ? document.slice(0, document.lastIndexOf('/')) : '' }
       : null,
     project: { root: project.root, name: path.basename(project.root), display: tilde(project.root), branch: project.branchName },
-    windows: openOn(project.root).map((window) => documents.get(window)).filter(Boolean),
-    others: presence.others(project.root, appName),
+    windows: history.pagePaths(project.root, openOn(project.root).map((window) => documents.get(window))),
+    others: pageOthers(project.root),
   };
 }
 
@@ -1343,7 +1346,8 @@ async function historyRewind(entry, message) {
     { sha: message.sha, tip: message.tip ?? null, paths: Array.isArray(message.paths) ? message.paths : null, anyway: message.anyway === true },
     {
       save: () => saveAll(openOn(root)),
-      onStep: (step, state, detail) => tell(viewers(), 'rewind', { step, state, ...(detail ? { detail } : {}) }),
+      // The page compares paths in the project, never absolute ones.
+      onStep: (step, state, detail) => tell(viewers(), 'rewind', { step, state, ...(detail ? { detail: detail.silent ? { ...detail, silent: history.pagePaths(root, detail.silent) } : detail } : {}) }),
       others: () => presence.others(root, appName),
     },
   );
@@ -1356,20 +1360,22 @@ async function historyRewind(entry, message) {
       const relative = history.relativeTo(root, file);
       return relative !== null && rewound.has(relative);
     });
-    tell(viewers(), 'rewind', { step: 'reload', state: 'done', ...(silent.length ? { detail: { silent } } : {}) });
+    tell(viewers(), 'rewind', { step: 'reload', state: 'done', ...(silent.length ? { detail: { silent: history.pagePaths(root, silent) } } : {}) });
     log(`history: rewound ${root} to ${result.target.slice(0, 10)}: ${result.written.length} written, ${result.removed.length} removed`);
     void watchProjects();
   } else if (result) {
     log(`history: no rewind of ${root}: ${result.same ? 'nothing to change' : `${result.refused}${result.reason || result.detail ? ` (${result.reason ?? result.detail})` : ''}`}`);
   }
+  // To the page, documents by their paths in the project.
+  if (result?.silent) return { ...result, silent: history.pagePaths(root, result.silent) };
+  if (result?.refused === 'other-app') return { ...result, documents: history.pagePaths(root, result.documents) };
   return result;
 }
 
 /** A History page's requests, from its window or its inline view:
- *  `history {action: 'graph' | 'commit' | 'blob' | 'compare' | 'scope' |
- *  'close'}` and `rewind`, for its own project only. `scope` remembers the
- *  page's choice for the project; `close` puts the page away (the view
- *  destroyed, the window closed). */
+ *  `history {action: 'graph' | 'commit' | 'blob' | 'compare' | 'close'}`
+ *  and `rewind`, for its own project only. `close` puts the page away
+ *  (the view destroyed, the window closed). */
 async function answerHistory(entry, message, { open, close }) {
   const type = message?.type;
   try {
@@ -1386,15 +1392,9 @@ async function answerHistory(entry, message, { open, close }) {
           return project
             ? await history.compare(project, message.sha, {
                 paths: Array.isArray(message.paths) ? message.paths : null,
-                others: () => presence.others(project.root, appName),
+                others: () => pageOthers(project.root),
               })
             : null;
-        case 'scope': {
-          // The choice is remembered per project, beside historySize.
-          if (!project || !SCOPES.includes(message.scope)) return null;
-          writePreference('historyScope', { ...readPreferences().historyScope, [project.root]: message.scope });
-          return { scope: message.scope };
-        }
         case undefined:
         case 'open':
           return await open();
