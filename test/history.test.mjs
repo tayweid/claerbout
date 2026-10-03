@@ -20,7 +20,8 @@
 // rewind at a time writes a working tree while every other shell's commits
 // wait, the new .gitignore is made in the state folder, and a file named
 // untracked, or a folder named .gitignore, in a commit is left alone and
-// named.
+// named; and a file .claerbout/ignore keeps out, and the rules themselves,
+// are left alone and named.
 // Everything lives under os.tmpdir(); the user's git configuration is kept
 // out (GIT_CONFIG_GLOBAL points at an empty file).
 import assert from 'node:assert/strict';
@@ -1019,4 +1020,43 @@ test('what a commit holds in a folder named .gitignore is left alone and named, 
   assert.deepEqual([result.written, result.removed, result.skipped.map((entry) => entry.path)], [['a.txt'], ['.gitignore'], ['.gitignore/x']]);
   assert.equal(read(dir, '.gitignore'), IGNORE_LINES, "a .gitignore the target lacks is the record's line alone");
   assert.ok(!sh(dir, 'ls-tree', '-r', '--name-only', result.to).split('\n').some((file) => file.startsWith('untracked/')));
+});
+
+test('a file .claerbout/ignore keeps out of the record is left alone by a rewind and named, and so are the rules themselves', async () => {
+  const dir = folder('record-ignore');
+  const project = await projectAt(dir);
+  write(dir, 'notes.md', 'week 1\n');
+  write(dir, 'video.mp4', 'render 1');
+  sh(dir, 'add', 'notes.md', 'video.mp4');
+  at(dir, now() - 100, 'commit', '-q', '-m', 'Week 1, posted');
+  const posted = sh(dir, 'rev-parse', 'HEAD');
+  // Recorded before the rules: the record holds render 1.
+  const early = (await project.commit('session open')).hash;
+  write(dir, '.claerbout/ignore', '*.mp4\n');
+  write(dir, 'video.mp4', 'render 2');
+  write(dir, 'notes.md', 'week 1, later\n');
+  const tip = (await project.commit('timer')).hash;
+  assert.ok(!sh(dir, 'ls-tree', '-r', '--name-only', tip).split('\n').includes('video.mp4'));
+  // A user commit and an earlier record commit both hold render 1.
+  for (const target of [posted, early]) {
+    const preview = await history.compare(project, target);
+    assert.deepEqual(preview.write.map((entry) => entry.path), ['notes.md'], JSON.stringify(preview));
+    assert.deepEqual(preview.remove, []);
+    const named = Object.fromEntries(preview.skipped.map((entry) => [entry.path, entry.why]));
+    assert.equal(named['video.mp4'], 'kept out by .claerbout/ignore');
+    if (target === early) assert.equal(named['.claerbout/ignore'], "the record's own rules, left as they are");
+  }
+  const result = await history.rewind(project, { sha: early, tip });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual([result.written, result.removed], [['notes.md'], []]);
+  assert.ok(result.skipped.some((entry) => entry.path === 'video.mp4' && entry.why === 'kept out by .claerbout/ignore'));
+  assert.equal(read(dir, 'video.mp4'), 'render 2', 'never written');
+  assert.equal(read(dir, '.claerbout/ignore'), '*.mp4\n', 'the rules stay');
+  assert.equal(read(dir, 'notes.md'), 'week 1\n');
+  // Gone from the disk, the render is still not written back.
+  fs.rmSync(path.join(dir, 'video.mp4'));
+  const later = (await project.commit('timer')).hash ?? (await project.tip());
+  const again = await history.rewind(project, { sha: posted, tip: later });
+  assert.ok(again.ok || again.same, JSON.stringify(again));
+  assert.ok(!exists(dir, 'video.mp4'), 'a rewind never writes it');
 });

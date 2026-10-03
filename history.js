@@ -14,7 +14,8 @@
 // again ("<app>: rewind to <target>"), always, even when its tree equals
 // the tip's. The user's HEAD, branch and index are never touched: the
 // throwaway index is the only index, and the record's branch the only
-// ref. untracked/ and the record's manifest are never written or removed.
+// ref. untracked/ and the record's manifest are never written or removed,
+// nor are .claerbout/ignore and a file it keeps out of the record (named).
 // A file that exists now but not in the target is removed only when the
 // target is on the record and the record's tip (the one the page drew)
 // holds it: nothing the record never held is removed, and a commit on a
@@ -49,7 +50,7 @@ const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
-const { BRANCH_NAME, MANIFEST_PATH, UNTRACKED, IGNORE_LINES, errorLine, replaceFile, alive } = require('./autosave.js');
+const { BRANCH_NAME, MANIFEST_PATH, RECORD_IGNORE_PATH, UNTRACKED, IGNORE_LINES, errorLine, replaceFile, alive } = require('./autosave.js');
 
 const LIMIT = 2000;
 const MOST = 5000;
@@ -747,10 +748,11 @@ function obstacle(root, file, { added, removing = null, fold = (name) => name, g
  * the record's tip held it (`held`); the manifest and untracked/ are left
  * out, in whatever case the volume takes for them (a file the target
  * holds under the name untracked is named among the skipped); a gitlink,
- * a .gitignore that is a link in the target, and whatever the target
- * holds in a folder named .gitignore, are left alone and named; and a
- * path with something in its way (obstacle) is skipped and
- * named, except where what is in its way is something this same set
+ * a .gitignore that is a link in the target, whatever the target holds in
+ * a folder named .gitignore, .claerbout/ignore itself, and a file it keeps
+ * out of the record (autosave.js keptOut, on either side), are left alone
+ * and named; and a path with something in its way (obstacle) is skipped
+ * and named, except where what is in its way is something this same set
  * removes: a file that becomes a folder, or a folder (or a link to one)
  * that becomes a file, is written once the removal clears it. `paths`,
  * when given, keeps the set to those (folded as the volume compares
@@ -781,6 +783,20 @@ async function rewindSet(project, { base, target, held, onRecord, paths = null }
   for (const entry of diff) {
     const why = badPath(entry.path);
     if (why) return refused({ path: entry.path, why });
+  }
+  // Each side's paths apart: one tree's file may be the other's folder.
+  const keptOut = await project.keptOut([diff.filter((entry) => entry.status !== 'D').map((entry) => entry.path), diff.filter((entry) => entry.status !== 'A').map((entry) => entry.path)]);
+  for (const entry of diff) {
+    if (fold(entry.path) === fold(RECORD_IGNORE_PATH)) {
+      // The record's own rules: a rewind to a day before them would let
+      // the next render into a record that is never pruned.
+      skipped.push({ path: entry.path, why: "the record's own rules, left as they are" });
+      continue;
+    }
+    if (keptOut.has(entry.path) && !recordOwn(entry.path, fold) && fold(entry.path) !== fold('.gitignore')) {
+      skipped.push({ path: entry.path, why: 'kept out by .claerbout/ignore' });
+      continue;
+    }
     if (recordOwn(entry.path, fold)) {
       // Left alone; but a file the commit holds under the folder's own
       // name is the project's, and is named rather than passed over.
