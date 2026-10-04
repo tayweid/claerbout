@@ -25,6 +25,7 @@
     "contains": "hello from the fixture",
     "autosave": ["fixture: session open"],
     "history": "#history",
-    "room": "#room"
+    "room": "#room",
+    "historyTiming": { "records": 500, "first": 1000, "again": 100 }
   }
 }

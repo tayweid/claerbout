@@ -113,6 +113,80 @@ function launchFailed(error) {
   process.exit(1);
 }
 
+/**
+ * A project for the history view's timing (`smoke.historyTiming`): a
+ * course of 300 files in 30 week folders and a starter commit on main; a
+ * record of `records` commits on claerbout-autosave over some days (timer
+ * commits, cell runs writing a notebook, its values and a figure, session
+ * opens and closes), its first holding every file; user commits on main of
+ * the whole working tree now and then (each tied exactly to the record),
+ * and a branch `exercises` whose commits tie to none. Written with git
+ * fast-import, so 2,000 commits take a second; the working tree holds the
+ * record's tip.
+ */
+function seedRecord(dir, records, appName) {
+  fs.mkdirSync(dir, { recursive: true });
+  const quiet = { cwd: dir, stdio: ['pipe', 'ignore', 'pipe'] };
+  execFileSync('git', ['init', '-q', '--initial-branch=main', '.'], quiet);
+  let seed = 7;
+  const random = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const week = (w) => `lectures/week-${String(w).padStart(2, '0')}`;
+  const body = (name, v) => Array.from({ length: 40 + Math.floor(random() * 80) }, (_, i) => `${name} line ${i} v${v} ${'x'.repeat(Math.floor(random() * 60))}`).join('\n') + '\n';
+  const files = new Map();
+  for (let w = 1; w <= 30; w++) {
+    for (const name of ['notes.py', 'values.json', 'figs/a.svg', 'figs/b.svg', 'figs/c.svg', 'data.csv', 'note.txt', 'README.md', 'solutions.py', 'slides.tex']) files.set(`${week(w)}/${name}`, body(name, 0));
+  }
+  let stream = '';
+  let mark = 0;
+  const commit = (ref, when, message, from, changes, author = 'Taylor') => {
+    const blobs = changes.map(([file, text]) => {
+      mark += 1;
+      stream += `blob\nmark :${mark}\ndata ${Buffer.byteLength(text)}\n${text}\n`;
+      return [file, mark];
+    });
+    mark += 1;
+    stream += `commit ${ref}\nmark :${mark}\nauthor ${author} <t@example.invalid> ${when} +0000\ncommitter ${author} <t@example.invalid> ${when} +0000\ndata ${Buffer.byteLength(message)}\n${message}\n`;
+    if (from) stream += `from :${from}\n`;
+    for (const [file, blob] of blobs) stream += `M 100644 :${blob} ${file}\n`;
+    stream += '\n';
+    return mark;
+  };
+  const now = Math.floor(Date.now() / 1000) - 120;
+  const span = Math.max(3, Math.ceil(records / 80)) * 86400;
+  const at = (i) => Math.floor(now - span + (span * i) / records);
+  let main = commit('refs/heads/main', now - span - 3600, 'Starter files', null, [...files]);
+  const onMain = new Map(files);
+  let record = commit('refs/heads/claerbout-autosave', at(0), `${appName}: session open`, null, [...files], 'Record');
+  let exercises = null;
+  for (let i = 1; i < records; i++) {
+    const w = 1 + Math.floor(random() * 6) + Math.floor((i / records) * 24);
+    const r = random();
+    let message = `${appName}: timer`;
+    let changes = [[`${week(w)}/notes.py`, body('notes.py', i)]];
+    if (r >= 0.45 && r < 0.85) {
+      message = `${appName}: cell run [${1 + Math.floor(random() * 9)}]`;
+      changes = [...changes, [`${week(w)}/values.json`, body('values', i)], [`${week(w)}/figs/a.svg`, body('svg', i)]];
+    } else if (r >= 0.85) {
+      message = `${appName}: session ${r < 0.92 ? 'open' : 'close'}`;
+      changes = [[`${week(w)}/note.txt`, body('note', i)]];
+    }
+    for (const [file, text] of changes) files.set(file, text);
+    record = commit('refs/heads/claerbout-autosave', at(i), message, record, changes, 'Record');
+    if (i % Math.max(10, Math.floor(records / 25)) === 0) {
+      const differ = [...files].filter(([file, text]) => onMain.get(file) !== text);
+      for (const [file, text] of differ) onMain.set(file, text);
+      main = commit('refs/heads/main', at(i) + 30, `Week ${w}: notes`, main, differ);
+    }
+    if (i % Math.max(25, Math.floor(records / 8)) === 0) exercises = commit('refs/heads/exercises', at(i) + 40, `Exercises for week ${w}`, exercises ?? main, [[`${week(w)}/solutions.py`, body('exercise', i)]]);
+  }
+  execFileSync('git', ['fast-import', '--quiet'], { ...quiet, input: stream, maxBuffer: 1 << 30 });
+  const index = { ...quiet, env: { ...process.env, GIT_INDEX_FILE: path.join(dir, '.git', 'seed-index') } };
+  execFileSync('git', ['read-tree', 'claerbout-autosave'], index);
+  execFileSync('git', ['checkout-index', '-a', '-f'], index);
+  fs.rmSync(path.join(dir, '.git', 'seed-index'));
+  execFileSync('git', ['reset', '-q'], quiet);
+}
+
 const logPath = process.platform === 'darwin'
   ? path.join(os.homedir(), 'Library', 'Logs', `${NAME}.log`)
   : path.join(work, 'config', `${NAME}.log`);
@@ -366,10 +440,11 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
   // the History page over the room's box in the same window, as a
   // WebContentsView at that box in DIP; its page counts the commits; the
   // view follows the room when the window grows (the page's `bounds`); a
-  // second `open` changes nothing; Escape in it puts it away, destroyed,
-  // and the page hears {kind: 'inline', state: 'closed'}. Then View ›
-  // History… toggles it (the page asked, `toggle`), and the page's reload
-  // takes it away too.
+  // second `open` changes nothing; Escape in it puts it away, hidden and
+  // kept for the next open (one page, never two), and the page hears
+  // {kind: 'inline', state: 'closed'}. Then View › History… toggles it (the
+  // page asked, `toggle`), the same view shown again, and the page's
+  // reload puts it away too.
   if (smoke.history && smoke.room) {
     const host = await app.browserWindow(page);
     const windowId = await host.evaluate((win) => win.id);
@@ -377,15 +452,16 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
       host.evaluate((win) =>
         win.contentView.children
           .filter((view) => view.webContents && view.webContents !== win.webContents && !view.webContents.isDestroyed())
-          .map((view) => ({ id: view.webContents.id, url: view.webContents.getURL(), bounds: view.getBounds() })),
+          .map((view) => ({ id: view.webContents.id, url: view.webContents.getURL(), bounds: view.getBounds(), visible: view.getVisible() })),
       );
+    // The History view up (want) or put away (not want: none visible).
     const historyView = async (want = true) => {
       for (let i = 0; i < 60; i++) {
-        const found = (await views()).find((view) => view.url.includes('/_claerbout/history.html?inline=1')) ?? null;
-        if (want ? found : !found && (await views()).length === 0) return found;
+        const found = (await views()).find((view) => view.visible && view.url.includes('/_claerbout/history.html?inline=1')) ?? null;
+        if (want ? found : !(await views()).some((view) => view.visible)) return found;
         await page.waitForTimeout(250);
       }
-      return want ? null : (await views())[0] ?? { url: '?' };
+      return want ? null : (await views()).find((view) => view.visible) ?? { url: '?' };
     };
     const roomInDIP = async () => {
       const zoom = await host.evaluate((win) => win.webContents.getZoomFactor());
@@ -488,8 +564,9 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
     if (left) await fail(`Escape left a view over the room (${left.url})`);
     for (let i = 0; i < 20 && (await inlineStates()).at(-1) !== 'closed'; i++) await page.waitForTimeout(100);
     if ((await inlineStates()).at(-1) !== 'closed') await fail(`after Escape the page heard ${JSON.stringify(await inlineStates())}, not {kind: 'inline', state: 'closed'}`);
-    const leaked = () => app.evaluate(({ webContents }) => webContents.getAllWebContents().filter((contents) => contents.getURL().includes('history.html?inline=1')).length);
-    if ((await leaked()) !== 0) await fail('the inline History page outlived its view');
+    // Put away, the page is kept for the next open: one, never a second.
+    const kept = () => app.evaluate(({ webContents }) => webContents.getAllWebContents().filter((contents) => !contents.isDestroyed() && contents.getURL().includes('history.html?inline=1')).map((contents) => contents.id));
+    if ((await kept()).join() !== String(view.id)) await fail(`put away, the inline History page is not kept as it was (pages: ${JSON.stringify(await kept())}, the view's ${view.id})`);
 
     // View › History… toggles it in a document window, and the page's
     // reload takes it away.
@@ -500,16 +577,18 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
         view.submenu.items.find((item) => item.label === 'History…').click({}, win, win.webContents);
       }, windowId);
     await menuHistory();
-    if (!(await historyView())) await fail('View › History… laid no History view over the room');
+    const shown = await historyView();
+    if (!shown) await fail('View › History… laid no History view over the room');
+    if (shown.id !== view.id) await fail(`View › History… made a new History view (${shown.id}), not the kept one (${view.id})`);
     await menuHistory();
     if (await historyView(false)) await fail('View › History… a second time left the History view up');
     await menuHistory();
     if (!(await historyView())) await fail('View › History… a third time laid no History view over the room');
     await page.reload();
     if (await historyView(false)) await fail("the page's reload left the History view up");
-    if ((await leaked()) !== 0) await fail('the inline History page outlived its window\'s page');
+    if ((await kept()).length !== 1) await fail(`after the page's reload there are ${(await kept()).length} inline History pages, not the one kept`);
     if (smoke.ready) await page.waitForSelector(smoke.ready, { timeout: 30_000 });
-    console.log(`smoke (${NAME}, ${mode}): history: inline followed the room, closed on Escape, toggled from View › History…, gone with its page`);
+    console.log(`smoke (${NAME}, ${mode}): history: inline followed the room, put away on Escape and kept, shown again from View › History…, put away with its page`);
   }
 
   // Where the run wrote a file, the record is asked to hold it (a notice,
@@ -543,7 +622,12 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
     const recordedAlone = () => spawnSync('git', ['-C', folder, 'log', '-1', '--format=', '--name-only', 'claerbout-autosave'], { encoding: 'utf8' }).stdout.trim() === path.basename(doc);
     for (let i = 0; i < 60 && !recordedAlone(); i++) await page.waitForTimeout(250);
     if (!recordedAlone()) await fail(`the record's tip does not hold ${path.basename(doc)}'s change alone`);
-    const inlineIds = () => app.evaluate(({ webContents }) => webContents.getAllWebContents().filter((contents) => !contents.isDestroyed() && contents.getURL().includes('history.html?inline=1')).map((contents) => contents.id));
+    // The inline pages shown now (a kept one, put away, is hidden).
+    const inlineIds = () =>
+      app.evaluate(({ BrowserWindow, webContents }) => {
+        const shown = new Set(BrowserWindow.getAllWindows().flatMap((win) => win.contentView.children.filter((view) => view.webContents && view.getVisible()).map((view) => view.webContents.id)));
+        return webContents.getAllWebContents().filter((contents) => !contents.isDestroyed() && shown.has(contents.id) && contents.getURL().includes('history.html?inline=1')).map((contents) => contents.id);
+      });
     const inPage = (id, code) => app.evaluate(({ webContents }, [viewId, source]) => webContents.fromId(viewId).executeJavaScript(source), [id, code]);
     const until = async (id, code, what) => {
       for (let i = 0; i < 60; i++) {
@@ -561,6 +645,10 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
     }
     if (id === null) await fail('the History tile laid no History view over the room a second time');
     await until(id, "!!document.querySelector('#rows .row.t-open')", 'drew no session-open node');
+    // The kept page, shown again, has caught up with the record: the commit
+    // of the document alone, made while it was put away, is drawn.
+    const recordTip = spawnSync('git', ['-C', folder, 'rev-parse', 'claerbout-autosave'], { encoding: 'utf8' }).stdout.trim();
+    await until(id, `document.documentElement.dataset.tip === ${JSON.stringify(recordTip)}`, `did not catch up with the record's tip ${recordTip.slice(0, 10)}`);
     const scopeRow = () => inPage(id, "({ hidden: document.getElementById('scope').hidden, on: [...document.querySelectorAll('#scope button.on')].map((b) => b.dataset.s), shown: [...document.querySelectorAll('#scope button')].filter((b) => !b.hidden).map((b) => b.dataset.s), picks: document.querySelectorAll('#rows .row.pick').length, keep: !!document.getElementById('keep') })");
     const opened = await scopeRow();
     if (opened.hidden || opened.on.join() !== 'document' || opened.shown.join() !== 'document,project') await fail(`the scope switch opened as ${JSON.stringify(opened)}, not "This document" of document and project`);
@@ -679,6 +767,62 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
       if (!kernel(shared)) await fail(`with another app's other.ipynb open on the project the card's fine print does not speak of a kernel's memory: ${shared}`);
     }
     console.log(`smoke (${NAME}, ${mode}): history: the rewind's fine print speaks of a kernel's memory ${cells(doc) ? `with ${path.basename(doc)} open` : `only with another app's notebook open`}`);
+  }
+
+  // How fast the History view comes, where the config asks
+  // (`smoke.historyTiming: {records, first, again}`): a project seeded with
+  // that many record commits (a course of 300 files in 30 folders, a user
+  // branch beside main), a document of it opened in a window of its own,
+  // and the tile pressed: the time from the click to the river drawn (the
+  // page's `claerbout:river-painted` mark: the graph answered, the river
+  // laid out, the next frame drawn) on the first open, and, put away and
+  // pressed again, to the kept page's next frame (`claerbout:shown-painted`).
+  // Each is printed, and above its budget in ms fails.
+  const timing = smoke.historyTiming;
+  if (timing && smoke.history && smoke.room) {
+    const seeded = path.join(work, 'seeded');
+    seedRecord(seeded, timing.records, NAME.toLowerCase());
+    const seededDoc = path.join(seeded, 'lectures', 'week-01', 'note.txt');
+    const opening = app.waitForEvent('window', { timeout: 30_000 });
+    await app.evaluate(({ app: electronApp }, file) => electronApp.emit('open-file', { preventDefault() {} }, file), seededDoc);
+    const timed = await opening;
+    if (smoke.ready) await timed.waitForSelector(smoke.ready, { timeout: 30_000 });
+    // The record's session open lands, and the shell's look has seen it.
+    await timed.waitForTimeout(2500);
+    const timedHost = await app.browserWindow(timed);
+    const shownView = () =>
+      timedHost.evaluate((win) => {
+        const view = win.contentView.children.find((child) => child.webContents && child.webContents !== win.webContents && child.getVisible());
+        return view ? view.webContents.id : null;
+      });
+    const markAfter = (id, name, since) =>
+      app.evaluate(({ webContents }, [viewId, mark, t]) => webContents.fromId(viewId).executeJavaScript(`(performance.getEntriesByName(${JSON.stringify(mark)}).map((e) => performance.timeOrigin + e.startTime).find((at) => at >= ${t})) ?? null`), [id, name, since]);
+    const press = async (mark) => {
+      const t0 = await timed.evaluate((selector) => {
+        const t = performance.timeOrigin + performance.now();
+        document.querySelector(selector).click();
+        return t;
+      }, smoke.history);
+      for (let i = 0; i < 3000; i++) {
+        const id = await shownView();
+        const at = id === null ? null : await markAfter(id, mark, t0).catch(() => null);
+        if (at !== null) return { id, ms: Math.round(at - t0) };
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return fail(`the History view over ${path.basename(seededDoc)} never drew (${mark})`);
+    };
+    const first = await press('claerbout:river-painted');
+    const drawn = await app.evaluate(({ webContents }, id) => webContents.fromId(id).executeJavaScript("document.querySelectorAll('#rows .row').length"), first.id);
+    if (!drawn) await fail('the History view over the seeded project drew no rows');
+    await app.evaluate(({ webContents }, id) => webContents.fromId(id).executeJavaScript("window.claerbout.request({ type: 'history', action: 'close' })"), first.id);
+    for (let i = 0; i < 40 && (await shownView()) !== null; i++) await timed.waitForTimeout(50);
+    if ((await shownView()) !== null) await fail('the History view over the seeded project was not put away');
+    const again = await press('claerbout:shown-painted');
+    if (again.id !== first.id) await fail(`opened again, the History view is a new page (${again.id}), not the kept one (${first.id})`);
+    console.log(`smoke (${NAME}, ${mode}): history: open to river with ${timing.records} record commits: first ${first.ms} ms (budget ${timing.first}), again ${again.ms} ms (budget ${timing.again})`);
+    if (first.ms > timing.first) await fail(`the first open of the History view took ${first.ms} ms, over its budget of ${timing.first}`);
+    if (again.ms > timing.again) await fail(`the History view opened again took ${again.ms} ms, over its budget of ${timing.again}`);
+    await timedHost.evaluate((win) => win.close());
   }
 }
 

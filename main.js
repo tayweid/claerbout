@@ -960,11 +960,15 @@ const presence = history.presence(process.env.CLAERBOUT_PRESENCE_DIR || path.joi
  *  the page is scoped to. */
 const historyWindows = new Map();
 /** Document window → its inline History view: {view, contents, origin,
- *  host (that window), css (the room's last box, CSS px), detach, and the
- *  target's root, reason, detail and document once known}. */
+ *  host (that window), css (the room's last box, CSS px), hidden (put
+ *  away, kept for the next open), attach and detach (the room's events),
+ *  release (the window's), the target's root, reason, detail and document
+ *  once known, and `known`: what its page last drew, {tip, refs, state,
+ *  document}, which a hidden view is caught up from when it comes back. */
 const historyViews = new Map();
-/** Ties, cached by sha for the launch: root → Map. */
-const ties = new Map();
+/** The graphs kept between opens, and the ties, by project (history.js,
+ *  Graphs). */
+const graphs = new history.Graphs();
 /** How long a document page has to answer `save` before a rewind goes on
  *  without it (the apps' pages do not answer yet). */
 const SAVE_WAIT = 3000;
@@ -986,11 +990,13 @@ function viewersOf(root) {
 }
 
 /** The History pages on a project, each with its entry: [{contents,
- *  entry}]. */
+ *  entry}]. A hidden inline view is not among them: it hears nothing and
+ *  costs the two-second look nothing, and is caught up when it comes back
+ *  (catchUp). */
 function pagesOn(root) {
   return [
     ...[...historyWindows].filter(([window, entry]) => entry.root === root && !window.isDestroyed()).map(([window, entry]) => ({ contents: window.webContents, entry })),
-    ...[...historyViews.values()].filter((entry) => entry.root === root && !entry.contents.isDestroyed()).map((entry) => ({ contents: entry.contents, entry })),
+    ...[...historyViews.values()].filter((entry) => entry.root === root && !entry.hidden && !entry.contents.isDestroyed()).map((entry) => ({ contents: entry.contents, entry })),
   ];
 }
 
@@ -1139,18 +1145,22 @@ function placeInline(host, entry, css) {
  *  the window's project, with the document still loaded underneath (a
  *  rewind's save and reload reach it there). Transparent, so the page
  *  draws its own rounded panel and the frame shows at its corners. A
- *  second open while it is up changes nothing (`at` still selects). */
+ *  second open while it is up changes nothing (`at` still selects). The
+ *  view is made once per window: put away, it is hidden and kept, and the
+ *  next open shows it again (showInline), so only the first open of a
+ *  window pays for a page and its renderer. It goes with its window. */
 async function openInline(host, css, at = null) {
   const wanted = typeof at === 'string' && /^[0-9a-f]{4,64}$/.test(at) ? at : null;
   const up = historyViews.get(host);
-  if (up) {
+  if (up && !up.hidden) {
     if (wanted && !up.contents.isDestroyed()) up.contents.send('claerbout:event', 'history', { kind: 'focus', at: wanted });
     return { opened: true, inline: true };
   }
+  if (up) return showInline(host, up, css, wanted);
   const view = new WebContentsView({ webPreferences: pagePreferences() });
   view.setBackgroundColor('#00000000');
   const contents = view.webContents;
-  const entry = { view, contents, origin: appOrigin, host, css, root: null, reason: null, detail: null, document: null, detach: () => {} };
+  const entry = { view, contents, origin: appOrigin, host, css, hidden: false, root: null, reason: null, detail: null, document: null, known: null, attach: () => {}, detach: () => {}, release: () => {} };
   historyViews.set(host, entry);
   // The page goes nowhere: links out open in the default browser.
   contents.setWindowOpenHandler(({ url }) => {
@@ -1161,55 +1171,174 @@ async function openInline(host, css, at = null) {
     event.preventDefault();
     if (/^https?:/i.test(url)) void shell.openExternal(url);
   });
-  // Each listener puts away this view only, never one opened since.
-  const gone = () => closeInline(host, entry);
+  // Each listener acts on this view only, never one opened since. Its own
+  // page gone, or its window, it goes for good.
+  const gone = () => destroyInline(host, entry);
   contents.on('render-process-gone', gone);
   contents.once('destroyed', gone);
+  host.once('closed', gone);
+  entry.release = () => host.removeListener('closed', gone);
   // Focused once drawn, so Escape reaches it.
   contents.once('did-finish-load', () => {
-    if (historyViews.get(host) === entry && !contents.isDestroyed()) contents.focus();
+    if (historyViews.get(host) === entry && !entry.hidden && !contents.isDestroyed()) contents.focus();
   });
-  // Gone with the window, and when its page goes (a reload, another
-  // page): the room it was measured from is no longer there.
+  // The room's events, while the view is up: when the window's page goes
+  // (a reload, another page) the room it was measured from is no longer
+  // there, and the view is put away.
   const hostContents = host.webContents;
+  const away = () => closeInline(host, entry);
   const onNavigation = (details, ...rest) => {
     const mainFrame = details?.isMainFrame ?? rest[2];
     const sameDocument = details?.isSameDocument ?? rest[1];
-    if (mainFrame && !sameDocument) gone();
+    if (mainFrame && !sameDocument) away();
   };
-  host.once('closed', gone);
-  hostContents.on('did-start-navigation', onNavigation);
-  hostContents.on('render-process-gone', gone);
+  entry.attach = () => {
+    hostContents.on('did-start-navigation', onNavigation);
+    hostContents.on('render-process-gone', away);
+  };
   entry.detach = () => {
-    host.removeListener('closed', gone);
     if (!hostContents.isDestroyed()) {
       hostContents.removeListener('did-start-navigation', onNavigation);
-      hostContents.removeListener('render-process-gone', gone);
+      hostContents.removeListener('render-process-gone', away);
     }
   };
+  entry.attach();
   host.contentView.addChildView(view);
   placeInline(host, entry, css);
   tell([host], 'history', { kind: 'inline', state: 'open' });
   const target = await historyTarget(host);
   if (historyViews.get(host) !== entry) return { opened: true, inline: true };
   Object.assign(entry, target);
-  const url = new URL(`${appOrigin}${SHELL_PREFIX}history.html`);
-  url.searchParams.set('inline', '1');
-  if (wanted) url.searchParams.set('at', wanted);
-  void contents.loadURL(url.toString());
+  loadInline(entry, wanted);
+  // The graph is read while the page loads; the page's request joins it.
+  const project = projectFor(entry);
+  if (project) graphs.fresh(project).catch(() => {});
   log(`history: inline in ${host.getTitle()} for ${target.root ?? `no record (${target.reason})`}`);
   return { opened: true, inline: true };
 }
 
+/** The History page loaded into an inline view, for its entry's project. */
+function loadInline(entry, at) {
+  const url = new URL(`${appOrigin}${SHELL_PREFIX}history.html`);
+  url.searchParams.set('inline', '1');
+  if (at) url.searchParams.set('at', at);
+  entry.known = null;
+  void entry.contents.loadURL(url.toString());
+}
+
+/** A hidden inline view shown again at the room's box: at once, as it was
+ *  left (its page put its look back to an open's when it was hidden: the
+ *  card away, "This document", the river at now). Then, for a window now
+ *  on another project (or none), the page is loaded afresh in the same
+ *  view; on another document of the same project, the page is told
+ *  `history {kind: 'document'}`; and otherwise it is caught up with what
+ *  it missed while hidden (catchUp): the graph is asked again only if the
+ *  record or the refs moved. */
+async function showInline(host, entry, css, wanted) {
+  entry.hidden = false;
+  entry.attach();
+  placeInline(host, entry, css);
+  entry.view.setVisible(true);
+  tell([entry.contents], 'history', { kind: 'shown' });
+  tell([host], 'history', { kind: 'inline', state: 'open' });
+  if (!entry.contents.isDestroyed()) entry.contents.focus();
+  const target = await historyTarget(host);
+  if (historyViews.get(host) !== entry || entry.hidden || entry.contents.isDestroyed()) return { opened: true, inline: true };
+  const moved = ['root', 'reason', 'detail'].some((key) => (target[key] ?? null) !== (entry[key] ?? null));
+  Object.assign(entry, target);
+  if (moved || entry.contents.isLoading()) {
+    if (moved) {
+      loadInline(entry, wanted);
+      const project = projectFor(entry);
+      if (project) graphs.fresh(project).catch(() => {});
+      log(`history: inline in ${host.getTitle()} for ${target.root ?? `no record (${target.reason})`}`);
+    }
+    return { opened: true, inline: true };
+  }
+  if (entry.known && scopeDocument(entry) !== entry.known.document) tell([entry.contents], 'history', { kind: 'document' });
+  else void catchUp(host, entry);
+  if (wanted) tell([entry.contents], 'history', { kind: 'focus', at: wanted });
+  return { opened: true, inline: true };
+}
+
+/** A view shown again hears what it missed while hidden, as the
+ *  two-second look would have told it (pageSince): the record's new
+ *  commits (`history {kind: 'commit'}`, which the page draws at the tip
+ *  without asking for the graph; taken from the kept graph, which the look
+ *  grows, so they go out before the view's first frame, else read), the
+ *  refs moved (`refs`, on which it asks for the graph, answered from the
+ *  kept one), the guards (`state`). */
+async function catchUp(host, entry) {
+  const project = projectFor(entry);
+  const known = entry.known;
+  if (!project || !known) return;
+  const here = () => historyViews.get(host) === entry && !entry.hidden && entry.known === known;
+  try {
+    const tip = await history.recordTip(project);
+    const kept = tip && known.tip && tip !== known.tip ? graphs.since(project, known.tip, tip) : null;
+    if (kept && here()) {
+      known.tip = tip;
+      if (kept.length > 0) tell([entry.contents], 'history', { kind: 'commit', commits: history.scoped(project.root, kept, scopeDocument(entry)) });
+    }
+    const [now, state] = await Promise.all([history.refs(project), project.blocked()]);
+    if (here()) await pageSince(project, entry.contents, entry, { tip, now, state });
+  } catch (error) {
+    log(`history: ${error.message} (${entry.root})`);
+  }
+}
+
+/** One History page told what moved since it drew (its `known`): the
+ *  record's commits after the tip it has (`shared`, when they are the ones
+ *  the two-second look read, else read for it), the refs, the guards. */
+async function pageSince(project, contents, entry, { tip, now = null, state, shared = null }) {
+  const known = entry.known;
+  if (!known) return;
+  if (tip && tip !== known.tip) {
+    const from = known.tip;
+    known.tip = tip;
+    const commits = shared && shared.from === from ? shared.commits : await history.recordSince(project, from, tip);
+    if (!shared || shared.from !== from) graphs.grow(project, from, tip, commits);
+    if (commits.length > 0) tell([contents], 'history', { kind: 'commit', commits: history.scoped(project.root, commits, scopeDocument(entry)) });
+  }
+  if (now && known.refs !== now.signature) {
+    known.refs = now.signature;
+    tell([contents], 'history', { kind: 'refs', branches: now.branches, head: now.head });
+  }
+  if (state !== undefined && known.state !== state) {
+    known.state = state;
+    tell([contents], 'history', { kind: 'state', state: state ? 'paused' : 'on', reason: state });
+  }
+}
+
 /** The inline view put away (the tile, Escape, its close control, View ›
- *  History…, the window or its page going): removed and destroyed, its
- *  listeners on the window taken off, and the page told. `which`, when
- *  given, is the view meant: one already gone is not mistaken for a newer. */
+ *  History…, its window's page going): hidden and kept, its listeners on
+ *  the room taken off, its page told (`history {kind: 'hidden'}`, so it
+ *  puts its look back to an open's while no one sees it), and the window's
+ *  page told. `which`, when given, is the view meant: one already gone is
+ *  not mistaken for a newer. */
 function closeInline(host, which = null) {
+  const entry = historyViews.get(host);
+  if (!entry || entry.hidden || (which && entry !== which)) return false;
+  entry.hidden = true;
+  entry.detach();
+  entry.view.setVisible(false);
+  if (!entry.contents.isDestroyed()) tell([entry.contents], 'history', { kind: 'hidden' });
+  if (!host.isDestroyed() && !host.webContents.isDestroyed()) {
+    tell([host], 'history', { kind: 'inline', state: 'closed' });
+    if (host.isFocused()) host.webContents.focus();
+  }
+  return true;
+}
+
+/** The inline view gone for good, with its window or its own page:
+ *  removed and destroyed, its listeners taken off, and the window's page
+ *  told if it was up. */
+function destroyInline(host, which = null) {
   const entry = historyViews.get(host);
   if (!entry || (which && entry !== which)) return false;
   historyViews.delete(host);
   entry.detach();
+  entry.release();
   const hostAlive = !host.isDestroyed();
   if (hostAlive) {
     try {
@@ -1219,7 +1348,7 @@ function closeInline(host, which = null) {
     }
   }
   if (!entry.contents.isDestroyed()) entry.contents.close();
-  if (hostAlive && !host.webContents.isDestroyed()) {
+  if (!entry.hidden && hostAlive && !host.webContents.isDestroyed()) {
     tell([host], 'history', { kind: 'inline', state: 'closed' });
     if (host.isFocused()) host.webContents.focus();
   }
@@ -1261,15 +1390,18 @@ async function historyGraph(entry, message) {
   const shape = { app: appName, project: null, tip: null, head: null, branches: [], commits: [], more: false, total: 0, windows: [], others: [], scope: null };
   const project = projectFor(entry);
   if (!project) return { ...shape, state: 'none', reason: entry?.reason ?? 'refused', detail: entry?.detail ?? null, document: entry?.document ?? null };
-  if (!ties.has(project.root)) ties.set(project.root, new Map());
-  const reason = await project.blocked();
   const document = scopeDocument(entry);
-  const answer = await history.graph(project, {
-    before: message.before ?? null,
-    limit: Number.isInteger(message.limit) ? message.limit : history.LIMIT,
-    ties: ties.get(project.root),
-    document,
-  });
+  // A page back in time (`before`) or of another size is read as asked;
+  // the page's own graph is the kept one (history.js, Graphs).
+  const paged = message.before != null || Number.isInteger(message.limit);
+  const [reason, { signature, ...answer }, untracked] = await Promise.all([
+    project.blocked(),
+    paged
+      ? history.graph(project, { before: message.before ?? null, limit: Number.isInteger(message.limit) ? message.limit : history.LIMIT, ties: graphs.tiesOf(project.root), document })
+      : graphs.graph(project, { document }),
+    history.untracked(project, {}),
+  ]);
+  if (!paged && entry) entry.known = { tip: answer.tip, refs: signature, state: reason, document };
   return {
     ...shape,
     ...answer,
@@ -1281,7 +1413,7 @@ async function historyGraph(entry, message) {
     project: { root: project.root, name: path.basename(project.root), display: tilde(project.root), branch: project.branchName },
     windows: history.pagePaths(project.root, openOn(project.root).map((window) => documents.get(window))),
     others: pageOthers(project.root),
-    untracked: await history.untracked(project, {}),
+    untracked,
   };
 }
 
@@ -1423,18 +1555,21 @@ async function answerHistory(entry, message, { open, close }) {
   return null;
 }
 
-// What the shell last saw of each project: root → {tip, refs, state}.
+// What the shell last saw of each project: root → {tip, failed?}.
 const seen = new Map();
 let watching = false;
 
 /**
  * Every two seconds, every project with a window of this shell's on it:
  * the record's tip (a loose ref file, read; git for a packed one). When
- * it moved, the History windows on the project hear `history {kind:
- * 'commit', commits}`, and a "rewind to" another app made has this
- * shell's windows on the project told to `reload`. With a History window
- * open, its user branches and HEAD (`history {kind: 'refs'}`) and the
- * record's guards (`history {kind: 'state'}`) too.
+ * it moved, the kept graph grows by the new commits (history.js, Graphs),
+ * the History pages on the project hear `history {kind: 'commit',
+ * commits}`, and a "rewind to" another app made has this shell's windows
+ * on the project told to `reload`. With a History page up (a hidden
+ * inline view is not), its user branches and HEAD (`history {kind:
+ * 'refs'}`) and the record's guards (`history {kind: 'state'}`) too, each
+ * page told what moved since it drew. A project with no window left has
+ * its kept graph dropped.
  */
 async function watchProjects() {
   if (watching || !autosave.enabled) return;
@@ -1444,16 +1579,18 @@ async function watchProjects() {
       const viewers = viewersOf(root);
       if (project.windows.size === 0 && viewers.length === 0) {
         seen.delete(root);
+        graphs.forget(root);
         continue;
       }
       const last = seen.get(root) ?? {};
       const next = { ...last };
       try {
         next.tip = await history.recordTip(project);
+        let shared = null;
         if ('tip' in last && next.tip && next.tip !== last.tip) {
           const commits = await history.recordSince(project, last.tip, next.tip);
-          // Each page hears them scoped to its own document.
-          if (commits.length > 0) for (const { contents, entry } of pagesOn(root)) tell([contents], 'history', { kind: 'commit', commits: history.scoped(root, commits, scopeDocument(entry)) });
+          graphs.grow(project, last.tip, next.tip, commits);
+          shared = { from: last.tip, commits };
           for (const commit of commits) {
             if (commit.trigger !== 'rewind-to' || commit.app === appName) continue;
             const paths = (await history.touched(project, commit.sha)).map((file) => path.join(root, ...file.split('/')));
@@ -1462,15 +1599,11 @@ async function watchProjects() {
           }
         }
         if (viewers.length > 0) {
-          const now = await history.refs(project);
-          if ('refs' in last && now.signature !== last.refs) tell(viewers, 'history', { kind: 'refs', branches: now.branches, head: now.head });
-          next.refs = now.signature;
-          const reason = await project.blocked();
-          if ('state' in last && reason !== last.state) tell(viewers, 'history', { kind: 'state', state: reason ? 'paused' : 'on', reason });
-          next.state = reason;
-        } else {
-          delete next.refs;
-          delete next.state;
+          // Each page hears what moved since it drew (its `known`): the
+          // record's new commits, scoped to its own document, the refs, the
+          // guards.
+          const [now, state] = await Promise.all([history.refs(project), project.blocked()]);
+          for (const { contents, entry } of pagesOn(root)) await pageSince(project, contents, entry, { tip: next.tip, now, state, shared });
         }
         delete next.failed;
       } catch (error) {

@@ -172,8 +172,8 @@ test('a graph: the record and a user branch with a fork, two roots, their lines 
   assert.deepEqual(record[0].refs, ['claerbout-autosave']);
   assert.equal(record[0].files, 1);
   assert.deepEqual(record[0].changed, ['b.txt']);
-  assert.equal(record[0].plus, 1);
-  assert.equal(record[0].minus, 1);
+  // Names only: the river shows no line counts, so the log reads no blob.
+  assert.equal('plus' in record[0] || 'minus' in record[0], false);
   assert.equal(record[0].author, undefined);
   // The user's commits: reached by their branches, the fork's parent is
   // the starter commit, main's first commit is the other root.
@@ -1196,4 +1196,109 @@ test('a project reached through a link: its documents are named by their paths i
   // A scoped graph for that document, as the shell asks for it.
   const scopedGraph = await history.graph(project, { document: history.relativeTo(project.root, opened) });
   assert.deepEqual(scopedGraph.commits.map((commit) => commit.scope), ['document', 'document']);
+});
+
+// The graphs the shell keeps between a History page's opens (history.js,
+// Graphs): each answer is what a fresh graph would be, with nothing missed
+// and nothing of another project's.
+test('the kept graph: a commit arriving between opens appears, as the look grows it and as an open finds it; a branch moved is read afresh', async () => {
+  const dir = folder('kept');
+  const project = await projectAt(dir);
+  write(dir, 'lectures/l1/l1.py', '# %%\nx = 1\n');
+  write(dir, 'README.md', 'the course\n');
+  sh(dir, 'add', '.');
+  at(dir, now() - 1000, 'commit', '-q', '-m', 'Starter files');
+  await project.commit('session open');
+  const graphs = new history.Graphs();
+  const logs = [];
+  const git = project.git.bind(project);
+  project.git = (args, options) => {
+    if (args[0] === 'log' && args.includes('--date-order')) logs.push(args.some((arg) => arg.includes('..')) ? 'since' : 'graph');
+    return git(args, options);
+  };
+  const same = async (kept, document = null, what = '') => {
+    const { signature, ...answer } = kept;
+    assert.equal(typeof signature, 'string');
+    assert.deepEqual(answer, await history.graph(project, { document }), `the kept graph is a fresh one ${what}`);
+  };
+  const document = 'lectures/l1/l1.py';
+  const first = await graphs.graph(project, { document });
+  await same(first, document, 'when first read');
+  // Two opens at once share one read.
+  logs.length = 0;
+  write(dir, 'lectures/l1/l1.py', '# %%\nx = 2\n');
+  const run = (await project.commit('cell run [1]')).hash;
+  const [a, b] = await Promise.all([graphs.graph(project, { document }), graphs.graph(project)]);
+  assert.equal(a.tip, run);
+  assert.equal(b.tip, run);
+  assert.deepEqual(logs, ['since'], 'grown, not read again, by one read of the new commit for both opens');
+  assert.equal(a.commits[0].sha, run);
+  assert.equal(a.commits[0].scope, 'document');
+  assert.deepEqual(a.commits[0].refs, ['claerbout-autosave']);
+  assert.deepEqual(a.commits.find((commit) => commit.line === 'record' && commit.sha !== run).refs, [], 'the record\'s ref moved to its new tip');
+  await same(a, document, 'grown by the open');
+  await same(b, null, 'unscoped');
+  // The shell's look grows it (the commits it read for the pages), and a
+  // page shown again draws them from it, with no git.
+  write(dir, 'README.md', 'the course, later\n');
+  const timer = (await project.commit('timer')).hash;
+  const since = await history.recordSince(project, run, timer);
+  graphs.grow(project, run, timer, since);
+  assert.deepEqual(graphs.since(project, run, timer).map((commit) => commit.sha), [timer]);
+  assert.equal(graphs.since(project, 'f'.repeat(40), timer), null, 'not from a tip it does not hold');
+  logs.length = 0;
+  const looked = await graphs.graph(project);
+  assert.equal(logs.length, 0, 'served as kept: no log at all');
+  await same(looked, null, 'grown by the look');
+  // A branch moved: the refs differ, so the graph is read afresh, the user's
+  // commit with its tie.
+  write(dir, 'lectures/l1/l1.py', '# %%\nx = 2\n');
+  sh(dir, 'add', '.');
+  at(dir, now() + 5, 'commit', '-q', '-m', 'Mine');
+  const mine = sh(dir, 'rev-parse', 'HEAD');
+  const moved = await graphs.graph(project);
+  assert.equal(moved.commits.find((commit) => commit.sha === mine)?.tie?.sha, timer);
+  await same(moved, null, 'after a branch moved');
+  // The record rewritten, not grown: read afresh.
+  sh(dir, 'update-ref', project.ref, run);
+  await same(await graphs.graph(project), null, 'after the record was rewritten');
+});
+
+test("the kept graph: a rewind's new commits appear, and one project is never answered with another's", async () => {
+  const { dir, project, first, second } = await recorded('kept-rewind');
+  const graphs = new history.Graphs();
+  const before = await graphs.graph(project);
+  assert.equal(before.tip, second);
+  write(dir, 'a.txt', 'three\n'); // not yet recorded: the rewind records it first
+  const result = await history.rewind(project, { sha: first, tip: second });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const after = await graphs.graph(project);
+  const triggers = after.commits.filter((commit) => commit.line === 'record').slice(0, 2).map((commit) => commit.trigger);
+  assert.deepEqual(triggers, ['rewind-to', 'rewind-from']);
+  assert.equal(after.commits[0].target, first);
+  assert.equal(after.total, before.total + 2);
+  const { signature, ...answer } = after;
+  assert.deepEqual(answer, await history.graph(project));
+  // Another project through the same Graphs: its own graph, and the first's
+  // still its own.
+  const elsewhere = folder('kept-other');
+  const other = await projectAt(elsewhere);
+  write(elsewhere, 'other.txt', 'other\n');
+  await other.commit('session open');
+  const theirs = await graphs.graph(other);
+  assert.equal(theirs.tip, await other.tip());
+  assert.deepEqual(theirs.commits.map((commit) => commit.subject), ['fixture: session open']);
+  assert.ok(!theirs.commits.some((commit) => after.commits.some((mine) => mine.sha === commit.sha)), 'nothing of the first project');
+  assert.equal((await graphs.graph(project)).tip, after.tip);
+  // A new Project for the same root (the shell made it afresh) is not
+  // answered with the old one's kept graph, nor grown from it.
+  const again = await projectAt(project.root);
+  const [foundKept] = [...graphs.kept.values()].filter((kept) => kept.project === project);
+  assert.ok(foundKept, 'the first project\'s graph is kept');
+  assert.equal(graphs.since(again, before.tip, after.tip), null);
+  const fresh = await graphs.graph(again);
+  assert.equal(graphs.kept.get(project.root).project, again);
+  assert.deepEqual(fresh.commits.map((commit) => commit.sha), after.commits.map((commit) => commit.sha));
+  graphs.forget(project.root);
+  assert.equal(graphs.kept.has(project.root), false);
 });

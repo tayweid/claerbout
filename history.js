@@ -338,9 +338,16 @@ async function partialClone(project) {
 
 // MARK: - The graph
 
-/** Commits from one `git log` with the graph's format and numstat, newest
- *  first, shaped as the graph's commits (without ties), each with `paths`,
- *  every path it changed, which scoped() reads and takes off. */
+/** Commits from one `git log` with the graph's format and the paths each
+ *  changed, newest first, shaped as the graph's commits (without ties),
+ *  each with `paths`, every path it changed, which scoped() reads and
+ *  takes off. Names only (`--name-only`): the river shows no line counts,
+ *  and names read trees, never a blob, so this is the cheap log (a
+ *  quarter of `--numstat`'s time on 2,000 commits), and one blob the
+ *  repository lacks (a partial clone's, never fetched, or a crafted
+ *  commit's) cannot fail it. Where a tree cannot be read at all (an empty
+ *  name in it), no names: the graph still draws, and that commit's card
+ *  says why no rewind writes it. */
 async function logCommits(project, revisions, { limit, until } = {}) {
   const args = (shape) => [
     'log',
@@ -357,14 +364,9 @@ async function logCommits(project, revisions, { limit, until } = {}) {
     ...revisions,
     '--',
   ];
-  // --numstat reads every blob it counts, so one git does not have (a
-  // partial clone's, never fetched, or a crafted commit's) fails the whole
-  // log: then names only, which reads trees and never a blob, and where a
-  // tree cannot be read at all (an empty name in it), no names. The graph
-  // still draws, and that commit's card says why no rewind writes it.
   let listed;
   let shape;
-  for (shape of ['--numstat', '--name-only', null]) {
+  for (shape of ['--name-only', null]) {
     listed = await project.git(args(shape));
     if (listed.status === 0) break;
   }
@@ -384,21 +386,11 @@ async function logCommits(project, revisions, { limit, until } = {}) {
       at: Number(at),
       subject,
       files: 0,
-      plus: 0,
-      minus: 0,
       changed: [],
       paths: [],
     };
     if (!record) commit.author = author;
-    for (const entry of end === -1 ? [] : nul(chunk.slice(end + 1).replace(/^\n/, ''))) {
-      let file = entry;
-      if (shape === '--numstat') {
-        const stat = entry.match(/^(\d+|-)\t(\d+|-)\t([\s\S]*)$/);
-        if (!stat) continue;
-        if (stat[1] !== '-') commit.plus += Number(stat[1]);
-        if (stat[2] !== '-') commit.minus += Number(stat[2]);
-        file = stat[3];
-      }
+    for (const file of end === -1 ? [] : nul(chunk.slice(end + 1).replace(/^\n/, ''))) {
       commit.files += 1;
       commit.paths.push(file);
       if (commit.changed.length < CHANGED_KEPT) commit.changed.push(file);
@@ -424,13 +416,14 @@ async function logCommits(project, revisions, { limit, until } = {}) {
  * none for a root commit, whose first fill holds everything, nor for a
  * "rewind to", which writes whatever differed. Paths are compared as the
  * volume compares them. Without a document, the commits as they are.
+ * Either way without what only the shell reads (`tree`, `at`).
  */
 function scoped(root, commits, document = null) {
   const fold = foldFor(root);
   const doc = typeof document === 'string' && !badPath(document) ? fold(document) : null;
   const cut = doc ? doc.lastIndexOf('/') : -1;
   const folder = cut > 0 ? `${doc.slice(0, cut)}/` : '';
-  return commits.map(({ paths = [], ...commit }) => {
+  return commits.map(({ paths = [], tree: _tree, at: _at, ...commit }) => {
     if (doc === null) return commit;
     const folded = paths.map(fold);
     if (folded.includes(doc)) {
@@ -442,95 +435,131 @@ function scoped(root, commits, document = null) {
   });
 }
 
-/** The user's local branches (no record's), and HEAD. */
+/** The user's local branches (no record's), and HEAD: one for-each-ref,
+ *  whose %(HEAD) marks the branch this working tree has checked out; git
+ *  is asked about HEAD itself only when no branch is marked (detached, or
+ *  a branch with no commit yet). */
 async function refs(project) {
-  const listed = ok(await project.git(['for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads']), 'for-each-ref');
-  const head = await project.git(['symbolic-ref', '-q', 'HEAD']);
-  const headRef = head.status === 0 ? head.stdout.trim() : null;
-  const headSha = await project.git(['rev-parse', '--verify', '-q', 'HEAD']);
+  const listed = ok(await project.git(['for-each-ref', '--format=%(objectname) %(HEAD) %(refname)', 'refs/heads']), 'for-each-ref');
+  let headRef = null;
+  let headSha = null;
   const branches = [];
   for (const line of listed.split('\n').filter(Boolean)) {
     const space = line.indexOf(' ');
-    const ref = line.slice(space + 1);
+    const tip = line.slice(0, space);
+    const ref = line.slice(space + 3);
+    if (line[space + 1] === '*') {
+      headRef = ref;
+      headSha = tip;
+    }
     const name = ref.replace(/^refs\/heads\//, '');
     if (name === BRANCH_NAME || name.startsWith(`${BRANCH_NAME}-`)) continue;
-    branches.push({ name, tip: line.slice(0, space), head: ref === headRef });
+    branches.push({ name, tip, head: ref === headRef });
+  }
+  if (headRef === null) {
+    const [head, sha] = await Promise.all([project.git(['symbolic-ref', '-q', 'HEAD']), project.git(['rev-parse', '--verify', '-q', 'HEAD'])]);
+    headRef = head.status === 0 ? head.stdout.trim() : null;
+    headSha = sha.status === 0 ? sha.stdout.trim() : null;
   }
   const result = {
     branches,
-    head: { branch: headRef ? headRef.replace(/^refs\/heads\//, '') : null, sha: headSha.status === 0 ? headSha.stdout.trim() : null },
+    head: { branch: headRef ? headRef.replace(/^refs\/heads\//, '') : null, sha: headSha },
   };
   result.signature = JSON.stringify(result);
   return result;
 }
 
-/**
- * The tie of a commit on a user branch: the newest record commit at or
- * before its time that holds every file it holds, byte for byte (files
- * only the record has do not count, since a user's commits are often
- * partial): {sha, exact: true}; else, within 200 record commits, the one
- * with the fewest differing paths, {sha, exact: false, differs}; null
- * when the record has nothing that early. One `diff-tree --stdin` over
- * the candidates' trees (the newest ten first, which is where a match
- * usually is). Cached by sha in `cache`.
- */
-async function tieOf(project, commit, cache, began) {
-  if (cache.has(commit.sha)) return cache.get(commit.sha);
-  if (began === null || commit.at < began) {
-    // Made before the record began: nothing can hold its files.
-    cache.set(commit.sha, null);
-    return null;
-  }
-  const listed = ok(
-    await project.git(['log', '-n', String(TIE_CANDIDATES), `--until=@${commit.at}`, '--format=%H %T', project.ref, '--']),
-    'log',
+/** The pairs' differing paths from one `diff-tree --stdin` (each pair's
+ *  line echoed, then its paths, each ending in NUL): "a b" → paths. A
+ *  pair with no difference is not echoed. */
+async function differing(project, pairs) {
+  const differs = new Map();
+  if (pairs.length === 0) return differs;
+  const input = pairs.map((pair) => `${pair}\n`).join('');
+  const text = ok(
+    await project.git(['diff-tree', '--stdin', '-r', '--no-renames', '--name-only', '--diff-filter=AMT', '-z'], { input }),
+    'diff-tree --stdin',
   );
-  const candidates = listed
-    .split('\n')
-    .filter(Boolean)
-    .map((line) => {
-      const [sha, tree] = line.split(' ');
-      return { sha, tree };
-    });
-  let best = null;
-  for (const batch of [candidates.slice(0, 10), candidates.slice(10)]) {
-    if (batch.length === 0) continue;
-    const trees = [...new Set(batch.map((candidate) => candidate.tree))];
-    const input = trees.map((tree) => `${tree} ${commit.tree}\n`).join('');
-    const text = ok(
-      await project.git(['diff-tree', '--stdin', '-r', '--no-renames', '--name-only', '--diff-filter=AMT', '-z'], { input }),
-      'diff-tree --stdin',
-    );
-    // Each pair's line is echoed, then its paths, each ending in NUL.
-    const differs = new Map();
-    let at = 0;
-    let current = null;
-    const header = /^([0-9a-f]{40,64}) ([0-9a-f]{40,64})\n/;
-    while (at < text.length) {
-      const found = text.slice(at, at + 140).match(header);
-      if (found) {
-        current = found[1];
-        differs.set(current, []);
-        at += found[0].length;
-        continue;
-      }
-      const end = text.indexOf('\0', at);
-      const name = text.slice(at, end === -1 ? text.length : end);
-      if (current !== null && name) differs.get(current).push(name);
-      at = end === -1 ? text.length : end + 1;
+  let at = 0;
+  let current = null;
+  const header = /^([0-9a-f]{40,64}) ([0-9a-f]{40,64})\n/;
+  while (at < text.length) {
+    const found = text.slice(at, at + 140).match(header);
+    if (found) {
+      current = `${found[1]} ${found[2]}`;
+      differs.set(current, []);
+      at += found[0].length;
+      continue;
     }
-    for (const candidate of batch) {
-      const paths = differs.get(candidate.tree) ?? [];
-      if (paths.length === 0) {
-        best = { sha: candidate.sha, exact: true };
-        break;
-      }
-      if (!best || paths.length < best.differs.length) best = { sha: candidate.sha, exact: false, differs: paths.slice(0, CHANGED_KEPT) };
-    }
-    if (best?.exact) break;
+    const end = text.indexOf('\0', at);
+    const name = text.slice(at, end === -1 ? text.length : end);
+    if (current !== null && name) differs.get(current).push(name);
+    at = end === -1 ? text.length : end + 1;
   }
-  cache.set(commit.sha, best);
-  return best;
+  return differs;
+}
+
+/**
+ * The ties of the commits on user branches: for each, the newest record
+ * commit at or before its time that holds every file it holds, byte for
+ * byte (files only the record has do not count, since a user's commits
+ * are often partial): {sha, exact: true}; else, within 200 record
+ * commits, the one with the fewest differing paths, {sha, exact: false,
+ * differs}; null when the record has nothing that early. Cached by sha in
+ * `cache`. Batched, so a graph of many user commits costs three gits, not
+ * three per commit: one log of the record's commits and trees (each
+ * commit's candidates are the first 200 of it at or before its time, as
+ * `log -n 200 --until` would list them), one `diff-tree --stdin` over every
+ * commit's newest ten candidates (which is where a match usually is), and
+ * one over the rest's for the commits with no exact match among those.
+ */
+async function tiesFor(project, commits, cache, began) {
+  const wanted = [];
+  for (const commit of commits) {
+    if (commit.line === 'record' || cache.has(commit.sha)) continue;
+    // Made before the record began: nothing can hold its files.
+    if (began === null || commit.at < began) cache.set(commit.sha, null);
+    else wanted.push(commit);
+  }
+  if (wanted.length > 0) {
+    const newest = Math.max(...wanted.map((commit) => commit.at));
+    const listed = ok(await project.git(['log', `--until=@${newest}`, '--format=%H %T %ct', project.ref, '--']), 'log');
+    const record = listed
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        const [sha, tree, at] = line.split(' ');
+        return { sha, tree, at: Number(at) };
+      });
+    const candidatesOf = new Map();
+    for (const commit of wanted) {
+      const candidates = [];
+      for (const entry of record) {
+        if (entry.at > commit.at) continue;
+        candidates.push(entry);
+        if (candidates.length === TIE_CANDIDATES) break;
+      }
+      candidatesOf.set(commit.sha, candidates);
+    }
+    const pairsOf = (commit, from, to) => [...new Set(candidatesOf.get(commit.sha).slice(from, to).map((candidate) => `${candidate.tree} ${commit.tree}`))];
+    const first = await differing(project, [...new Set(wanted.flatMap((commit) => pairsOf(commit, 0, 10)))]);
+    const exactIn = (commit, from, to) => candidatesOf.get(commit.sha).slice(from, to).some((candidate) => !first.has(`${candidate.tree} ${commit.tree}`));
+    const rest = await differing(project, [...new Set(wanted.filter((commit) => !exactIn(commit, 0, 10)).flatMap((commit) => pairsOf(commit, 10)))]);
+    for (const commit of wanted) {
+      let best = null;
+      for (const candidate of candidatesOf.get(commit.sha)) {
+        const key = `${candidate.tree} ${commit.tree}`;
+        const paths = first.get(key) ?? rest.get(key) ?? [];
+        if (paths.length === 0) {
+          best = { sha: candidate.sha, exact: true };
+          break;
+        }
+        if (!best || paths.length < best.differs.length) best = { sha: candidate.sha, exact: false, differs: paths.slice(0, CHANGED_KEPT) };
+      }
+      cache.set(commit.sha, best);
+    }
+  }
+  for (const commit of commits) if (commit.line !== 'record') commit.tie = cache.get(commit.sha);
 }
 
 /**
@@ -542,37 +571,167 @@ async function tieOf(project, commit, cache, began) {
  * pages back in time (the same log, until that commit's time; the page
  * drops any it already holds). Answer: {tip, head, branches, commits,
  * more, total}; each commit is {sha, parents, line ('record' or the
- * branch it was reached by), refs, time, subject, files, plus, minus,
- * changed}, a record commit with its message parsed (parseSubject), a
- * user commit with its author and its `tie`; with `document` (a path in
- * the project), each with its `scope` and `beside` too (scoped).
+ * branch it was reached by), refs, time, subject, files, changed}, a
+ * record commit with its message parsed (parseSubject), a user commit
+ * with its author and its `tie`; with `document` (a path in the project),
+ * each with its `scope` and `beside` too (scoped).
  */
 async function graph(project, { before = null, limit = LIMIT, ties = new Map(), document = null } = {}) {
+  const { tip, head, branches, commits, more, total } = await rawGraph(project, { before, limit, ties });
+  return { tip, head, branches, commits: scoped(project.root, commits, document), more, total };
+}
+
+/** The graph unscoped, each commit still with its `paths`, and what it
+ *  was read against: the record's tip, the refs' signature, `most`. The
+ *  log, the refs, the record's first commit and its count are asked at
+ *  once (they are independent reads), then the ties. */
+async function rawGraph(project, { before = null, limit = LIMIT, ties = new Map(), now = null } = {}) {
   const most = Math.max(1, Math.min(MOST, Number.isInteger(limit) ? limit : LIMIT));
-  const tip = await project.tip();
+  const tip = await recordTip(project);
   let until = null;
   if (before) {
     const sha = await resolveCommit(project, before);
     until = ok(await project.git(['log', '-1', '--format=%ct', sha, '--']), 'log').trim();
   }
   const revisions = [`--exclude=${BRANCH_NAME}`, `--exclude=${BRANCH_NAME}-*`, '--branches', ...(tip ? [project.ref] : [])];
-  const commits = await logCommits(project, revisions, { limit: most + 1, until });
+  const [commits, { branches, head, signature }, began, total] = await Promise.all([
+    logCommits(project, revisions, { limit: most + 1, until }),
+    now ?? refs(project),
+    // When the record began: its root commit's time.
+    tip
+      ? project.git(['log', '--max-parents=0', '--format=%at', project.ref, '--']).then((listed) => Math.min(...ok(listed, 'log').split('\n').filter(Boolean).map(Number)))
+      : null,
+    tip ? project.git(['rev-list', '--count', project.ref, '--']).then((listed) => Number(ok(listed, 'rev-list').trim())) : 0,
+  ]);
   const more = commits.length > most;
   if (more) commits.length = most;
-  const { branches, head } = await refs(project);
   const tipsOf = new Map();
   for (const branch of branches) tipsOf.set(branch.tip, [...(tipsOf.get(branch.tip) ?? []), branch.name]);
   if (tip) tipsOf.set(tip, [...(tipsOf.get(tip) ?? []), project.branchName]);
-  // When the record began: its root commit's time.
-  const began = tip
-    ? Math.min(...ok(await project.git(['log', '--max-parents=0', '--format=%at', project.ref, '--']), 'log').split('\n').filter(Boolean).map(Number))
-    : null;
-  for (const commit of commits) {
-    commit.refs = tipsOf.get(commit.sha) ?? [];
-    if (commit.line !== 'record') commit.tie = await tieOf(project, commit, ties, began);
+  for (const commit of commits) commit.refs = tipsOf.get(commit.sha) ?? [];
+  await tiesFor(project, commits, ties, began);
+  return { tip, head, branches, signature, commits, more, total, most };
+}
+
+/** The most record commits one step of the kept graph takes from
+ *  recordSince; past it, the graph is read afresh. */
+const GROWN = 500;
+
+/**
+ * The graphs kept between a History page's opens, one per project (by
+ * root, for that Project only), so the page opened again, or another
+ * page on the project, is answered without the log: the kept graph
+ * serves while the record's tip (its loose ref file, read) and the user's
+ * refs (one for-each-ref) are as it was read against, and grows by
+ * the record's new commits (recordSince, or what the shell's two-second
+ * look already read: grow) while the refs stay; any other change (a
+ * branch moved, the record rewritten rather than grown, more than 500 new
+ * commits) reads it afresh. The ties stay for the launch, by sha. Each
+ * answer is scoped for its page (scoped), from the same kept commits.
+ */
+class Graphs {
+  constructor() {
+    /** root → {project, tip, head, branches, signature, commits, more, total, most}. */
+    this.kept = new Map();
+    /** root → Map(sha → tie). */
+    this.ties = new Map();
+    /** root → the update under way. */
+    this.reading = new Map();
   }
-  const total = tip ? Number(ok(await project.git(['rev-list', '--count', project.ref, '--']), 'rev-list').trim()) : 0;
-  return { tip, head, branches, commits: scoped(project.root, commits, document), more, total };
+
+  tiesOf(root) {
+    if (!this.ties.has(root)) this.ties.set(root, new Map());
+    return this.ties.get(root);
+  }
+
+  /** The graph as graph() answers it, with the refs' `signature` too. */
+  async graph(project, { document = null } = {}) {
+    const { tip, head, branches, signature, commits, more, total } = await this.fresh(project);
+    return { tip, head, branches, signature, commits: scoped(project.root, commits, document), more, total };
+  }
+
+  /** The kept graph brought up to date; one at a time per project, a
+   *  second caller meanwhile sharing the first's (the shell starts one as
+   *  the History tile is pressed, and the page's own request, made once
+   *  its page has loaded, joins it). */
+  fresh(project) {
+    const root = project.root;
+    if (!this.reading.has(root)) {
+      this.reading.set(
+        root,
+        this.update(project).finally(() => this.reading.delete(root)),
+      );
+    }
+    return this.reading.get(root);
+  }
+
+  async update(project) {
+    const root = project.root;
+    const [tip, now] = await Promise.all([recordTip(project), refs(project)]);
+    let kept = this.kept.get(root) ?? null;
+    if (kept && (kept.project !== project || kept.signature !== now.signature)) kept = null;
+    if (kept && kept.tip !== tip) {
+      const grown = kept.tip && tip ? this.grown(project, kept, await recordSince(project, kept.tip, tip, GROWN)) : null;
+      // A record that moved but did not grow (rewritten, or gone) may no
+      // longer hold what the ties name: they are worked out again.
+      if (!grown) this.ties.delete(root);
+      kept = grown;
+    }
+    if (!kept || kept.tip !== tip) {
+      kept = { project, ...(await rawGraph(project, { ties: this.tiesOf(root), now })) };
+    }
+    this.kept.set(root, kept);
+    return kept;
+  }
+
+  /** The record grew from `from` to `to` by `since` (recordSince's, newest
+   *  first), as the shell's look found: the kept graph grows with it when
+   *  it was read at `from`, and is dropped when it cannot. */
+  grow(project, from, to, since) {
+    const kept = this.kept.get(project.root);
+    if (!kept || kept.project !== project || kept.tip !== from || since[0]?.sha !== to) return;
+    const grown = this.grown(project, kept, since);
+    if (grown) this.kept.set(project.root, grown);
+    else this.kept.delete(project.root);
+  }
+
+  /** The kept graph with the record's new commits at its head, or null
+   *  when they are not a step forward from its tip (none, too many, or a
+   *  record rewritten, or more than 500). The record's ref moves to the
+   *  newest. */
+  grown(project, kept, since) {
+    if (since.length === 0 || since.length >= GROWN || !since.at(-1).parents.includes(kept.tip)) return null;
+    const have = new Set(kept.commits.map((commit) => commit.sha));
+    const fresh = since.filter((commit) => !have.has(commit.sha)).map((commit, i) => ({ ...commit, refs: i === 0 ? [project.branchName] : [] }));
+    const commits = fresh.concat(kept.commits.map((commit) => (commit.sha === kept.tip ? { ...commit, refs: commit.refs.filter((name) => name !== project.branchName) } : commit)));
+    const more = kept.more || commits.length > kept.most;
+    if (commits.length > kept.most) commits.length = kept.most;
+    return { ...kept, tip: since[0].sha, commits, more, total: kept.total + fresh.length };
+  }
+
+  /** The record's commits after `from` up to `to`, newest first, as
+   *  recordSince reads them, from the kept graph alone (no git): when it
+   *  was read or grown up to `to` and holds the record's line back to
+   *  `from`; else null. So a page shown again draws what it missed at once. */
+  since(project, from, to) {
+    const kept = this.kept.get(project.root);
+    if (!kept || kept.project !== project || kept.tip !== to || !from) return null;
+    const bySha = new Map(kept.commits.map((commit) => [commit.sha, commit]));
+    const commits = [];
+    for (let at = to; at !== from; ) {
+      const commit = bySha.get(at);
+      if (!commit || commit.line !== 'record' || commits.length >= GROWN) return null;
+      commits.push(commit);
+      at = commit.parents[0];
+    }
+    return commits;
+  }
+
+  /** A project's kept graph dropped (its last window gone); its ties,
+   *  small and true for good, stay for the launch. */
+  forget(root) {
+    this.kept.delete(root);
+  }
 }
 
 /** The record's commits after `from` up to `to`, newest first, shaped as
@@ -584,7 +743,7 @@ async function recordSince(project, from, to, limit = 500) {
   if (from) checkedSha(from, 'tip');
   const commits = await logCommits(project, [from ? `${from}..${to}` : to], { limit });
   // Reached by a range, not by the ref's name: every one is the record's.
-  return commits.map((commit) => ({ ...commit, line: 'record', ...parseSubject(commit.subject), author: undefined }));
+  return commits.map(({ author: _author, ...commit }) => ({ ...commit, line: 'record', ...parseSubject(commit.subject) }));
 }
 
 /** The record's tip read cheaply, for the shell's two-second look: the
@@ -1416,6 +1575,7 @@ module.exports = {
   parseSubject,
   rewindToTrigger,
   graph,
+  Graphs,
   refs,
   recordSince,
   scoped,

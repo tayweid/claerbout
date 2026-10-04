@@ -92,7 +92,7 @@ copies it into the bundle as `app.json`.
 | `site` | The URL the install line downloads from (`https://knuth.tayweid.io`); the zips and `latest.json` live at `<site>/app/`, and the app checks there for updates. |
 | `elsewhere` | A sentence the install line adds when run off macOS. |
 | `autosave` | `true` keeps the autosave record of every project a window is on (below). Knuth and Plass set it; ManimLive does not. |
-| `smoke` | What `smoke.mjs` checks: `document` (name), `text` (contents), `ready` (a selector) and `readyText` (its text, or per mode `{uv, browser}`), `run` (a selector to click), `written` (a file expected beside the document), `json` (keys it must hold) or `contains` (text it must hold), and `autosave` (subjects the document folder's `claerbout-autosave` branch must show by the end, `["knuth: session open", "knuth: cell run [1]"]`), then `history` and `room` (selectors of the page's History tile and of the room it opens over: the History page is opened in the room and checked there before the window form, its "Keep an untracked/ folder here" box ticked and unticked under "Whole project"; without them, only the window form). With `autosave`, the document's folder must hold no `untracked/`, `.claerbout/` or `.gitignore` the record wrote by itself. With `run` and `written`, the record is asked to hold the written file, and the window form's card for the session-open commit must offer the rewind that removes it, its fine print speaking of a kernel's memory only where a `.py` or `.ipynb` is open. |
+| `smoke` | What `smoke.mjs` checks: `document` (name), `text` (contents), `ready` (a selector) and `readyText` (its text, or per mode `{uv, browser}`), `run` (a selector to click), `written` (a file expected beside the document), `json` (keys it must hold) or `contains` (text it must hold), and `autosave` (subjects the document folder's `claerbout-autosave` branch must show by the end, `["knuth: session open", "knuth: cell run [1]"]`), then `history` and `room` (selectors of the page's History tile and of the room it opens over: the History page is opened in the room and checked there before the window form, its "Keep an untracked/ folder here" box ticked and unticked under "Whole project"; without them, only the window form), and with them `historyTiming` (`{records, first, again}`: a project seeded with that many record commits, and the time from the tile's click to the river drawn on the first open and on the next held to `first` and `again` ms). With `autosave`, the document's folder must hold no `untracked/`, `.claerbout/` or `.gitignore` the record wrote by itself. With `run` and `written`, the record is asked to hold the written file, and the window form's card for the session-open commit must offer the rewind that removes it, its fine print speaking of a kernel's memory only where a `.py` or `.ipynb` is open. |
 
 ## What the shell expects of an engine
 
@@ -414,11 +414,13 @@ node again, or the card's button, to rewind.
   in the window. Escape puts the card away, and with no card open, the
   page. A resize of the window moves nothing by itself: the page measures
   its room (a ResizeObserver, coalesced to a frame, and after a zoom step)
-  and sends `bounds`. The view goes, destroyed with its listeners, when the
-  tile is pressed again, on Escape or the close tile, from View ›
-  History…, and when its window closes or its page navigates (a reload, a
-  page of another app's), and the page hears it each time it comes or
-  goes, so the tile reads pressed exactly while it is up.
+  and sends `bounds`. The view is put away when the tile is pressed
+  again, on Escape or the close tile, from View › History…, and when its
+  window's page navigates (a reload, a page of another app's): hidden and
+  kept, its listeners on the room taken off, so the next open shows it at
+  once (below, "How the view loads"). It is destroyed only with its window
+  (or when its own page's process goes). The page hears it each time it
+  comes or goes, so the tile reads pressed exactly while it is up.
   **View › History…** (⇧⌘H) in a document window does what the tile
   does: the page is told `history {kind: 'toggle'}` and sends `open` with
   its room's box, or, with the view up, the shell puts it away itself.
@@ -500,19 +502,18 @@ node again, or the card's button, to rewind.
     an absolute path against the root as text. So do `compare`'s `others`,
     the rewind's `silent` and `other-app` `documents`, and the steps'
     `silent`. The commits come from one `git log
-    --date-order --parents --source --numstat -z` over `--branches` with the
-    records excluded (`--exclude=claerbout-autosave
+    --date-order --parents --source --name-only -z` over `--branches` with
+    the records excluded (`--exclude=claerbout-autosave
     --exclude='claerbout-autosave-*'`) and this working tree's record by
     name: not `--all`, which would pull in `refs/stash`, remotes and other
-    worktrees' records. `--numstat` reads every blob it counts, so where
-    one is not in the repository (a partial clone's, never fetched; a
-    crafted commit's) the log is asked again for names only
-    (`--name-only`, which reads trees, never a blob; `plus` and `minus` are
-    then 0), and where a tree cannot be read at all (an empty name), for no
-    names: the page always loads, and such a commit's card says why no
-    rewind writes it. Newest first, at most 2000 (`before`, a sha, pages
-    back in time). Each is `{sha, parents, line ('record' or the branch it
-    was reached by), refs, time, subject, files, plus, minus, changed (the
+    worktrees' records. Names only: the river shows no line counts, and
+    names read trees, never a blob, so a blob the repository lacks (a
+    partial clone's, never fetched; a crafted commit's) cannot fail it;
+    where a tree cannot be read at all (an empty name), the log is asked
+    again for no names: the page always loads, and such a commit's card
+    says why no rewind writes it. Newest first, at most 2000 (`before`, a
+    sha, pages back in time). Each is `{sha, parents, line ('record' or the
+    branch it was reached by), refs, time, subject, files, changed (the
     first 20 paths)}`; a record commit has its message parsed (`app`,
     `trigger`: `run` with `cells` and `error`, `timer`, `open`, `close`,
     `rewind-from` with `from`, `rewind-to` with `target` and, for a partial
@@ -520,7 +521,11 @@ node again, or the card's button, to rewind.
     and its `tie`: the newest record commit at or before it that holds every
     file it holds, byte for byte (`{sha, exact: true}`), else the nearest of
     200 (`{sha, exact: false, differs}`), else null; cached by sha for the
-    launch. With a document, each commit also has its `scope`
+    launch (and worked out again when the record moved without growing),
+    and worked out for all a graph's new user commits at once: one log of
+    the record's commits and trees, one `diff-tree --stdin` over every
+    commit's ten newest candidates, one over the rest's where none of those
+    matched. With a document, each commit also has its `scope`
     (`'document'`, `'folder'` or null) and, where it changed the document,
     `beside` (the paths it changed in the document's folder, the
     document's own among them, at most 200), worked out from the same log's
@@ -562,7 +567,7 @@ node again, or the card's button, to rewind.
     are now.
   - `rewind {sha, tip, paths?, anyway?}`: the rewind, below.
   - `history {action: 'close'}`: the page put away (Escape, its close
-    tile): the view removed and destroyed, or the window closed. Answered
+    tile): the view hidden and kept, or the window closed. Answered
     `{closed: true}`.
 
   Cells, `values.json` names and words written are the page's, worked out
@@ -695,13 +700,46 @@ node again, or the card's button, to rewind.
   commits}` (the record grew), `{kind: 'refs', branches, head}` (a branch
   or HEAD moved), `{kind: 'state', state, reason}` (paused, or recording
   again), `{kind: 'focus', at}` and `{kind: 'document'}` (the window
-  brought forward from another document's window). Every two seconds the shell looks at
+  brought forward from another document's window, or the inline view
+  shown again in a window now on another document), and to an inline
+  view, `{kind: 'hidden'}` (put away: the page sets its look back to an
+  open's) and `{kind: 'shown'}` (shown again). Every two seconds the shell looks at
   each project a window of its is on: the record's tip (the loose ref file,
-  read; `git rev-parse` for a packed one), and with a History page open
-  the branches, HEAD and the guards. The History events go to every
-  History page on the project, a view's webContents as well as a
-  window's; `save` and `reload` go to the document windows, a view's
-  among them, whose page answers under it.
+  read; `git rev-parse` for a packed one), and with a History page up
+  the branches, HEAD and the guards; each page hears what moved since it
+  drew (the shell keeps, per page, the tip, refs and guards it last told
+  it). The History events go to every History page up on the project, a
+  view's webContents as well as a window's; a hidden view hears nothing
+  and is caught up when it is shown. `save` and `reload` go to the
+  document windows, a view's among them, whose page answers under it.
+- **How the view loads.** Pressing the tile should show the history at
+  once, so the costs are kept off that moment. The view is made once per
+  window: put away, it is hidden and kept, its page having set its look
+  back to an open's (the card away, "This document", the zoom and folds as
+  they open, the river at now) while no one saw it, and the next open
+  shows it in the next frame. Shown again, it is caught up with what it
+  missed: the record's new commits as `history {kind: 'commit'}` (from the
+  kept graph below, so they are drawn at the tip a frame or two later),
+  `refs` if a branch moved (the page asks for the graph again), `state`
+  for the guards; a window now on another document of the project tells
+  it `document`, and one on another project, or none, loads the page
+  afresh in the same view. The first open of a window makes the view and
+  starts reading the graph at once, while the page loads; the page's own
+  request joins that read. The page paints its frame (the control row and
+  the river's empty track) before the graph arrives. The shell keeps each
+  project's graph between opens (`history.js`, `Graphs`), as read against
+  the record's tip and the user's refs: an open while both are as they
+  were reads the tip's ref file and one `for-each-ref`, and nothing else;
+  new record commits are added to it (the ones the two-second look reads
+  for the pages, or `recordSince` from the kept tip), and a branch moved,
+  the record rewritten, or more than 500 new commits reads it afresh. It
+  is dropped when the project's last window goes. A fresh read asks the
+  log (names only), the refs, the record's first commit and its count at
+  once, then the ties, batched. Commits go to the page without what only
+  the shell reads (their trees and times), and without line counts. On
+  this Mac a first open of 500 record commits draws the river about 0.3 s
+  after the click, and an open after that in the next frame; the smoke
+  test holds both to a budget (below).
 - **Two apps on one project.** Each shell writes which documents it has
   open on which project to a folder every Claerbout app shares,
   `~/Library/Application Support/Claerbout/presence/` (one file per app and
@@ -717,7 +755,12 @@ node again, or the card's button, to rewind.
 
 The tests (`npm run test:history`) run real git in temporary repositories
 under `os.tmpdir()`: the graph with the record, a user branch and a fork,
-the ties and paging; the graph scoped to one document of a course with
+the ties and paging; the kept graph (a commit arriving between opens
+appears, whether the two-second look or the open finds it, two opens at
+once sharing one read, a page shown again given the new commits with no
+git, a branch moved or the record rewritten read afresh, a rewind's two
+commits appearing, and a second project, or a new Project for the same
+root, never answered with another's); the graph scoped to one document of a course with
 two lectures (each commit's scope, what a run changed beside the document,
 nothing from the first fill or a rewind, a document at the top whose
 folder is the project, the record's new commits scoped as they arrive,
@@ -811,9 +854,10 @@ ResizeObserver on the room, coalesced to a frame, and after a zoom step;
 the window's own resize moves nothing. Answered `{ok: true}`, and `{ok:
 false}` when no view is up or the box is not one.
 
-`history {action: 'close'}`: the view removed and destroyed, from the page
-(its tile pressed again) or from the History page itself (Escape, its
-close tile). Answered `{closed: true}`, whether or not one was up.
+`history {action: 'close'}`: the view put away (hidden, and kept for the
+next open), from the page (its tile pressed again) or from the History page
+itself (Escape, its close tile). Answered `{closed: true}`, whether or not
+one was up.
 
 `history {kind: 'inline', state: 'open' | 'closed'}`, an event to the
 document page, whenever the view opens or goes, by either side or because
@@ -851,10 +895,12 @@ fixture keeping the record, checks its `session open` commit and that
 the record wrote nothing into the document's folder by itself, then
 presses the page's History tile and checks the History view over its room:
 at the room's box, its page given a graph with that commit and drawing it,
-laid out inline, following the room when the window grows, closed by
-Escape with the page told, toggled from View › History… and gone with a
-reload of its page, nothing left behind; then, with `note.txt` changed
-and recorded alone, the view opened again from it: the switch on "This
+laid out inline, following the room when the window grows, put away by
+Escape with the page told and kept (one page, never a second), shown
+again from View › History… as the same page, and put away with a reload
+of its page; then, with `note.txt` changed and recorded alone while it
+was put away, the view shown again from it and caught up with the
+record's tip: the switch on "This
 document" ("Its folder" left out), fewer commits drawn than the whole
 project's, the session-open card ticking `note.txt` alone ("Rewind 1
 file", "all 2 files" a click away, the fine print saying `note.txt` is
@@ -865,7 +911,14 @@ unchecked (never under "This document"): ticked, `untracked/` and the
 "This document", the switch not remembered; then the History window, the
 same graph, and the session-open commit's card, whose rewind's fine print
 says nothing of a kernel's memory with `note.txt` open and says it once
-another app's presence file lists a notebook on the project), and then the
-update test: the fixture built twice under two build ids
+another app's presence file lists a notebook on the project; and, the
+fixture's config asking (`smoke.historyTiming: {records: 500, first:
+1000, again: 100}`), a project seeded with 500 record commits by `git
+fast-import` (300 files in 30 folders, user commits on main and a branch
+beside it), a document of it opened, and the time from the tile's click to
+the river drawn printed for the first open and for the next, each failing
+above its budget in ms: about 0.3 s and a few ms on this Mac, against
+1.2 s and 0.28 s before the view was kept and the graph cached, so either
+way back fails), and then the update test: the fixture built twice under two build ids
 (`CLAERBOUT_BUILD`), the first installed and updating itself to the second
 from a site folder. `npm run fixture:build` packages it. All need macOS.

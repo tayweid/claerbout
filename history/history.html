@@ -428,6 +428,9 @@
       #toast button:hover { background: rgba(255, 255, 255, 0.06); }
 
       /* ---------- no record ---------- */
+      /* The river's empty track, drawn with the frame before the graph arrives (see loadGraph). */
+      #track { position: absolute; top: 26px; bottom: 48px; width: 2px; background: repeating-linear-gradient(to bottom, rgba(157, 184, 214, 0.42) 0 2px, transparent 2px 8px); border-radius: 1px; pointer-events: none; }
+      #track[hidden] { display: none; }
       #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; overflow-y: auto; }
       #empty[hidden] { display: none; }
       .em { display: flex; gap: 28px; align-items: flex-start; max-width: 600px; }
@@ -525,6 +528,7 @@
       <div id="mini" hidden></div>
       <div id="toast" hidden></div>
       <div id="empty" hidden></div>
+      <div id="track" aria-hidden="true"></div>
     </main>
 
     <script>
@@ -542,7 +546,7 @@
              (the graph's `untracked` is the same box as it is: untracked/ a folder, the files in it)
            request {type:'rewind', sha, tip, paths?, anyway?}
              → {ok, from, to, target, written, removed, skipped, silent} | {same:true} | {refused, ...}
-           events  history {kind:'commit'|'refs'|'state'|'focus'|'document', ...}, rewind {step, state, detail?}
+           events  history {kind:'commit'|'refs'|'state'|'focus'|'document'|'hidden'|'shown', ...}, rewind {step, state, detail?}
              (save and reload done with detail.silent: the documents whose windows did not answer save)
          Cells, values.json names and word counts are worked out here, from
          blob text: the shell knows git, not the apps' formats. */
@@ -560,6 +564,10 @@
           tools.appendChild(Object.assign(document.createElement('div'), { className: 'rule' }));
           tools.appendChild($('#rb-about'));
         }
+        // Marks for the load's timing (the smoke test reads them): performance entries named
+        // claerbout:<what>, `painted` once the frame after it is drawn.
+        const mark = (what) => performance.mark(`claerbout:${what}`);
+        const painted = (what) => { mark(what); requestAnimationFrame(() => setTimeout(() => mark(`${what}-painted`), 0)); };
         const ask = (message) => (shell ? shell.request(message).catch((error) => ({ error: String(error && error.message ? error.message : error) })) : Promise.resolve(null));
         window.addEventListener('error', (event) => void ask({ type: 'error', message: `${event.message} (${event.lineno})` }));
         window.addEventListener('unhandledrejection', (event) => void ask({ type: 'error', message: String(event.reason && event.reason.stack ? event.reason.stack : event.reason) }));
@@ -1035,6 +1043,8 @@
           paintChrome();
           placeCard();
           drawMini();
+          // The record's tip drawn, for a test to wait on.
+          document.documentElement.dataset.tip = S.graph.tip || '';
         }
         function paintChrome() {
           const g = S.graph, D = S.data;
@@ -1325,7 +1335,7 @@
           tickByScope(compare);
           refreshCard();
           await Promise.all([workOutCommit(c, detail), workOutRewind(c, compare)]);
-          if (stillHere()) refreshCard();
+          if (stillHere()) { refreshCard(); painted('card'); }
         }
         function compareFor(sha, paths) {
           const key = `${sha} ${S.graph.tip || ''} ${S.graph.state}`;
@@ -2130,6 +2140,7 @@
           const keep = !opts || opts.keep !== false;
           const atBottom = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 80;
           const g = await ask({ type: 'history', action: 'graph' });
+          mark('graph');
           if (!g || g.error) { showEmpty('error', g); return; }
           // Opened from a document, or from another one now: that document's history, every time.
           const doc = g.scope ? g.scope.document : null;
@@ -2150,6 +2161,7 @@
           S.compares.clear();
           if (g.state === 'none' || !g.tip) { showEmpty(g.state === 'none' ? g.reason : g.state === 'paused' ? 'waiting' : 'begins', g); return; }
           $('#empty').hidden = true;
+          $('#track').hidden = true;
           scroll.hidden = false;
           build();
           const first = !S.drawn;
@@ -2163,6 +2175,7 @@
             if (c) void loadCard(c);
           }
           render();
+          painted('river');
           if (first) {
             if (S.at && reveal(S.at)) { const c = find(S.at); S.at = null; select(c.sha, { center: true }); }
             else scroll.scrollTop = scroll.scrollHeight;
@@ -2186,6 +2199,29 @@
           if (top) keepAnchor(() => render(), top);
           else render();
         }
+        // Put away (the shell hides the view and keeps it for the next open): the look an open
+        // has, set while no one sees it, so the next open shows it at once: the card away, the
+        // scope the page opens on ("This document" is not remembered), the zoom and folds as
+        // they open, the river at now. What a rewind would do is asked afresh next time (the
+        // working tree may change meanwhile). A rewind under way keeps its card.
+        function putAway() {
+          hideToast();
+          S.compares.clear();
+          if (S.busy) return;
+          S.sel = null;
+          S.card = null;
+          S.landed = null;
+          S.hintOn = false;
+          S.zoom = 'runs';
+          S.dayFold = new Map();
+          S.openClusters = new Set();
+          S.showBranch = true;
+          S.scope = scopeOf() ? 'document' : 'project';
+          if (!S.data) return;
+          build();
+          render();
+          scroll.scrollTop = scroll.scrollHeight;
+        }
         let refetch = null;
         const refetchSoon = () => { clearTimeout(refetch); refetch = setTimeout(() => void loadGraph({ keep: true }), 250); };
 
@@ -2206,6 +2242,7 @@
               build();
               if (S.card && S.sel) { S.card.compare = null; const c = find(S.sel); if (c) void loadCard(c); }
               render();
+              painted('tip');
               if (atBottom) scroll.scrollTop = scroll.scrollHeight;
               void refreshKeep();
             } else if (detail.kind === 'commit' || detail.kind === 'refs') refetchSoon();
@@ -2219,6 +2256,11 @@
             } else if (detail.kind === 'document') {
               // Brought forward from another document's window: that document's history now.
               if (!S.busy) { select(null); void loadGraph({ keep: false }); }
+            } else if (detail.kind === 'hidden') {
+              putAway();
+            } else if (detail.kind === 'shown') {
+              // Shown again: marked when the next frame is drawn (the smoke test's second open).
+              painted('shown');
             } else if (detail.kind === 'focus' && detail.at && S.data) {
               if (reveal(detail.at)) select(find(detail.at).sha, { center: true });
             }
@@ -2272,6 +2314,7 @@
           mini.hidden = true;
           card.hidden = true;
           const e = $('#empty');
+          $('#track').hidden = true;
           e.hidden = false;
           e.innerHTML = emptyHTML(v, g);
           placeBed();
@@ -2286,6 +2329,12 @@
           $('#rb-branch').disabled = true;
         }
 
+        // The frame first: the control row is the page's own markup, and the river's empty track
+        // stands where the river will run, so the panel never sits blank while the graph comes.
+        (function placeTrack() {
+          const room = $('#room'), w = Math.min(G.w, Math.max(560, room.clientWidth - 36));
+          $('#track').style.left = Math.round((room.clientWidth - w) / 2 + G.rx - 1) + 'px';
+        })();
         if (!shell) showEmpty('error', null);
         else void loadGraph({ keep: false });
       })();
