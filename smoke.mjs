@@ -314,7 +314,10 @@ if (smoke.run) {
 // and its claerbout-autosave branch has the commits the config's
 // `smoke.autosave` names ("<app>: session open", and for an app whose run
 // commits, "<app>: cell run [1]"). The user's side of that repository is
-// untouched: HEAD is still unborn. Then the history view's graph.
+// untouched: HEAD is still unborn; and the record wrote nothing into the
+// folder by itself: no untracked/, no .claerbout/, no .gitignore (an
+// untracked/ folder is the user's choice, below). Then the history view's
+// graph.
 if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.length > 0) {
   const folder = path.dirname(doc);
   const recorded = () => {
@@ -339,6 +342,8 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
   }
   const head = spawnSync('git', ['-C', folder, 'rev-parse', '--verify', '-q', 'HEAD'], { encoding: 'utf8' });
   if (head.status === 0) await fail(`the autosave record touched the user's HEAD (${head.stdout.trim()})`);
+  const strays = ['untracked', '.claerbout', '.gitignore'].filter((name) => fs.existsSync(path.join(folder, name)));
+  if (strays.length > 0) await fail(`the autosave record wrote ${strays.join(', ')} into the project by itself`);
   console.log(`smoke (${NAME}, ${mode}): autosave record: ${subjects.join(' | ')}`);
 
   // The history view (history.js, history/history.html): the shell's own
@@ -527,8 +532,11 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
   // The temporary folder is reached through a link (/var is /private/var),
   // so the fine print saying the document is saved first and reloads is the
   // shell naming documents by their real paths in the project. "Whole
-  // project" then ticks every file; and the view, opened once more, is on
-  // "This document" again: the switch is not remembered.
+  // project" then ticks every file, and shows the box "Keep an untracked/
+  // folder here" (never under "This document"), unchecked: ticked, the
+  // folder and the .gitignore line appear; unticked, both are gone. The
+  // view, opened once more, is on "This document" again: the switch is not
+  // remembered.
   if (rewinds && smoke.history && smoke.room) {
     fs.appendFileSync(doc, 'a second line, recorded alone\n');
     await page.evaluate(() => window.claerbout.request({ type: 'autosave', trigger: 'smoke: the document alone' }));
@@ -553,9 +561,10 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
     }
     if (id === null) await fail('the History tile laid no History view over the room a second time');
     await until(id, "!!document.querySelector('#rows .row.t-open')", 'drew no session-open node');
-    const scopeRow = () => inPage(id, "({ hidden: document.getElementById('scope').hidden, on: [...document.querySelectorAll('#scope button.on')].map((b) => b.dataset.s), shown: [...document.querySelectorAll('#scope button')].filter((b) => !b.hidden).map((b) => b.dataset.s), picks: document.querySelectorAll('#rows .row.pick').length })");
+    const scopeRow = () => inPage(id, "({ hidden: document.getElementById('scope').hidden, on: [...document.querySelectorAll('#scope button.on')].map((b) => b.dataset.s), shown: [...document.querySelectorAll('#scope button')].filter((b) => !b.hidden).map((b) => b.dataset.s), picks: document.querySelectorAll('#rows .row.pick').length, keep: !!document.getElementById('keep') })");
     const opened = await scopeRow();
     if (opened.hidden || opened.on.join() !== 'document' || opened.shown.join() !== 'document,project') await fail(`the scope switch opened as ${JSON.stringify(opened)}, not "This document" of document and project`);
+    if (opened.keep) await fail('under "This document" the page shows the untracked/ box, which belongs to the whole project');
     const ticks = () => inPage(id, "({ boxes: Object.fromEntries([...document.querySelectorAll('#card input[data-path]')].map((b) => [b.dataset.path, b.checked])), button: (document.querySelector('#card .rwl') || {}).textContent || '', all: (document.querySelector('#card .lnk[data-act=\"all\"]') || {}).textContent || null, fine: (document.querySelector('#card .rwfine') || {}).textContent || '' })");
     await inPage(id, "document.querySelector('#rows .row.t-open').click()");
     await until(id, "document.querySelectorAll('#card input[data-path]').length >= 2", 'offered no rewind of two files on the session-open card');
@@ -581,6 +590,30 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
     if (Object.values(every.boxes).some((ticked) => !ticked) || !every.button.startsWith(`Rewind all ${Object.keys(every.boxes).length} files`) || every.all !== null) {
       await fail(`under "Whole project" the card ticks ${JSON.stringify(every)}, not every file`);
     }
+    // The untracked/ box, round trip: ticked, the folder and the line; unticked, gone.
+    const box = () => inPage(id, "(() => { const b = document.querySelector('#keep input'); return b ? { checked: b.checked, disabled: b.disabled, label: document.getElementById('keep').textContent } : null; })()");
+    const lined = () => {
+      try {
+        return /^\/untracked\/$/m.test(fs.readFileSync(path.join(folder, '.gitignore'), 'utf8'));
+      } catch {
+        return false;
+      }
+    };
+    const onDisk = () => ({ folder: fs.existsSync(path.join(folder, 'untracked')), line: lined(), manifest: fs.existsSync(path.join(folder, '.claerbout', 'untracked.json')) });
+    const unticked = await box();
+    if (!unticked || unticked.checked || unticked.disabled || !unticked.label.startsWith('Keep an untracked/ folder here: large data the record pins by name and hash, never by content')) {
+      await fail(`under "Whole project" the untracked/ box is ${JSON.stringify(unticked)}, not unchecked and ready`);
+    }
+    await inPage(id, "document.querySelector('#keep input').click()");
+    await until(id, "(() => { const b = document.querySelector('#keep input'); return b && b.checked && !b.disabled; })()", 'did not show the untracked/ box ticked');
+    const ticked = onDisk();
+    if (!ticked.folder || !ticked.line || !ticked.manifest) await fail(`ticked, the untracked/ box left ${JSON.stringify(ticked)}`);
+    await inPage(id, "document.querySelector('#keep input').click()");
+    await until(id, "(() => { const b = document.querySelector('#keep input'); return b && !b.checked && !b.disabled; })()", 'did not show the untracked/ box unticked');
+    const untickedOnDisk = onDisk();
+    if (untickedOnDisk.folder || untickedOnDisk.line || untickedOnDisk.manifest || fs.existsSync(path.join(folder, '.gitignore')) || fs.existsSync(path.join(folder, '.claerbout'))) {
+      await fail(`unticked, the untracked/ box left ${JSON.stringify(untickedOnDisk)}`);
+    }
     const close = async () => {
       await inPage(id, "window.claerbout.request({ type: 'history', action: 'close' })");
       for (let i = 0; i < 40 && (await inlineIds()).length > 0; i++) await page.waitForTimeout(100);
@@ -600,7 +633,7 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
     if (reopened.on.join() !== 'document') await fail(`opened again, the scope switch is on ${JSON.stringify(reopened.on)}, not "This document"`);
     await close();
     console.log(`smoke (${NAME}, ${mode}): history: opened from ${name}, "This document": ${opened.picks} commits drawn, the card ticks ${name} alone ("${mine.button}", ${mine.all} a click away), and says it is saved first and reloads`);
-    console.log(`smoke (${NAME}, ${mode}): history: "Whole project": ${whole} commits drawn, every file ticked ("${every.button}"); opened again, "This document"`);
+    console.log(`smoke (${NAME}, ${mode}): history: "Whole project": ${whole} commits drawn, every file ticked ("${every.button}"), the untracked/ box ticked (the folder and the line) and unticked (gone); opened again, "This document"`);
   }
 
   // The window form: a `history` request without the room's box opens the

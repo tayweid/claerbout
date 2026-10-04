@@ -1254,7 +1254,9 @@ function projectFor(entry) {
  *  project and its folder's ('' at the top), with each commit's `scope`
  *  and `beside` (history.js, scoped). The page opens on that document
  *  every time. `windows` and `others` name documents by their paths in the
- *  project, resolved through any link, as the record's trees do. */
+ *  project, resolved through any link, as the record's trees do.
+ *  `untracked` is the whole project's "Keep an untracked/ folder here"
+ *  box as it is (history.js, untracked). */
 async function historyGraph(entry, message) {
   const shape = { app: appName, project: null, tip: null, head: null, branches: [], commits: [], more: false, total: 0, windows: [], others: [], scope: null };
   const project = projectFor(entry);
@@ -1279,6 +1281,7 @@ async function historyGraph(entry, message) {
     project: { root: project.root, name: path.basename(project.root), display: tilde(project.root), branch: project.branchName },
     windows: history.pagePaths(project.root, openOn(project.root).map((window) => documents.get(window))),
     others: pageOthers(project.root),
+    untracked: await history.untracked(project, {}),
   };
 }
 
@@ -1373,7 +1376,8 @@ async function historyRewind(entry, message) {
 }
 
 /** A History page's requests, from its window or its inline view:
- *  `history {action: 'graph' | 'commit' | 'blob' | 'compare' | 'close'}`
+ *  `history {action: 'graph' | 'commit' | 'blob' | 'compare' | 'untracked'
+ *  | 'close'}`
  *  and `rewind`, for its own project only. `close` puts the page away
  *  (the view destroyed, the window closed). */
 async function answerHistory(entry, message, { open, close }) {
@@ -1395,6 +1399,8 @@ async function answerHistory(entry, message, { open, close }) {
                 others: () => pageOthers(project.root),
               })
             : null;
+        case 'untracked':
+          return project ? await history.untracked(project, { keep: message.keep }) : null;
         case undefined:
         case 'open':
           return await open();

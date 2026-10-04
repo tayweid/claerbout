@@ -34,7 +34,8 @@
 // through a link; and paths are compared as the volume compares them
 // (Unicode form always, case on a volume that ignores it, as macOS's
 // does), so Untracked/ is untracked/. The top .gitignore is written by the
-// rewind itself, with the record's /untracked/ line in it, made in the
+// rewind itself, with the record's /untracked/ line in it where the project
+// keeps an untracked/ folder (autosave.js: the user's choice), made in the
 // shell's state folder and renamed into place, so another app's fill never
 // finds one without the line, nor the new file before it is in place. One
 // rewind at a time writes a working tree, whichever shell runs it: each
@@ -1341,6 +1342,26 @@ function rewind(project, request, { save = async () => null, onStep = () => {}, 
   });
 }
 
+// MARK: - untracked/, by the user's choice
+
+/**
+ * `history {action: 'untracked', keep?}`: the whole project's "Keep an
+ * untracked/ folder here" box. The record writes nothing into a project by
+ * itself (autosave.js); an untracked/ folder, with its .gitignore line and
+ * its manifest, is the user's choice. Without `keep`, the box as it is:
+ * {ok: true, kept, files, unusable?}. With `keep` true or false, the
+ * folder made or put away (Project.keepUntracked, under the record's
+ * guards and on its queue): {ok: true, kept, files}, or {ok: false,
+ * refused, reason?, detail?, kept, files}; putting it away is refused
+ * while it holds a file ('not-empty').
+ */
+async function untracked(project, request) {
+  const keep = request?.keep;
+  if (keep === undefined || keep === null) return { ok: true, ...(await project.untrackedState()) };
+  if (typeof keep !== 'boolean') throw new Error('keep must be true or false');
+  return project.keepUntracked(keep);
+}
+
 // MARK: - Two shells on one project
 
 /**
@@ -1404,6 +1425,7 @@ module.exports = {
   blob,
   compare,
   rewind,
+  untracked,
   presence,
   relativeTo,
   pagePaths,
