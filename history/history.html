@@ -36,6 +36,15 @@
          or "Whole project" while the page is open; it opens on the
          document every time.
 
+         Under "Whole project" (and in a window opened with no document,
+         which is the whole project), a box below the river's mouth:
+         "Keep an untracked/ folder here". The record writes nothing into a
+         project by itself; an untracked/ folder, its .gitignore line and
+         its manifest are the user's choice. Unchecked unless the folder
+         exists; ticked, the shell makes all three at once; unticked, it
+         puts them away, only while the folder is empty (with files in it
+         the box is locked, and its tooltip says why).
+
          Click a node and a card opens beside it: what that commit changed,
          then what a rewind would change against now, file by file, with a
          box to leave a file out. Click the node again, or the card's
@@ -234,6 +243,16 @@
       .t-dayfold .lb b { font-weight: 600; }
       .t-cluster .lb { font: 12px var(--sans); color: var(--room-ink-faint); }
       .t-cluster:hover .lb { color: var(--room-ink-soft); }
+      /* under the whole project's "now": whether the project keeps an untracked/ folder */
+      #keep { position: absolute; left: var(--lx); display: flex; align-items: flex-start; gap: 9px; font: 12px/1.45 var(--sans); color: var(--room-ink-soft); cursor: pointer; }
+      #keep input { margin: 2px 0 0; flex: 0 0 auto; accent-color: var(--accent); cursor: inherit; }
+      #keep code { font: 11.5px var(--mono); color: var(--room-ink); }
+      #keep:hover:not(.locked) { color: var(--room-ink); }
+      #keep .n { color: var(--room-ink-faint); }
+      #keep .no { color: #e2b765; }
+      #keep.locked { cursor: default; }
+      #keep.locked input { opacity: 0.45; }
+      #keep[data-label]::after { top: calc(100% + 6px); left: 0; }
 
       .nd { position: absolute; left: var(--rx); top: 50%; transform: translate(-50%, -50%); border-radius: 50%; }
       .nd.run { width: 11px; height: 11px; background: var(--room-ink); box-shadow: 0 0 0 3px var(--bg); }
@@ -518,6 +537,9 @@
            request {type:'history', action:'blob', sha, path} → {text} | {binary, size} | {large, size} | {missing}
            request {type:'history', action:'compare', sha, paths?}
              → {tip, now, target, onRecord, unrecorded, write, remove, skipped, kept, same, untracked, untrackedGone, others, blocked, invalid?}
+           request {type:'history', action:'untracked', keep?}
+             → {ok, kept, files, unusable?} | {ok:false, refused:'paused'|'not-empty'|'unusable'|'failed', reason?, detail?, kept, files}
+             (the graph's `untracked` is the same box as it is: untracked/ a folder, the files in it)
            request {type:'rewind', sha, tip, paths?, anyway?}
              → {ok, from, to, target, written, removed, skipped, silent} | {same:true} | {refused, ...}
            events  history {kind:'commit'|'refs'|'state'|'focus'|'document', ...}, rewind {step, state, detail?}
@@ -596,7 +618,7 @@
           graph: null, data: null, zoom: 'runs', sel: null, dayFold: new Map(), openClusters: new Set(), showBranch: true,
           busy: false, rows: [], rmap: new Map(), landed: null, cardX: 580, rowW: 562, selAt: 0, hintOn: false, selRow: -1,
           details: new Map(), blobs: new Map(), compares: new Map(), card: null, at: null, loading: false, last: null,
-          scope: 'project', scopeFor: undefined,
+          scope: 'project', scopeFor: undefined, keepBusy: false, keepSaid: null,
         };
         try {
           const at = new URL(location.href).searchParams.get('at');
@@ -876,6 +898,43 @@
           const landed = c && S.landed && S.landed.has(c.sha) ? ' landed' : '';
           return `<div class="row t-${r.type}${pick ? ' pick' : ''}${sel}${near}${hint}${landed}" data-i="${i}" style="top:${r.y}px;height:${r.h}px;width:${S.rowW}px">${tm}${nd}${lb}</div>`;
         }
+        /* ---------- under the whole project's "now": an untracked/ folder, by choice ---------- */
+        // The record writes nothing into a project by itself. The box is checked while the project
+        // has an untracked/ folder; ticked, the shell makes it (its .gitignore line and manifest with
+        // it); unticked, it puts an empty one away. With files in it the box is locked, and says why.
+        function keepHTML(rows) {
+          const u = S.graph && S.graph.untracked, now = rows[rows.length - 1];
+          if (!u || !now || now.type !== 'now' || scopeNow() !== 'project') return '';
+          const files = u.files || 0;
+          const why = u.unusable ? `untracked/ cannot be kept here: ${u.unusable}`
+            : u.kept && files ? `untracked/ holds ${plural(files, 'file')}: move ${files === 1 ? 'it' : 'them'} out to put the folder away` : '';
+          const locked = S.keepBusy || !!why;
+          const n = u.kept ? `<span class="n"> · ${files ? `${plural(files, 'file')} pinned` : 'empty'}</span>` : '';
+          const said = S.keepSaid ? `<span class="no"> · ${esc(S.keepSaid)}</span>` : '';
+          return `<label id="keep" class="${locked ? 'locked' : ''}" style="top:${now.y + now.h + 8}px;max-width:${Math.max(240, S.rowW - labelX())}px"${why ? ` data-label="${esc(why)}"` : ''}>`
+            + `<input type="checkbox"${u.kept ? ' checked' : ''}${locked ? ' disabled' : ''}>`
+            + `<span>Keep an <code>untracked/</code> folder here: large data the record pins by name and hash, never by content${n}${said}</span></label>`;
+        }
+        const keepState = (u) => ({ kept: u.kept, files: u.files || 0, ...(u.unusable ? { unusable: u.unusable } : {}) });
+        function keepRefusal(a) {
+          if (!a || a.error) return `not changed: ${(a && a.error) || 'no answer'}`;
+          if (a.refused === 'paused') return `not now: ${a.reason}`;
+          if (a.refused === 'not-empty') return `not put away: it holds ${plural(a.files || 0, 'file')}`;
+          if (a.refused === 'unusable') return `not kept: ${a.reason}`;
+          return `not changed: ${a.detail || a.refused || 'no answer'}`;
+        }
+        // The box follows the folder: asked again as the record grows, so a file dropped in locks it.
+        async function refreshKeep() {
+          if (!S.graph || S.keepBusy || scopeNow() !== 'project') return;
+          const u = await ask({ type: 'history', action: 'untracked' });
+          if (!u || typeof u.kept !== 'boolean' || !S.graph || S.keepBusy) return;
+          const before = JSON.stringify(S.graph.untracked || null);
+          S.graph.untracked = keepState(u);
+          if (JSON.stringify(S.graph.untracked) === before) return;
+          S.keepSaid = null;
+          if (S.data) render();
+        }
+
         // The selected node's hint: a second click rewinds, when the card says a rewind would change something.
         function again(c) {
           if (S.sel !== c.sha || !S.card || S.card.sha !== c.sha || !rewindable()) return '';
@@ -972,7 +1031,7 @@
           lines.setAttribute('width', w);
           lines.setAttribute('height', height);
           lines.innerHTML = linesSVG(rows, height);
-          rowsEl.innerHTML = rows.map(rowHTML).join('');
+          rowsEl.innerHTML = rows.map(rowHTML).join('') + keepHTML(rows);
           paintChrome();
           placeCard();
           drawMini();
@@ -1976,8 +2035,22 @@
           if (S.busy) showSteps();
           else if (S.card && S.card.refusal) card.scrollTop = card.scrollHeight;
         }, true);
+        // The untracked/ box: the shell makes the folder or puts it away, and answers how it is now.
+        rowsEl.addEventListener('change', async (e) => {
+          const box = e.target.closest('#keep input');
+          if (!box || !S.graph || S.keepBusy) return;
+          const keep = box.checked;
+          S.keepBusy = true;
+          S.keepSaid = null;
+          render();
+          const answer = await ask({ type: 'history', action: 'untracked', keep });
+          S.keepBusy = false;
+          if (answer && typeof answer.kept === 'boolean' && S.graph) S.graph.untracked = keepState(answer);
+          if (!answer || !answer.ok) S.keepSaid = keepRefusal(answer);
+          if (S.data) render();
+        });
         scroll.addEventListener('click', (e) => {
-          if (S.busy || e.target.closest('.row') || e.target.closest('#card')) return;
+          if (S.busy || e.target.closest('.row') || e.target.closest('#card') || e.target.closest('#keep')) return;
           if (S.sel) select(null);
           hideToast();
         });
@@ -2037,6 +2110,7 @@
           }
           if (S.sel && S.rmap.get(S.sel)) center(S.sel);
           else scroll.scrollTop = scroll.scrollHeight;
+          void refreshKeep();
         }));
         $('#rb-branch').addEventListener('click', () => {
           if (!S.data || !S.data.users.length) return;
@@ -2133,6 +2207,7 @@
               if (S.card && S.sel) { S.card.compare = null; const c = find(S.sel); if (c) void loadCard(c); }
               render();
               if (atBottom) scroll.scrollTop = scroll.scrollHeight;
+              void refreshKeep();
             } else if (detail.kind === 'commit' || detail.kind === 'refs') refetchSoon();
             else if (detail.kind === 'state' && S.graph) {
               S.graph.state = detail.state;

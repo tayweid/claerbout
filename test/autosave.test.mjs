@@ -22,7 +22,14 @@
 // .claerbout/ignore: a tracked file it matches is out of the record and in
 // the user's index and HEAD, never hashed; a pattern written mid-session
 // counts at the next fill; a negation, a .gitignore negation, a malformed
-// file, and the user's own excludes file beside it.
+// file, and the user's own excludes file beside it; and untracked/ by
+// choice: a project opened and filled three times gains nothing (no
+// .claerbout/, no manifest, its .gitignore as it was), keepUntracked(true)
+// makes the folder, the line and the manifest at once and a file dropped in
+// is pinned by hash and kept out of the tree, keepUntracked(false) on an
+// empty folder removes exactly what was added (and is refused with a file
+// in it, or under a guard), and a project an earlier build wrote into keeps
+// working, nothing it once wrote removed.
 // Everything lives under os.tmpdir(); the user's git configuration is kept
 // out (GIT_CONFIG_GLOBAL points at an empty file), so the fallback
 // identity is what a bare machine gets.
@@ -132,10 +139,9 @@ test('a folder with no repository gets one, and the first commit holds the docum
   assert.ok(fs.existsSync(path.join(dir, '.git')), 'a repository was initialised');
   assert.deepEqual(subjects(dir), ['fixture: session open']);
   assert.ok(tree(dir).includes('note.txt'));
-  assert.ok(tree(dir).includes('.claerbout/untracked.json'), 'the manifest is in the track');
-  assert.ok(fs.existsSync(path.join(dir, 'untracked')), 'untracked/ exists');
-  assert.match(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), /^\/untracked\/$/m);
-  assert.ok(!tree(dir).some((entry) => entry.startsWith('untracked/')), 'untracked/ is ignored');
+  // Nothing written into the project by the record itself: untracked/ is the user's choice.
+  for (const name of ['untracked', '.claerbout', '.gitignore']) assert.ok(!fs.existsSync(path.join(dir, name)), `no ${name}`);
+  assert.deepEqual(tree(dir), ['note.txt']);
   // The user's side is untouched: HEAD is still unborn, the index empty.
   assert.throws(() => sh(dir, 'rev-parse', '--verify', '-q', 'HEAD'));
   assert.equal(sh(dir, 'ls-files'), '');
@@ -305,6 +311,7 @@ test('the identity: the repository\'s own when set, else the autosave\'s', async
 test('an existing .gitignore is appended, not replaced, and one that already ignores untracked/ is left alone', async () => {
   const dir = folder('ignore');
   fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules/'); // no trailing newline
+  fs.mkdirSync(path.join(dir, 'untracked'));
   const project = await projectAt(dir);
   await project.prepare();
   assert.equal(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8').split('\n')[0], 'node_modules/');
@@ -315,6 +322,7 @@ test('an existing .gitignore is appended, not replaced, and one that already ign
   // An unanchored line, as an earlier build wrote, is left as it is.
   const other = folder('ignored');
   fs.writeFileSync(path.join(other, '.gitignore'), 'untracked/\n');
+  fs.mkdirSync(path.join(other, 'untracked'));
   const second = await projectAt(other);
   await second.prepare();
   assert.equal(fs.readFileSync(path.join(other, '.gitignore'), 'utf8'), 'untracked/\n');
@@ -693,6 +701,8 @@ test('symbolic links at untracked/, .claerbout/, the manifest or .gitignore are 
   for (const [name, link, said] of cases) {
     const dir = folder(`link-${name}`);
     fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 1\n');
+    // The user keeps an untracked/ folder (but where the link is at its name).
+    if (name !== 'untracked') fs.mkdirSync(path.join(dir, 'untracked'));
     link(dir);
     const project = await projectAt(dir);
     lines.length = 0;
@@ -767,6 +777,7 @@ test('a sparse checkout is recorded: the manifest and new files outside the cone
   sh(dir, 'sparse-checkout', 'set', 'a');
   fs.mkdirSync(path.join(dir, 'c'));
   fs.writeFileSync(path.join(dir, 'c', 'z.txt'), 'new, outside the cone\n');
+  fs.mkdirSync(path.join(dir, 'untracked'));
   const cone = sh(dir, 'sparse-checkout', 'list');
   const userIndex = fs.readFileSync(path.join(dir, '.git', 'index'));
   const project = await projectAt(dir);
@@ -923,6 +934,7 @@ test('the manifest and .gitignore are recorded whatever the ignore rules say', a
   fs.writeFileSync(path.join(dir, '.gitignore'), '*.json\n.claerbout/\n.gitignore\n');
   fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 1\n');
   fs.writeFileSync(path.join(dir, 'settings.json'), '{}\n');
+  fs.mkdirSync(path.join(dir, 'untracked'));
   const project = await projectAt(dir);
   await project.prepare();
   fs.writeFileSync(path.join(dir, 'untracked', 'data.bin'), 'data');
@@ -1176,6 +1188,7 @@ test('the .gitignore line is anchored: a folder named untracked deeper down stay
   sh(dir, 'add', '.');
   sh(dir, ...as, 'commit', '-q', '-m', 'a');
   fs.writeFileSync(path.join(dir, 'tests', 'untracked', 'new.txt'), 'new\n');
+  fs.mkdirSync(path.join(dir, 'untracked'));
   const project = await projectAt(dir);
   assert.equal((await project.commit('timer')).committed, true);
   assert.match(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), /^\/untracked\/$/m);
@@ -1197,6 +1210,7 @@ test('while the manifest is kept, a fill leaves the top untracked/ out even when
   fs.mkdirSync(path.join(dir, 'tests', 'untracked'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'tests', 'untracked', 'fixture.txt'), 'deeper down\n');
   fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 1\n');
+  fs.mkdirSync(path.join(dir, 'untracked'));
   const project = await projectAt(dir);
   await project.prepare();
   fs.writeFileSync(path.join(dir, 'untracked', 'big.bin'), 'big\n');
@@ -1217,6 +1231,7 @@ test('while the manifest is kept, a fill leaves the top untracked/ out even when
 test('a file named untracked, made after this launch kept the manifest, is recorded at once: the pathspec leaves out the folder only', async () => {
   const dir = folder('untracked-later');
   fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 1\n');
+  fs.mkdirSync(path.join(dir, 'untracked'));
   const project = await projectAt(dir);
   fs.writeFileSync(path.join(dir, 'untracked.txt'), 'near the name\n');
   assert.equal((await project.commit('timer')).committed, true);
@@ -1387,6 +1402,159 @@ test('a repository whose root git reports in a hidden folder of the home folder 
   assert.throws(() => sh(store, 'rev-parse', '--verify', '-q', BRANCH), 'no record branch');
   assert.ok(!fs.existsSync(path.join(hidden, 'untracked')), 'nothing written in ~/.config/nvim');
   await autosave.quit();
+});
+
+/** Every path under a folder but .git, with each file's bytes: what the
+ *  working tree holds, to compare whole. */
+function snapshotOf(dir) {
+  const found = {};
+  const walk = (folder) => {
+    for (const entry of fs.readdirSync(path.join(dir, folder), { withFileTypes: true })) {
+      const relative = folder ? `${folder}/${entry.name}` : entry.name;
+      if (relative === '.git') continue;
+      if (entry.isDirectory()) {
+        found[`${relative}/`] = null;
+        walk(relative);
+      } else found[relative] = fs.readFileSync(path.join(dir, relative), 'latin1');
+    }
+  };
+  walk('');
+  return found;
+}
+
+test('the record writes nothing into a project by itself: opened and filled three times, no .claerbout/, no manifest, .gitignore as it was', async () => {
+  const dir = folder('opt-in-none');
+  fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 1\n');
+  fs.writeFileSync(path.join(dir, '.gitignore'), 'build/\n*.log');
+  const before = snapshotOf(dir);
+  const autosave = new Autosave({ appName: 'Knuth', stateDir: folder('state'), log, interval: 60_000, binary });
+  const window = { id: 'opt-in' };
+  await autosave.setDocument(window, path.join(dir, 'doc.py'));
+  const project = autosave.project(window);
+  await project.queue;
+  for (const value of [2, 3]) {
+    fs.writeFileSync(path.join(dir, 'doc.py'), `x = ${value}\n`);
+    before['doc.py'] = `x = ${value}\n`;
+    assert.equal((await autosave.notice(window, `cell run [${value}]`)).committed, true);
+  }
+  assert.deepEqual(subjects(dir), ['knuth: cell run [3]', 'knuth: cell run [2]', 'knuth: session open']);
+  assert.deepEqual(snapshotOf(dir), before, 'the working tree holds what the user put there, and nothing more');
+  assert.equal(project.manifest, false);
+  assert.deepEqual(tree(dir).sort(), ['.gitignore', 'doc.py']);
+  assert.ok(!lines.some((line) => line.includes(dir) && line.includes('added to .gitignore')), 'no line was added');
+  await autosave.quit();
+});
+
+test('keepUntracked(true): untracked/, the line and the manifest at once; a file dropped in is pinned by hash and kept out of the tree', async () => {
+  const dir = folder('opt-in-keep');
+  fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 1\n');
+  const project = await projectAt(dir);
+  assert.equal((await project.commit('session open')).committed, true);
+  assert.ok(!fs.existsSync(path.join(dir, 'untracked')));
+  assert.deepEqual(await project.untrackedState(), { kept: false, files: 0 });
+  assert.deepEqual(await project.keepUntracked(true), { ok: true, kept: true, files: 0 });
+  assert.ok(fs.statSync(path.join(dir, 'untracked')).isDirectory(), 'untracked/ made');
+  assert.equal(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), '# Claerbout: large data, caches and scratch, pinned by .claerbout/untracked.json\n/untracked/\n');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, '.claerbout', 'untracked.json'), 'utf8')), { files: [] }, 'the manifest written at once');
+  // The next fill records the change as usual.
+  assert.equal((await project.commit('timer')).committed, true);
+  assert.deepEqual(tree(dir).sort(), ['.claerbout/untracked.json', '.gitignore', 'doc.py']);
+  // And the record keeps it: a file dropped in is pinned, never recorded.
+  fs.writeFileSync(path.join(dir, 'untracked', 'big.bin'), 'large data\n');
+  assert.equal((await project.commit('timer')).committed, true);
+  assert.ok(!tree(dir).some((entry) => entry.startsWith('untracked/')), 'the data is out of the tree');
+  const manifest = JSON.parse(sh(dir, 'show', `${BRANCH}:.claerbout/untracked.json`));
+  assert.deepEqual(manifest.files.map((entry) => [entry.path, entry.sha256]), [['untracked/big.bin', sha256('large data\n')]]);
+  assert.deepEqual(await project.untrackedState(), { kept: true, files: 1 });
+  // Asked again: nothing twice.
+  assert.equal((await project.keepUntracked(true)).ok, true);
+  assert.equal(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8').match(/^\/untracked\/$/gm).length, 1);
+  // With a file in it, it is not put away, and nothing goes.
+  const kept = snapshotOf(dir);
+  assert.deepEqual(await project.keepUntracked(false), { ok: false, refused: 'not-empty', kept: true, files: 1 });
+  assert.deepEqual(snapshotOf(dir), kept);
+});
+
+test('keepUntracked(false) on an empty folder removes exactly what was added: the user\'s .gitignore, a .claerbout/ignore and a Finder .DS_Store aside', async () => {
+  // A project with a .gitignore of its own and a .claerbout/ignore.
+  const dir = folder('opt-in-drop');
+  fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 1\n');
+  fs.writeFileSync(path.join(dir, '.gitignore'), 'build/'); // no trailing newline
+  fs.mkdirSync(path.join(dir, '.claerbout'));
+  fs.writeFileSync(path.join(dir, '.claerbout', 'ignore'), '*.mp4\n');
+  const project = await projectAt(dir);
+  assert.equal((await project.commit('session open')).committed, true);
+  const before = snapshotOf(dir);
+  const recorded = tree(dir).sort();
+  assert.equal((await project.keepUntracked(true)).ok, true);
+  assert.equal(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), 'build/\n# Claerbout: large data, caches and scratch, pinned by .claerbout/untracked.json\n/untracked/\n');
+  assert.equal((await project.commit('timer')).committed, true);
+  // Finder looked inside, and left its .DS_Store, in a folder below as well.
+  fs.mkdirSync(path.join(dir, 'untracked', 'raw'));
+  fs.writeFileSync(path.join(dir, 'untracked', '.DS_Store'), 'finder');
+  fs.writeFileSync(path.join(dir, 'untracked', 'raw', '.DS_Store'), 'finder');
+  assert.deepEqual(await project.untrackedState(), { kept: true, files: 0 });
+  assert.deepEqual(await project.keepUntracked(false), { ok: true, kept: false, files: 0 });
+  const after = snapshotOf(dir);
+  // The .gitignore keeps the newline its line needed: the record's own lines are gone, not the user's.
+  assert.equal(after['.gitignore'], 'build/\n');
+  delete after['.gitignore'];
+  delete before['.gitignore'];
+  assert.deepEqual(after, before, 'untracked/, the manifest and the line gone; .claerbout/ignore kept');
+  assert.equal(project.manifest, false);
+  assert.equal((await project.commit('timer')).committed, true);
+  assert.deepEqual(tree(dir).sort(), recorded, 'the next fill records it');
+  // A project with no .gitignore: the one made for the line goes too.
+  const bare = folder('opt-in-drop-bare');
+  fs.writeFileSync(path.join(bare, 'doc.py'), 'x = 1\n');
+  const second = await projectAt(bare);
+  assert.equal((await second.commit('session open')).committed, true);
+  const was = snapshotOf(bare);
+  assert.equal((await second.keepUntracked(true)).ok, true);
+  assert.equal((await second.commit('timer')).committed, true);
+  assert.equal((await second.keepUntracked(false)).ok, true);
+  assert.deepEqual(snapshotOf(bare), was);
+  // Under the record's guards, as its other writes are.
+  assert.equal((await second.keepUntracked(true)).ok, true);
+  fs.writeFileSync(path.join(bare, '.git', 'index.lock'), '');
+  const paused = snapshotOf(bare);
+  assert.deepEqual(await second.keepUntracked(false), { ok: false, refused: 'paused', reason: 'git holds index.lock', kept: true, files: 0 });
+  assert.deepEqual(snapshotOf(bare), paused, 'nothing removed while git is at work');
+  fs.rmSync(path.join(bare, '.git', 'index.lock'));
+});
+
+test('a project that had the line and the manifest before keeps working, and nothing the record once wrote is removed by it', async () => {
+  const dir = folder('opt-in-before');
+  fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 1\n');
+  // As an earlier build left it: the folder, the line (unanchored, as one wrote it) and the manifest.
+  const line = '# Claerbout: large data, caches and scratch, pinned by .claerbout/untracked.json\nuntracked/\n';
+  fs.writeFileSync(path.join(dir, '.gitignore'), line);
+  fs.mkdirSync(path.join(dir, 'untracked'));
+  fs.mkdirSync(path.join(dir, '.claerbout'));
+  fs.writeFileSync(path.join(dir, '.claerbout', 'untracked.json'), '{\n  "files": []\n}\n');
+  fs.writeFileSync(path.join(dir, 'untracked', 'data.csv'), 'a,b\n');
+  const project = await projectAt(dir);
+  assert.equal((await project.commit('session open')).committed, true);
+  assert.equal(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), line, 'the line left as it is');
+  assert.deepEqual(JSON.parse(sh(dir, 'show', `${BRANCH}:.claerbout/untracked.json`)).files.map((entry) => entry.path), ['untracked/data.csv']);
+  assert.ok(!tree(dir).some((entry) => entry.startsWith('untracked/')));
+  // The folder taken away by hand: the line and the manifest stay, kept up, and no folder comes back.
+  fs.rmSync(path.join(dir, 'untracked'), { recursive: true });
+  assert.equal((await project.commit('timer')).committed, true);
+  assert.ok(!fs.existsSync(path.join(dir, 'untracked')), 'untracked/ is not made again');
+  assert.equal(fs.readFileSync(path.join(dir, '.gitignore'), 'utf8'), line);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, '.claerbout', 'untracked.json'), 'utf8')), { files: [] });
+  assert.ok(tree(dir).includes('.claerbout/untracked.json'), 'the manifest still recorded');
+  // A new launch on it says the same.
+  const again = await projectAt(dir);
+  fs.writeFileSync(path.join(dir, 'doc.py'), 'x = 2\n');
+  assert.equal((await again.commit('session open')).committed, true);
+  assert.equal(again.manifest, true);
+  assert.ok(!fs.existsSync(path.join(dir, 'untracked')));
+  // Put away from the history view, the earlier build's line goes too, and the file with it.
+  fs.mkdirSync(path.join(dir, 'untracked'));
+  assert.equal((await again.keepUntracked(false)).ok, true);
+  assert.deepEqual(Object.keys(snapshotOf(dir)).sort(), ['doc.py']);
 });
 
 test('the error line is the last one that is not a hint or a warning', () => {

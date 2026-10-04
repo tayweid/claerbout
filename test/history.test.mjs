@@ -23,7 +23,9 @@
 // named; a file .claerbout/ignore keeps out, and the rules themselves,
 // are left alone and named; and for the page opened from a document: the graph scoped to it,
 // and a project reached through a link naming its documents by their paths
-// in it.
+// in it; and the untracked request: the box as it is, refused under a
+// guard, the folder kept (through a rewind to a commit from before too),
+// refused with a file in it, and put away once empty.
 // Everything lives under os.tmpdir(); the user's git configuration is kept
 // out (GIT_CONFIG_GLOBAL points at an empty file).
 import assert from 'node:assert/strict';
@@ -71,6 +73,8 @@ const write = (dir, file, text) => {
 };
 const read = (dir, file) => fs.readFileSync(path.join(dir, file), 'utf8');
 const exists = (dir, file) => fs.existsSync(path.join(dir, file));
+/** A file's text, or null where there is none. */
+const readIf = (dir, file) => (exists(dir, file) ? read(dir, file) : null);
 
 /** A project on a folder with a repository whose main has one commit. */
 async function projectAt(dir, appName = 'fixture') {
@@ -350,7 +354,7 @@ test('the record\'s guards refuse a rewind: a merge in progress, index.lock, the
 test('a path the record never held is not removed', async () => {
   const { dir, project, first, second } = await recorded('never-held');
   write(dir, 'fresh.txt', 'made since the last commit\n');
-  write(dir, '.gitignore', `${read(dir, '.gitignore')}*.log\n`);
+  write(dir, '.gitignore', `${readIf(dir, '.gitignore') ?? ''}*.log\n`);
   write(dir, 'debug.log', 'ignored\n');
   const result = await history.rewind(project, { sha: first, tip: second });
   assert.equal(result.ok, true, JSON.stringify(result));
@@ -658,7 +662,7 @@ test('a crafted commit is refused whole, before anything is recorded or removed,
     write(dir, 'later.txt', 'later\n');
     const tip = (await project.commit('timer')).hash;
     assert.ok(tip, what);
-    const gitignore = read(dir, '.gitignore');
+    const gitignore = readIf(dir, '.gitignore');
     const before = subjects(dir).length;
     const preview = await history.compare(project, commit);
     assert.ok(preview.invalid, `${what}: the card says so: ${JSON.stringify(preview)}`);
@@ -675,7 +679,7 @@ test('a crafted commit is refused whole, before anything is recorded or removed,
     assert.equal(subjects(dir).length, before, `${what}: nothing recorded`);
     assert.equal(read(dir, 'later.txt'), 'later\n', `${what}: nothing removed`);
     assert.equal(read(dir, 'c.txt'), 'c\n', `${what}: nothing removed`);
-    assert.equal(read(dir, '.gitignore'), gitignore, `${what}: nothing written`);
+    assert.equal(readIf(dir, '.gitignore'), gitignore, `${what}: nothing written`);
     assert.deepEqual(listing(path.join(dir, '.git', 'hooks')), hooks, `${what}: .git/hooks untouched`);
     assert.deepEqual(listing(outside), ['victim.txt'], `${what}: nothing outside`);
     assert.ok(!fs.readdirSync(project.stateDir).some((name) => name.startsWith('rewind-')), `${what}: no throwaway index left`);
@@ -862,6 +866,44 @@ test('nothing is removed or written through a link that takes a folder\'s place 
   assert.equal(await history.removePath(root, 'gone.txt'), false);
 });
 
+test('the untracked/ request: the box as it is; kept on request and then by the record, through a rewind too; put away only while empty; under the guards', async () => {
+  const { dir, project, first } = await recorded('keep-untracked');
+  // The record wrote nothing of its own: no untracked/, no line, no manifest.
+  for (const name of ['untracked', '.claerbout', '.gitignore']) assert.ok(!exists(dir, name), `no ${name}`);
+  assert.deepEqual(await history.untracked(project, {}), { ok: true, kept: false, files: 0 });
+  await assert.rejects(history.untracked(project, { keep: 'yes' }), /keep must be true or false/);
+  // Under the record's guards, as a rewind is.
+  fs.writeFileSync(path.join(dir, '.git', 'MERGE_HEAD'), '0'.repeat(40));
+  assert.deepEqual(await history.untracked(project, { keep: true }), { ok: false, refused: 'paused', reason: 'a merge is in progress on main', kept: false, files: 0 });
+  assert.ok(!exists(dir, 'untracked'), 'nothing made while a guard holds');
+  fs.rmSync(path.join(dir, '.git', 'MERGE_HEAD'));
+  // Ticked: the folder, the line and the manifest at once; recorded at the next fill.
+  assert.deepEqual(await history.untracked(project, { keep: true }), { ok: true, kept: true, files: 0 });
+  assert.equal(read(dir, '.gitignore'), IGNORE_LINES);
+  assert.equal(read(dir, MANIFEST), '{\n  "files": []\n}\n');
+  write(dir, 'untracked/data.csv', 'x,y\n');
+  const kept = (await project.commit('timer')).hash;
+  const files = sh(dir, 'ls-tree', '-r', '--name-only', kept).split('\n');
+  assert.ok(files.includes('.gitignore') && files.includes(MANIFEST) && !files.some((file) => file.startsWith('untracked/')), files.join(', '));
+  assert.deepEqual(await history.untracked(project, {}), { ok: true, kept: true, files: 1 });
+  // A rewind to a commit from before: untracked/ is left as it is, and .gitignore keeps the line.
+  const back = await history.rewind(project, { sha: first, tip: kept });
+  assert.equal(back.ok, true, JSON.stringify(back));
+  assert.equal(read(dir, 'untracked/data.csv'), 'x,y\n');
+  assert.equal(read(dir, '.gitignore'), IGNORE_LINES, 'the record added its line where the target had none');
+  assert.ok(!sh(dir, 'ls-tree', '-r', '--name-only', back.to).split('\n').some((file) => file.startsWith('untracked/')));
+  // With a file in it, unticking is refused and nothing goes.
+  assert.deepEqual(await history.untracked(project, { keep: false }), { ok: false, refused: 'not-empty', kept: true, files: 1 });
+  assert.ok(exists(dir, 'untracked/data.csv') && exists(dir, MANIFEST) && exists(dir, '.gitignore'));
+  // Emptied, it is put away: the folder, the manifest, .claerbout/ and the line, recorded at the next fill.
+  fs.rmSync(path.join(dir, 'untracked', 'data.csv'));
+  assert.deepEqual(await history.untracked(project, { keep: false }), { ok: true, kept: false, files: 0 });
+  for (const name of ['untracked', '.claerbout', '.gitignore']) assert.ok(!exists(dir, name), `${name} gone`);
+  const gone = (await project.commit('timer')).hash;
+  const left = sh(dir, 'ls-tree', '-r', '--name-only', gone).split('\n');
+  assert.ok(!left.includes('.gitignore') && !left.includes(MANIFEST), left.join(', '));
+});
+
 test('a file past 1 MB is not read, and one huge file costs only itself its patch', async () => {
   const dir = folder('large');
   const project = await projectAt(dir);
@@ -955,6 +997,8 @@ test('the new .gitignore is made in the state folder, never in the working tree,
   at(dir, now() - 100, 'commit', '-q', '-m', 'Before the record');
   const old = sh(dir, 'rev-parse', 'HEAD');
   write(dir, 'a.txt', 'a, later\n');
+  // The project keeps an untracked/ folder, so the rewind adds the record's line.
+  fs.mkdirSync(path.join(dir, 'untracked'));
   const tip = (await project.commit('session open')).hash;
   const top = listing(dir);
   const renames = [];

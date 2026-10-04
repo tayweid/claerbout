@@ -35,15 +35,19 @@
 // lock its rewind holds beside index.lock, history.js), or while a merge,
 // rebase, cherry-pick or revert is in progress; all of that is checked
 // again just before the ref moves, so only a few milliseconds of race
-// remain. A commit lands only when the tree differs from the tip's. In the
-// working tree the record does write
-// untracked/, a /untracked/ line in .gitignore (anchored, so a folder
-// named untracked deeper down is the user's as ever; none when the rules
+// remain. A commit lands only when the tree differs from the tip's. The
+// record writes nothing into a project by itself. Only where the project
+// has an untracked/ folder (the user's choice: made by hand, or by the
+// history view's "Keep an untracked/ folder here", keepUntracked) does it
+// write a /untracked/ line in .gitignore (anchored, so a folder named
+// untracked deeper down is the user's as ever; none when the rules
 // already ignore untracked/) and .claerbout/untracked.json, never through
 // a symbolic link: a link (or anything else that is not a folder or a
 // file) at any of those names turns the manifest off for that project,
-// said once. While the manifest is kept, a fill leaves the top untracked/
-// out by pathspec as well, whatever .gitignore says at that moment. The
+// said once. A manifest an earlier build wrote is kept up while it is
+// there, and nothing the record once wrote is removed by itself. A fill
+// leaves the top untracked/ out by pathspec as well, whatever .gitignore
+// says at that moment (nothing to leave out where there is none). The
 // manifest is made in the shell's state folder and renamed into place, so
 // no fill (another app's included) ever finds half of one, or a new file
 // beside it.
@@ -54,8 +58,8 @@
 // closes; quitting flushes, bounded. Messages are "<app>: <trigger>". A
 // rewind from the history view (history.js) records "rewind from" and
 // "rewind to" through this same commit path, the second always.
-// untracked/ (large data, caches, scratch) is ignored but kept inside the
-// track by a manifest, .claerbout/untracked.json, rewritten before every
+// untracked/ (large data, caches, scratch), where a project keeps one, is
+// ignored but kept inside the track by a manifest, .claerbout/untracked.json, rewritten before every
 // commit with each file's size, mtime and SHA-256 (rehashed only when size
 // or mtime changed; the hashes are cached in the shell's state folder),
 // and always recorded, whatever the ignore rules say. Common secret files
@@ -142,6 +146,13 @@ const UNTRACKED = 'untracked';
  *  (tests/untracked/), in the user's own git as well as the record's,
  *  while the manifest covers only the top one. */
 const IGNORE_LINES = `# Claerbout: large data, caches and scratch, pinned by .claerbout/untracked.json\n/${UNTRACKED}/\n`;
+/** The record's lines as this build and earlier ones wrote them (an
+ *  earlier build's unanchored), each with LF and CRLF line ends: all that
+ *  keepUntracked(false) removes from .gitignore, those exact lines. */
+const IGNORE_BLOCKS = [IGNORE_LINES, IGNORE_LINES.replace(`/${UNTRACKED}/`, `${UNTRACKED}/`)].flatMap((block) => [block, block.replace(/\n/g, '\r\n')]);
+/** What Finder leaves in a folder that was only looked at: not a file of
+ *  the project's when untracked/ is put away. */
+const FINDER_LITTER = '.DS_Store';
 const MANIFEST = path.join('.claerbout', 'untracked.json');
 const MANIFEST_PATH = MANIFEST.split(path.sep).join('/');
 /** The project's own rules for the record, in gitignore syntax, kept out
@@ -876,9 +887,15 @@ class Project {
     this.log = log;
     this.windows = new Set();
     this.timer = null;
+    /** untracked/ is a folder and its line seen to (prepare()). */
     this.prepared = false;
-    /** untracked/ and .claerbout/ are folders: the manifest is kept. */
-    this.manifest = true;
+    /** The manifest is kept: the project has an untracked/ folder, or a
+     *  manifest an earlier build wrote. Never by default. */
+    this.manifest = false;
+    /** A link, or something that is not a folder or a file, at one of the
+     *  record's names: no manifest, and no pathspec for untracked/, for
+     *  this launch (said once). */
+    this.untrackedOff = false;
     /** core.ignorecase, asked once (caseless()). */
     this.ignoreCase = null;
     /** One git job at a time per project, and how many are queued. */
@@ -948,53 +965,80 @@ class Project {
     return next;
   }
 
-  /** A folder of the record's in the working tree, made when missing;
-   *  false (said once) when a symbolic link or something that is not a
-   *  folder has its name. Never followed: a link to ~ would have the
-   *  manifest walk and hash the whole home folder. */
-  async folder(name) {
-    const full = path.join(this.root, name);
-    let kind;
+  /** What is at a name in the working tree, never followed: kindOf's
+   *  word, or the error's code when it cannot be told. */
+  async kindAt(name) {
     try {
-      kind = await kindOf(full);
-      if (kind === 'missing') {
-        await fsp.mkdir(full);
-        return true;
-      }
+      return await kindOf(path.join(this.root, name));
     } catch (error) {
-      kind = error.code ?? 'unusable';
+      return error.code ?? 'unusable';
     }
-    if (kind === 'folder') return true;
-    const what = kind === 'link' ? 'is a symbolic link' : kind === 'file' || kind === 'other' ? 'exists and is not a folder' : `cannot be used (${kind})`;
-    this.once(`folder ${name}`, `autosave: ${name} ${what}, so untracked/ is not kept and has no manifest (${this.root})`);
-    return false;
   }
 
-  /** untracked/ exists and is ignored (a /untracked/ line appended to
-   *  .gitignore unless the rules already ignore it: an unanchored line an
-   *  earlier build wrote is left as it is); .claerbout/ exists. Once per
-   *  process; idempotent on disk. Neither, and no manifest, when a file or
-   *  a link has either name, or when the line has to go into a .gitignore
-   *  that is a link (git reads no linked .gitignore, and the append would
-   *  land in the file it points to). */
+  /** Why untracked/ cannot be kept here, {key, line}, or null: something
+   *  that is not a folder at untracked/ or .claerbout/ (never followed: a
+   *  link to ~ would have the manifest walk and hash the whole home
+   *  folder), or, when the line has to be added (`ignored` false), a
+   *  .gitignore that is not a file (git reads no linked .gitignore, and
+   *  the append would land in the file it points to). */
+  async untrackedFault(ignored) {
+    for (const name of [UNTRACKED, '.claerbout']) {
+      const kind = await this.kindAt(name);
+      if (kind === 'missing' || kind === 'folder') continue;
+      const what = kind === 'link' ? 'is a symbolic link' : kind === 'file' || kind === 'other' ? 'exists and is not a folder' : `cannot be used (${kind})`;
+      return { key: `folder ${name}`, line: `${name} ${what}` };
+    }
+    if (!ignored) {
+      const kind = await this.kindAt('.gitignore');
+      if (kind !== 'missing' && kind !== 'file') return { key: 'gitignore', line: `.gitignore ${kind === 'link' ? 'is a symbolic link' : 'is not a file'}` };
+    }
+    return null;
+  }
+
+  /** untracked/ off for this launch, said once. */
+  turnOff({ key, line }) {
+    this.untrackedOff = true;
+    this.manifest = false;
+    this.prepared = true;
+    this.once(key, `autosave: ${line}, so untracked/ is not kept and has no manifest (${this.root})`);
+  }
+
+  /**
+   * Whether the manifest is kept, asked at every fill (an lstat or two):
+   * only where the project has an untracked/ folder, the user's choice.
+   * Then untracked/ is ignored (a /untracked/ line appended to .gitignore
+   * unless the rules already ignore it: an unanchored line an earlier
+   * build wrote is left as it is), once per process while the folder
+   * stays; .claerbout/ is made with the manifest. With no untracked/,
+   * nothing is written: no line, no .claerbout/, no manifest, unless a
+   * manifest an earlier build wrote is there, which is kept up as before
+   * (its line left as it is). Neither, said once, when a file or a link
+   * has either name, or when the line has to go into a .gitignore that is
+   * a link.
+   */
   async prepare() {
+    if (this.untrackedOff) return;
+    const kind = await this.kindAt(UNTRACKED);
+    if (kind === 'missing') {
+      this.prepared = false;
+      this.manifest = (await this.kindAt('.claerbout')) === 'folder' && (await this.kindAt(MANIFEST)) === 'file';
+      return;
+    }
     if (this.prepared) return;
     const ignored = (await this.git(['check-ignore', '-q', `${UNTRACKED}/`])).status !== 1;
+    const fault = await this.untrackedFault(ignored);
+    if (fault) {
+      this.turnOff(fault);
+      return;
+    }
+    this.manifest = true;
+    if (ignored) {
+      this.prepared = true;
+      return;
+    }
     const file = path.join(this.root, '.gitignore');
-    const kind = ignored ? null : await kindOf(file);
-    if (kind !== null && kind !== 'missing' && kind !== 'file') {
-      this.manifest = false;
-      this.prepared = true;
-      this.once('gitignore', `autosave: .gitignore ${kind === 'link' ? 'is a symbolic link' : 'is not a file'}, so untracked/ is not kept and has no manifest (${this.root})`);
-      return;
-    }
-    this.manifest = (await this.folder(UNTRACKED)) && (await this.folder('.claerbout'));
-    if (!this.manifest || ignored) {
-      this.prepared = true;
-      return;
-    }
     const line = IGNORE_LINES;
-    if (kind === 'missing') {
+    if ((await this.kindAt('.gitignore')) === 'missing') {
       await fsp.writeFile(file, line, { flag: 'wx' });
     } else {
       const text = await fsp.readFile(file, 'utf8');
@@ -1008,6 +1052,153 @@ class Project {
     }
     this.prepared = true;
     this.log(`autosave: /${UNTRACKED}/ added to .gitignore (${this.root})`);
+  }
+
+  /** The manifest written now (writeManifest); false, said once, when a
+   *  link or something not a file is at its name or its folder's. */
+  async pin() {
+    const written = await writeManifest(this.root, path.join(this.stateDir, 'hashes.json'), {
+      unreadable: (file) => this.once(`unhashed ${file}`, `autosave: ${file} cannot be read, so the manifest leaves it out (${this.root})`),
+      secrets: (count) => (this.manifestSecrets = count),
+      stage: this.stateDir,
+    });
+    if (written !== null) return written;
+    this.untrackedOff = true;
+    this.manifest = false;
+    this.once('manifest', `autosave: ${MANIFEST_PATH} or its folder is a symbolic link or not a file, so untracked/ has no manifest (${this.root})`);
+    return false;
+  }
+
+  /** What the history view's box shows: {kept: untracked/ is a folder,
+   *  files: how many files are in it (a Finder .DS_Store aside), and
+   *  `unusable`, why it cannot be kept, when a link or something that is
+   *  not a folder has its name or .claerbout's}. */
+  async untrackedState() {
+    const kind = await this.kindAt(UNTRACKED);
+    const fault = await this.untrackedFault(true);
+    const files = kind === 'folder' ? (await this.untrackedEntries()).length : 0;
+    return { kept: kind === 'folder' && !this.untrackedOff, files, ...(fault ? { unusable: fault.line } : {}) };
+  }
+
+  /** Everything in untracked/ but its folders and Finder's .DS_Store
+   *  files: root-relative paths. Never followed. */
+  async untrackedEntries() {
+    const found = [];
+    const walk = async (folder) => {
+      let entries = [];
+      try {
+        entries = await fsp.readdir(path.join(this.root, folder), { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const relative = `${folder}/${entry.name}`;
+        if (entry.isDirectory()) await walk(relative);
+        else if (!(entry.isFile() && entry.name === FINDER_LITTER)) found.push(relative);
+      }
+    };
+    await walk(UNTRACKED);
+    return found;
+  }
+
+  /**
+   * The history view's "Keep an untracked/ folder here" (history.js,
+   * untracked), one job on the project's queue, under the record's guards
+   * as a rewind is. `true` makes untracked/, appends the record's line to
+   * .gitignore (unless the rules already ignore untracked/) and writes the
+   * manifest, at once. `false`, only while untracked/ holds no file (a
+   * Finder .DS_Store aside), removes the empty folder, the manifest,
+   * .claerbout/ when nothing else is in it (a .claerbout/ignore stays), and
+   * the record's own lines from .gitignore, those exact lines as this
+   * build or an earlier one wrote them (the file itself when nothing else
+   * was in it); the folder goes first, so no file ever lies in it
+   * unignored. Nothing is committed: the next fill records the change as
+   * usual. {ok: true, kept, files}; else {ok: false, refused: 'paused',
+   * reason} while a guard holds, {refused: 'not-empty'} with files in it,
+   * {refused: 'unusable', reason} where a link or something that is not a
+   * folder or a file is in the way, or {refused: 'failed', detail}, each
+   * with `kept` and `files` as they are now.
+   */
+  keepUntracked(keep) {
+    return this.run(async () => {
+      const refuse = async (answer) => ({ ok: false, ...answer, ...(await this.untrackedState()) });
+      try {
+        const reason = await this.blocked();
+        if (reason) return refuse({ refused: 'paused', reason });
+        return keep ? await this.makeUntracked(refuse) : await this.dropUntracked(refuse);
+      } catch (error) {
+        return refuse({ refused: 'failed', detail: error.message });
+      }
+    });
+  }
+
+  async makeUntracked(refuse) {
+    const ignored = (await this.git(['check-ignore', '-q', `${UNTRACKED}/`])).status !== 1;
+    const fault = await this.untrackedFault(ignored);
+    if (fault) return refuse({ refused: 'unusable', reason: fault.line });
+    if ((await this.kindAt(UNTRACKED)) === 'missing') await fsp.mkdir(path.join(this.root, UNTRACKED));
+    this.untrackedOff = false;
+    this.prepared = false;
+    await this.prepare();
+    if (!this.manifest) return refuse({ refused: 'unusable', reason: `${UNTRACKED}/ could not be kept` });
+    const written = await this.pin();
+    if (written === false) return refuse({ refused: 'unusable', reason: `${MANIFEST_PATH} or its folder is a symbolic link or not a file` });
+    this.log(`autosave: ${UNTRACKED}/ kept, as the history view asked (${this.root})`);
+    return { ok: true, kept: true, files: (await this.untrackedEntries()).length };
+  }
+
+  async dropUntracked(refuse) {
+    const kind = await this.kindAt(UNTRACKED);
+    if (kind !== 'missing' && kind !== 'folder') return refuse({ refused: 'unusable', reason: (await this.untrackedFault(true)).line });
+    if (kind === 'folder') {
+      if ((await this.untrackedEntries()).length > 0) return refuse({ refused: 'not-empty' });
+      // Depth first, by rmdir, never rm -r: a file dropped in meanwhile
+      // keeps its folder (ENOTEMPTY), and the request is refused.
+      const clear = async (folder) => {
+        for (const entry of await fsp.readdir(path.join(this.root, folder), { withFileTypes: true })) {
+          const relative = `${folder}/${entry.name}`;
+          if (entry.isDirectory()) await clear(relative);
+          else if (entry.isFile() && entry.name === FINDER_LITTER) await fsp.rm(path.join(this.root, relative), { force: true });
+        }
+        await fsp.rmdir(path.join(this.root, folder));
+      };
+      try {
+        await clear(UNTRACKED);
+      } catch (error) {
+        if (error.code === 'ENOTEMPTY' || error.code === 'EEXIST') return refuse({ refused: 'not-empty' });
+        throw error;
+      }
+    }
+    this.manifest = false;
+    this.prepared = false;
+    if ((await this.kindAt(MANIFEST)) === 'file') await fsp.rm(path.join(this.root, MANIFEST), { force: true });
+    if ((await this.kindAt('.claerbout')) === 'folder') {
+      try {
+        await fsp.rmdir(path.join(this.root, '.claerbout'));
+      } catch (error) {
+        // A .claerbout/ignore, or anything else of the user's, keeps it.
+        if (error.code !== 'ENOTEMPTY' && error.code !== 'EEXIST') throw error;
+      }
+    }
+    const file = path.join(this.root, '.gitignore');
+    if ((await this.kindAt('.gitignore')) === 'file') {
+      const text = await fsp.readFile(file, 'utf8');
+      let left = text;
+      for (const block of IGNORE_BLOCKS) {
+        let at = 0;
+        while ((at = left.indexOf(block, at)) !== -1) {
+          if (at === 0 || left[at - 1] === '\n') left = left.slice(0, at) + left.slice(at + block.length);
+          else at += 1;
+        }
+      }
+      if (left !== text) {
+        if (left === '') await fsp.rm(file, { force: true });
+        else await replaceFile(file, left, { mode: (await fsp.stat(file)).mode & 0o777, stage: this.stateDir });
+        this.log(`autosave: /${UNTRACKED}/ taken out of .gitignore, as the history view asked (${this.root})`);
+      }
+    }
+    this.log(`autosave: ${UNTRACKED}/ put away, as the history view asked (${this.root})`);
+    return { ok: true, kept: false, files: 0 };
   }
 
   /** The repository's common git dir, where every worktree's own is. */
@@ -1301,11 +1492,12 @@ class Project {
    * once) and a nested repository without a commit (left out from then
    * on); entries the ignore rules or the secrets now match leave the kept
    * index (git add never drops a path the index already has); and the
-   * manifest and .gitignore go in whatever the ignore rules say. While the
-   * manifest is kept, the top untracked/ is left out by pathspec too, not
-   * only by its .gitignore line: a moment in which .gitignore lacks the
-   * line (another tool rewriting it, or another shell's rewind) cannot let
-   * it in, and once in, the record never prunes it. The folder's contents
+   * manifest and .gitignore go in whatever the ignore rules say. The top
+   * untracked/ is left out by pathspec too, not only by its .gitignore
+   * line, whether or not the project keeps one yet: a moment in which
+   * .gitignore lacks the line (another tool rewriting it, another shell's
+   * rewind, or a folder made by hand since the last fill) cannot let it
+   * in, and once in, the record never prunes it. The folder's contents
    * only, as the line matches: a file named untracked, made after this
    * launch kept the manifest, is the project's and is recorded. A clean
    * filter that cannot run (git-lfs not installed, with
@@ -1338,8 +1530,11 @@ class Project {
     await drop(await keptOut());
     // The top untracked/ folder as a pathspec, `exclude,` for git add, '' to
     // match it; the trailing slash keeps a file of that name out of it.
-    const icase = this.manifest && (await this.caseless()) ? ',icase' : '';
-    const own = (magic) => (this.manifest ? [`:(${magic}top,literal${icase})${UNTRACKED}/`] : []);
+    // Whether or not the project keeps one: where there is none it matches
+    // nothing, and a folder made by hand between two fills is never taken in.
+    const guarded = !this.untrackedOff;
+    const icase = guarded && (await this.caseless()) ? ',icase' : '';
+    const own = (magic) => (guarded ? [`:(${magic}top,literal${icase})${UNTRACKED}/`] : []);
     const add = () =>
       this.git(
         [
@@ -1387,7 +1582,7 @@ class Project {
       throw new Error(`git add: ${errorLine(added.stderr) || added.status}`);
     }
     // What the kept index has that the record must not: ignored now, a
-    // secret, inside untracked/ (while the manifest is kept), inside a
+    // secret, inside untracked/ (unless a link or the like turned it off), inside a
     // nested repository left out, or matched by .claerbout/ignore all the
     // same (a .gitignore negation outranks an excludes file: such a path is
     // left out of every add by name from now on).
@@ -1450,17 +1645,7 @@ class Project {
       await sweep(this.stateDir);
     }
     await this.prepare();
-    if (this.manifest) {
-      const written = await writeManifest(this.root, path.join(this.stateDir, 'hashes.json'), {
-        unreadable: (file) => this.once(`unhashed ${file}`, `autosave: ${file} cannot be read, so the manifest leaves it out (${this.root})`),
-        secrets: (count) => (this.manifestSecrets = count),
-        stage: this.stateDir,
-      });
-      if (written === null) {
-        this.manifest = false;
-        this.once('manifest', `autosave: ${MANIFEST_PATH} or its folder is a symbolic link or not a file, so untracked/ has no manifest (${this.root})`);
-      }
-    }
+    if (this.manifest) await this.pin();
     await fsp.mkdir(this.stateDir, { recursive: true });
     // The index is kept between commits (git add -A against it uses its
     // stat cache); a lock left by a git that was killed goes.

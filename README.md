@@ -92,7 +92,7 @@ copies it into the bundle as `app.json`.
 | `site` | The URL the install line downloads from (`https://knuth.tayweid.io`); the zips and `latest.json` live at `<site>/app/`, and the app checks there for updates. |
 | `elsewhere` | A sentence the install line adds when run off macOS. |
 | `autosave` | `true` keeps the autosave record of every project a window is on (below). Knuth and Plass set it; ManimLive does not. |
-| `smoke` | What `smoke.mjs` checks: `document` (name), `text` (contents), `ready` (a selector) and `readyText` (its text, or per mode `{uv, browser}`), `run` (a selector to click), `written` (a file expected beside the document), `json` (keys it must hold) or `contains` (text it must hold), and `autosave` (subjects the document folder's `claerbout-autosave` branch must show by the end, `["knuth: session open", "knuth: cell run [1]"]`), then `history` and `room` (selectors of the page's History tile and of the room it opens over: the History page is opened in the room and checked there before the window form; without them, only the window form). With `run` and `written`, the record is asked to hold the written file, and the window form's card for the session-open commit must offer the rewind that removes it, its fine print speaking of a kernel's memory only where a `.py` or `.ipynb` is open. |
+| `smoke` | What `smoke.mjs` checks: `document` (name), `text` (contents), `ready` (a selector) and `readyText` (its text, or per mode `{uv, browser}`), `run` (a selector to click), `written` (a file expected beside the document), `json` (keys it must hold) or `contains` (text it must hold), and `autosave` (subjects the document folder's `claerbout-autosave` branch must show by the end, `["knuth: session open", "knuth: cell run [1]"]`), then `history` and `room` (selectors of the page's History tile and of the room it opens over: the History page is opened in the room and checked there before the window form, its "Keep an untracked/ folder here" box ticked and unticked under "Whole project"; without them, only the window form). With `autosave`, the document's folder must hold no `untracked/`, `.claerbout/` or `.gitignore` the record wrote by itself. With `run` and `written`, the record is asked to hold the written file, and the window form's card for the session-open commit must offer the rewind that removes it, its fine print speaking of a kernel's memory only where a `.py` or `.ipynb` is open. |
 
 ## What the shell expects of an engine
 
@@ -237,19 +237,30 @@ document each window holds; a page only says when something happened.
   while a merge is in progress on main") and shown as it is in the
   history view. The guards are asked
   again just before the ref moves, so only a few milliseconds of race
-  remain after a fill that took seconds. In the working tree it does write: `untracked/`
-  (made, empty), a `/untracked/` line in `.gitignore` (appended, or a new
-  `.gitignore`; anchored, so a folder named `untracked` deeper down, such
-  as `tests/untracked/`, stays in the user's git and in the record), and
-  `.claerbout/untracked.json`. These show in the user's own `git status`,
-  and ride along in a `git commit -a` or `git add -A` the user makes. None
-  of them is written through a symbolic link: a link (or anything else
-  that is not a folder or a file) at `untracked`, `.claerbout`, the
-  manifest or, when the line has to be added, `.gitignore` turns the
-  manifest off for that project, said once. No line is added while the
-  rules already ignore `untracked/`, so an unanchored `untracked/` line an
-  earlier build wrote is left as it is; it still ignores every folder of
-  that name at any depth until it is changed to `/untracked/` by hand.
+  remain after a fill that took seconds. In the working tree it writes
+  nothing by itself: a project opened and recorded all day gains no
+  folder, no file and no `.gitignore` line. Only where the project has an
+  `untracked/` folder (the user's choice: made by hand, or from the
+  history view's box, below) does it write a `/untracked/` line in
+  `.gitignore` (appended, or a new `.gitignore`; anchored, so a folder
+  named `untracked` deeper down, such as `tests/untracked/`, stays in the
+  user's git and in the record) and `.claerbout/untracked.json`, with its
+  folder. These show in the user's own `git status`, and ride along in a
+  `git commit -a` or `git add -A` the user makes. A `.claerbout/ignore`
+  the user wrote is read as it is; the record never makes one, nor its
+  folder for it. None of them is written through a symbolic link: a link
+  (or anything else that is not a folder or a file) at `untracked`,
+  `.claerbout`, the manifest or, when the line has to be added,
+  `.gitignore` turns the manifest off for that project, said once. No
+  line is added while the rules already ignore `untracked/`, so an
+  unanchored `untracked/` line an earlier build wrote is left as it is;
+  it still ignores every folder of that name at any depth until it is
+  changed to `/untracked/` by hand. A project an earlier build wrote into
+  (when every project got an empty `untracked/`, the line and the
+  manifest) keeps working as it did: the record removes nothing it once
+  wrote, and a manifest that is there is kept up even after the folder is
+  taken away by hand (it then lists no files), its line left as it is.
+  The history view's box puts an empty one away.
 - **What git cannot read, or must leave out.** A file git cannot read is
   left out, and the log names it once; the rest is recorded. A nested
   repository without a commit (a fresh `git init` or `uv init` inside the
@@ -272,8 +283,8 @@ document each window holds; a page only says when something happened.
   last closes. One job at a time per project. Quitting closes every open
   session and waits for every job already queued (a session close from a
   window just shut included), for at most 20 s, so quitting never hangs.
-- **`untracked/`**, for large data, caches and scratch, is ignored but
-  pinned: `.claerbout/untracked.json` lists every file in it with its
+- **`untracked/`**, for large data, caches and scratch, where a project
+  keeps one, is ignored but pinned: `.claerbout/untracked.json` lists every file in it with its
   path, size, mtime and SHA-256, rewritten before every commit, and is
   always recorded, as is `.gitignore`, whatever the ignore rules say (a
   `*.json` or `.claerbout/` line cannot make `untracked/` a loophole). A
@@ -286,13 +297,17 @@ document each window holds; a page only says when something happened.
   into place, so it is never half-written, and no fill (another app's
   included) finds the new file in the working tree, not even after a crash;
   what a shell that died left in its state folder (named for its pid) goes
-  at the next launch's first fill. While the manifest is kept, every fill
-  also leaves the top `untracked/` folder out by pathspec (and drops it from
-  the kept index), not only by the `.gitignore` line: the record is never
-  pruned, so a moment in which `.gitignore` lacks the line (another tool
-  rewriting it) must not be enough to take it in. The folder's contents
-  only, as the line matches: a file named `untracked` put in its place
-  mid-session is the project's, and is recorded.
+  at the next launch's first fill. Every fill also leaves the top
+  `untracked/` folder out by pathspec (and drops it from the kept index),
+  not only by the `.gitignore` line, and whether or not the project keeps
+  one (where there is none the pathspec matches nothing): the record is
+  never pruned, so a moment in which `.gitignore` lacks the line (another
+  tool rewriting it, or a folder made by hand since the last fill, whose
+  line comes at the next) must not be enough to take it in. The folder's
+  contents only, as the line matches: a file named `untracked` put in its
+  place mid-session is the project's, and is recorded. The record looks
+  for the folder at every fill (an `lstat`), so one made by hand counts
+  from the next commit.
 - **Secrets.** Kept out of the record by pathspec, in every folder and
   whatever the case (`Server.PEM`, `ID_RSA`): the files `.env`, `.env.*`,
   `*.pem`, `*.key`, `id_*`, `*.p8` (App Store Connect's `AuthKey_*.p8`),
@@ -338,7 +353,8 @@ document each window holds; a page only says when something happened.
   .claerbout/ignore"; "the record's own rules, left as they are").
 - **The log** gets one line per commit (`autosave: knuth: cell run [4] →
   <hash> (<project>)`), and one when a repository is initialised, when
-  `.gitignore` gains `/untracked/`, when a folder is refused, and when a
+  `.gitignore` gains `/untracked/`, when the history view keeps or puts
+  away `untracked/`, when a folder is refused, and when a
   commit is skipped for a new reason. An error is git's last line that is
   not a `hint:`, a `warning:` or a wrap-up (`the remote end hung up
   unexpectedly`, after a filter that never started).
@@ -351,7 +367,11 @@ document each window holds; a page only says when something happened.
 `<PREFIX>_AUTOSAVE_INTERVAL` (seconds) sets the timer. Without git on the
 machine (on a Mac, without the developer tools) the record is off and the
 log says so. The tests (`npm run test:autosave`) run real git in
-temporary repositories under `os.tmpdir()`.
+temporary repositories under `os.tmpdir()`, among them a project opened
+and filled three times that gains nothing, the box's two ways
+(`keepUntracked`: the folder, the line and the manifest made at once, a
+file dropped in pinned by hash and kept out of the tree; put away, exactly
+what was added gone), and a project an earlier build wrote into.
 
 ## The history view
 
@@ -440,6 +460,26 @@ node again, or the card's button, to rewind.
   window that is not a document page) has no switch: the whole project.
   The ticks are the partial rewind's `paths`, so nothing of the rewind's
   checks changes.
+- **Keep an untracked/ folder here.** The record writes nothing into a
+  project by itself, so an `untracked/` folder is the user's choice, made
+  under **Whole project** (and in a window opened with no document, which
+  is the whole project; never under "This document" or "Its folder"): a
+  box below the river's mouth, "Keep an untracked/ folder here: large data
+  the record pins by name and hash, never by content". It is unchecked
+  unless the folder exists, and says how many files it pins. Ticked, the
+  shell makes `untracked/`, adds the record's line to `.gitignore` and
+  writes the manifest, at once, and the record keeps the folder from then
+  on. Unticked, only while the folder is empty (a Finder `.DS_Store`
+  aside), it removes the folder, the manifest, `.claerbout/` when nothing
+  else is in it (a `.claerbout/ignore` keeps it), and the record's own
+  lines from `.gitignore`, those exact lines as this build or an earlier
+  one wrote them (the file itself when nothing else was in it); with files
+  in it the box is locked, and its tooltip says why ("untracked/ holds 3
+  files: move them out to put the folder away"). Nothing is committed
+  then: the next fill records the change as usual. The record's guards
+  refuse it as they refuse a rewind, and the box says so beside its words
+  ("not now: git holds index.lock"). The box is asked again as the record
+  grows, so a file dropped in locks it.
 - **Its requests,** answered only from a History page, in a window or in
   the room (the shell knows a view by its webContents, and its window and
   project with it), and always for that page's project (the page never
@@ -448,9 +488,10 @@ node again, or the card's button, to rewind.
   - `history {action: 'graph', before?, limit?}`: `{state: 'on' | 'paused'
     | 'none', reason, detail?, project: {root, name, display, branch}, app,
     tip, head: {branch, sha}, branches: [{name, tip, head}], commits, more,
-    total, windows, others, scope}`, `scope` for a page opened from a
-    document `{document, folder}` (the document's path in the project and
-    its folder's, `''` at the top), else null. `windows` (this app's
+    total, windows, others, scope, untracked}`, `scope` for a page opened
+    from a document `{document, folder}` (the document's path in the
+    project and its folder's, `''` at the top), else null; `untracked` the
+    box as it is, as `untracked` answers it (below). `windows` (this app's
     documents on the project) and `others` (`[{app, documents}]`, another
     app's) name each document by its path in the project, as the record's
     trees do, resolved through any link on the way: a project reached
@@ -508,6 +549,17 @@ node again, or the card's button, to rewind.
     to write) for a commit no rewind writes (below): the rewind's own
     checks, git's `read-tree` among them, so the card never offers a rewind
     the click would refuse.
+  - `history {action: 'untracked', keep?}`: the box. Without `keep`,
+    `{ok: true, kept, files, unusable?}`: `kept` while `untracked/` is a
+    folder, `files` how many are in it (a Finder `.DS_Store` aside), and
+    `unusable`, why it cannot be kept, where a link or something that is
+    not a folder has its name or `.claerbout`'s. With `keep: true` or
+    `false`, the folder made or put away (above), on the project's job
+    queue like a commit: `{ok: true, kept, files}`, or `{ok: false,
+    refused: 'paused', reason}` while a guard holds, `{refused:
+    'not-empty'}` with files in it, `{refused: 'unusable', reason}`, or
+    `{refused: 'failed', detail}`, each with `kept` and `files` as they
+    are now.
   - `rewind {sha, tip, paths?, anyway?}`: the rewind, below.
   - `history {action: 'close'}`: the page put away (Escape, its close
     tile): the view removed and destroyed, or the window closed. Answered
@@ -593,8 +645,9 @@ node again, or the card's button, to rewind.
      file made in the app's state folder (beside it only when that folder
      is on another volume) and renamed over the old (a rename replaces a
      link, never follows it), and one the set removes becomes that line
-     alone. So the working tree never holds a `.gitignore` without the
-     line, not for a moment, and another app's fill meanwhile cannot take
+     alone (where the project keeps `untracked/`; elsewhere no line is
+     needed, and it goes as any file does). So the working tree never
+     holds a `.gitignore` without the line, not for a moment, and another app's fill meanwhile cannot take
      `untracked/` in; a fill leaves `untracked/` out by pathspec as well
      (above). The record's
      `prepared` is cleared before anything is touched, and the record
@@ -668,7 +721,10 @@ the ties and paging; the graph scoped to one document of a course with
 two lectures (each commit's scope, what a run changed beside the document,
 nothing from the first fill or a rewind, a document at the top whose
 folder is the project, the record's new commits scoped as they arrive,
-names compared as the volume compares them); documents named by their
+names compared as the volume compares them); the `untracked` request
+(the box as it is, refused under a guard, the folder kept and then
+through a rewind to a commit from before, refused with a file in it, and
+put away once empty, each recorded at the next fill); documents named by their
 paths in a project reached through a link; a commit's detail and a blob, and a file past 1 MB
 that is not read and costs no other file its patch; and the rewind, its
 three steps and its refusals: a file that becomes a folder and a folder
@@ -791,7 +847,8 @@ and to the History page, `history` and `rewind` (above).
 temporary repositories), the history view's (`test/history.test.mjs`,
 likewise), the smoke test on `test/fixture`, a page with no Python that
 reads its document through the shell and writes a copy beside it (and, the
-fixture keeping the record, checks its `session open` commit, then
+fixture keeping the record, checks its `session open` commit and that
+the record wrote nothing into the document's folder by itself, then
 presses the page's History tile and checks the History view over its room:
 at the room's box, its page given a graph with that commit and drawing it,
 laid out inline, following the room when the window grows, closed by
@@ -802,7 +859,9 @@ document" ("Its folder" left out), fewer commits drawn than the whole
 project's, the session-open card ticking `note.txt` alone ("Rewind 1
 file", "all 2 files" a click away, the fine print saying `note.txt` is
 saved first and reloads although the temporary folder is reached through
-`/var`), "Whole project" ticking both, and the view opened once more on
+`/var`), "Whole project" ticking both and showing the untracked/ box
+unchecked (never under "This document"): ticked, `untracked/` and the
+`.gitignore` line appear, unticked, both are gone; and the view opened once more on
 "This document", the switch not remembered; then the History window, the
 same graph, and the session-open commit's card, whose rewind's fine print
 says nothing of a kernel's memory with `note.txt` open and says it once
