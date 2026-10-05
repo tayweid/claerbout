@@ -1726,6 +1726,42 @@ async function answer(window, message) {
       setDocument(window, file);
       return { path: file };
     }
+    case 'shape': {
+      // The page asks its window to keep the shape of what it shows
+      // (ManimLive: the scene's picture, which has a shape of its own —
+      // 16:9, 2:1 — where a paper or a notebook has none): {ratio, extra:
+      // {width, height}}, the ratio of the room the page draws and the
+      // chrome round it (its bar, its edges, the band its presenter's
+      // bar stands on) the ratio must not include, in the page's px;
+      // {ratio: null} lifts it (a landing page, a scene with no picture).
+      // From then on a drag of the window's width sets its height and the
+      // room fills the opening exactly. The window is resized at once to
+      // meet the shape, keeping its width (its height, when that width's
+      // height would not fit the display), so the room fills from this
+      // moment and not from the next drag; a maximized or full-screen
+      // window is left as it is (the shape holds for when it comes back).
+      // The page's px are zoomed px, so the extra is scaled by the zoom
+      // here and again when the zoom changes (zoomTo). Since 0.2.7; an
+      // older shell answers null.
+      const ratio = Number.isFinite(message.ratio) && message.ratio > 0 ? message.ratio : 0;
+      const extra = {
+        width: Math.max(0, Math.round(Number(message.extra?.width) || 0)),
+        height: Math.max(0, Math.round(Number(message.extra?.height) || 0)),
+      };
+      const held = shapes.get(window);
+      if (ratio) shapes.set(window, { ratio, extra });
+      else shapes.delete(window);
+      if (!shapeHooked.has(window)) {
+        // A drag of the window's edge is held to the shape by the shell's
+        // own rule (shapeResize); full screen is the display's shape, and
+        // the window is fitted again once it is back on its frame.
+        shapeHooked.add(window);
+        window.on('will-resize', (event, bounds, details) => shapeResize(window, event, bounds, details));
+        window.on('leave-full-screen', () => keepShape(window, null));
+      }
+      keepShape(window, held ?? null);
+      return { ratio: ratio || null };
+    }
     case 'autosave':
       // Something happened in the page worth a commit on the project's
       // record (a cell ran): {trigger: 'cell run [4]'}. Only if anything
@@ -1958,6 +1994,97 @@ function zoomTo(window, level) {
   const height = Math.min(Math.round(contentHeight * ratio), area.height - chrome.y);
   window.setContentSize(width, height);
   // Still on the display: nudge back in if the growth ran past its edge.
+  const grown = window.getBounds();
+  const x = Math.max(area.x, Math.min(grown.x, area.x + area.width - grown.width));
+  const y = Math.max(area.y, Math.min(grown.y, area.y + area.height - grown.height));
+  if (x !== grown.x || y !== grown.y) window.setPosition(x, y);
+  // The extra is in the page's px: at the new zoom it is a new size.
+  keepShape(window, null);
+}
+
+/** The shape a window keeps (the `shape` request): its room's ratio and
+ *  the chrome's extra, in the page's px. */
+const shapes = new WeakMap();
+const shapeHooked = new WeakSet();
+
+/** The shape's extra in DIP: the page's px times the zoom. */
+function shapeExtra(window, shape) {
+  const zoom = window.webContents.getZoomFactor();
+  return { width: Math.round(shape.extra.width * zoom), height: Math.round(shape.extra.height * zoom) };
+}
+
+/** A drag of the window's edge, held to the shape: the dimension the
+ *  pointer moves is taken as given and the other follows it, the edges
+ *  not being dragged kept where they are, so the room keeps the
+ *  picture's ratio with the chrome's extra outside it. The shell's own
+ *  rule rather than setAspectRatio: on macOS Electron sets AppKit's
+ *  content aspect ratio (the plain ratio, extra and all) beside its
+ *  delegate's (the ratio less the extra), and the two fought — a grabbed
+ *  edge jumped smaller and left the pointer outside the window (Taylor,
+ *  2026-10-04). A size under the window's minimum is refused whole. */
+function shapeResize(window, event, bounds, details) {
+  const shape = shapes.get(window);
+  if (!shape || window.isDestroyed() || window.isFullScreen()) return;
+  const extra = shapeExtra(window, shape);
+  const current = window.getBounds();
+  const [contentWidth, contentHeight] = window.getContentSize();
+  const chrome = { x: current.width - contentWidth, y: current.height - contentHeight };
+  const widthMoved = bounds.width !== current.width;
+  const heightMoved = bounds.height !== current.height;
+  const edge = details && details.edge;
+  const vertical = heightMoved && (!widthMoved || edge === 'bottom' || edge === 'top');
+  let { width, height } = bounds;
+  if (vertical) width = Math.round((height - chrome.y - extra.height) * shape.ratio + extra.width + chrome.x);
+  else height = Math.round((width - chrome.x - extra.width) / shape.ratio + extra.height + chrome.y);
+  const [minWidth, minHeight] = window.getMinimumSize();
+  if (width < minWidth || height < minHeight) {
+    event.preventDefault();
+    return;
+  }
+  if (width === bounds.width && height === bounds.height) return;
+  event.preventDefault();
+  // The edges the pointer is not on stay put: a left or top drag moves
+  // x or y with the size, so the right or bottom edge is the anchor.
+  const x = bounds.x !== current.x ? current.x + current.width - width : bounds.x;
+  const y = bounds.y !== current.y ? current.y + current.height - height : bounds.y;
+  window.setBounds({ x, y, width, height });
+}
+
+/** Hold the window to its shape: the content resized now to meet it
+ *  (`fit`: false to do nothing but keep the shape for the next drag; the
+ *  shape held before, or null, to fit from it). What is kept: the room,
+ *  when the shape held before had the same ratio and only the chrome
+ *  changed (a console opening beside the picture widens the window and
+ *  leaves the picture as it was, rather than squeezing it to keep the
+ *  window); otherwise the width, or the height where the width's height
+ *  runs past the display's work area. Nudged back onto the display, as
+ *  zoomTo does. */
+function keepShape(window, fit) {
+  if (!window || window.isDestroyed()) return;
+  const shape = shapes.get(window);
+  if (!shape) return;
+  if (window.isFullScreen()) return;   // the display's shape; put back on leaving
+  const extra = shapeExtra(window, shape);
+  if (fit === false || window.isMaximized()) return;
+  const bounds = window.getBounds();
+  const [contentWidth, contentHeight] = window.getContentSize();
+  const area = screen.getDisplayMatching(bounds).workArea;
+  const chrome = { x: bounds.width - contentWidth, y: bounds.height - contentHeight };
+  const held = fit && fit.ratio === shape.ratio ? shapeExtra(window, fit) : null;
+  let width = held ? contentWidth - held.width + extra.width : contentWidth;
+  let height = Math.round((width - extra.width) / shape.ratio + extra.height);
+  if (width + chrome.x > area.width) {
+    width = area.width - chrome.x;
+    height = Math.round((width - extra.width) / shape.ratio + extra.height);
+  }
+  if (height + chrome.y > area.height) {
+    height = area.height - chrome.y;
+    width = Math.round((height - extra.height) * shape.ratio + extra.width);
+  }
+  const [minWidth, minHeight] = window.getMinimumSize();
+  if (width < minWidth || height < minHeight) return;   // the minimum has the say
+  if (width === contentWidth && height === contentHeight) return;
+  window.setContentSize(width, height);
   const grown = window.getBounds();
   const x = Math.max(area.x, Math.min(grown.x, area.x + area.width - grown.width));
   const y = Math.max(area.y, Math.min(grown.y, area.y + area.height - grown.height));

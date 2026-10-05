@@ -827,7 +827,21 @@ and mtime, is none. A `path` is taken only when it is an absolute path to
 an existing regular file (a refusal is logged once). A page opened by
 path never needs to. Answered `{path}`), `autosave {trigger}` (something
 happened in the page worth a commit on the record, `cell run [4]`; a
-notice), `history` and `history {action: 'open', at?}` without `inline`
+notice), `shape {ratio, extra: {width, height}}` (the window keeps the
+shape of what the page shows — ManimLive's scene picture, 16:9 or 2:1,
+where a paper has no shape of its own: the ratio of the room the page
+draws, and the chrome round it the ratio must not include, in the page's
+px. A drag of the width then sets the height and the room fills its
+opening exactly; the window is resized at once to meet it, keeping its
+width, or its height where the display is short; a maximized window is
+left alone, and after full screen the window is fitted again. A drag of
+the window's edge is held to the shape by the shell's own rule (the
+dimension the pointer moves is taken, the other follows, the far edges
+stay put), not by `setAspectRatio`, whose macOS rule with an extra size
+fights AppKit's and jumps. A later `shape` with the same ratio and a changed
+`extra` (a panel opening beside the room) keeps the room and resizes the
+window round it. `{ratio: null}` lifts it. Since 0.2.7; an older shell
+answers `null`), `history` and `history {action: 'open', at?}` without `inline`
 (the History window for this window's project, made or brought forward;
 answered `{opened: true}`; see "The history view"), `saved {id, ok?,
 error?}` (the answer to a `save` event). A History page has requests of
