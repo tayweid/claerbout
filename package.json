@@ -1,6 +1,6 @@
 {
   "name": "claerbout",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "The Claerbout shell: one Electron shell, built once per app (Knuth, Plass, ManimLive) from a config, shipping without Electron's framework and completing itself.",
   "license": "MIT",
   "repository": "github:tayweid/claerbout",
