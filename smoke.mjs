@@ -297,17 +297,23 @@ if (!updating) {
   await app.evaluate(({ app: electronApp }, file) => electronApp.emit('open-file', { preventDefault() {} }, file), doc);
   const second = await opened;
   const secondWindow = await app.browserWindow(second);
-  const secondId = await secondWindow.evaluate((window) => window.id);
+  // A page that keeps one window per file may close the launch's window
+  // itself once the window holding the file has come forward (Plass,
+  // Octavo), so the second window can be gone at any point from here on;
+  // that is a pass, not a failure.
+  const secondId = await secondWindow.evaluate((window) => window.id).catch(() => null);
   // The new window is shown, and takes the front, once its page has
   // painted: ask only after that, or its show() would undo the answer.
   const focused = () => app.evaluate(({ BrowserWindow }) => BrowserWindow.getFocusedWindow()?.id ?? null);
-  for (let i = 0; i < 40 && (await focused()) !== secondId; i++) await page.waitForTimeout(250);
+  for (let i = 0; i < 40 && secondId !== null && !second.isClosed() && (await focused()) !== secondId; i++) {
+    await page.waitForTimeout(250);
+  }
   const answered = await page.evaluate(() => window.claerbout.request({ type: 'focus' }));
   if (answered?.focused !== true) await fail(`the focus request was answered ${JSON.stringify(answered)}`);
   const front = await focused();
   if (front === null) console.log(`smoke (${NAME}, ${mode}): no window is focused here (the app is not active); the fronting is not checked`);
   else if (front !== first) await fail(`after the focus request the focused window is ${front}, not the first (${first})`);
-  await secondWindow.evaluate((window) => window.close());
+  if (!second.isClosed()) await secondWindow.evaluate((window) => window.close()).catch(() => {});
   for (let i = 0; i < 40 && !second.isClosed(); i++) await page.waitForTimeout(250);
   if (!second.isClosed()) await fail('the second window did not close');
 }
