@@ -1,6 +1,8 @@
 // The update test on the fixture: built twice under two build ids, the
 // first installed into a scratch folder, then updating itself to the
-// second from a site folder (smoke.mjs --config … update).
+// second from a site folder (smoke.mjs --config … update --unsaved: a
+// window holding unsaved work Cancels the first relaunch, which stops
+// after the install; the second goes through).
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -22,7 +24,7 @@ try {
     ...quiet,
     env: { ...process.env, CLAERBOUT_BUILD: 'second' },
   });
-  execFileSync(process.execPath, [path.join(here, '..', 'smoke.mjs'), '--config', config, 'update', bundle, site], { stdio: 'inherit' });
+  execFileSync(process.execPath, [path.join(here, '..', 'smoke.mjs'), '--config', config, 'update', '--unsaved', bundle, site], { stdio: 'inherit' });
 } finally {
   fs.rmSync(work, { recursive: true, force: true });
 }

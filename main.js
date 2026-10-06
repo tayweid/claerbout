@@ -141,6 +141,12 @@ const updater = require('./update.js')({ app, net, config, env, log });
 /** The last check that found a new build, told to every window opened
  *  since, so a page can show its update button. */
 let latestKnown = null;
+/** An update installed whose relaunch was stopped (a window kept its
+ *  unsaved work at the sheet): the install's answer, {state: 'ready',
+ *  latest, current}. The new bundle is in
+ *  place and runs from the next launch; until then the next install, from
+ *  a page or the menu, relaunches into it instead of installing again. */
+let installedPending = null;
 
 // MARK: - The autosave record
 
@@ -796,14 +802,20 @@ function openWindow(url, document = null) {
   });
   // What the page said was unsaved goes with the page: a reloaded page
   // reports again, and a page that is gone can neither save nor answer.
+  // Only a navigation that has happened takes the page away: one that
+  // merely starts may never commit (a link out, which will-navigate above
+  // hands to the browser; a mailto:; a download), and the page that
+  // started it is still there, still unsaved, with no reason to report
+  // again. `did-navigate` is a committed main-frame document; a failed one
+  // commits an error page instead, said by `did-fail-load` (ERR_ABORTED,
+  // -3, is a load stopped or a navigation cancelled: the page stays).
   const pageGone = () => {
     guard.forget(window);
     dropSaves(window);
   };
-  contents.on('did-start-navigation', (details, ...rest) => {
-    const mainFrame = details?.isMainFrame ?? rest[2];
-    const sameDocument = details?.isSameDocument ?? rest[1];
-    if (mainFrame && !sameDocument) pageGone();
+  contents.on('did-navigate', pageGone);
+  contents.on('did-fail-load', (_event, code, _description, _url, isMainFrame) => {
+    if (isMainFrame && code !== -3) pageGone();
   });
   contents.on('render-process-gone', pageGone);
   window.on('close', (event) => {
@@ -815,6 +827,11 @@ function openWindow(url, document = null) {
     if (decision === 'pass') return;
     event.preventDefault();
     if (decision === 'hold') void askToClose(window);
+    // Its sheet is up, or its page is saving after Save (no time limit: a
+    // picker may be open). A page must answer that save, cancelled picker
+    // and errors included (README); one that never does keeps its window
+    // until it reloads or goes, and this says where the close went.
+    else log(`close: “${guard.reports.get(window)?.name ?? 'a window'}” is still being settled (its sheet, or a save the page has not answered); this close waits for it`);
   });
   window.on('closed', () => {
     documents.delete(window);
@@ -1000,6 +1017,9 @@ const graphs = new history.Graphs();
  *  without it (the apps' pages do not answer yet), and before a close
  *  that asked for a quiet save shows the sheet. */
 const SAVE_WAIT = 3000;
+/** How long a close waits, after a page refused the quiet save, for a
+ *  report it sent just after its answer (see closeIO). */
+const REPORT_GRACE = 100;
 /** Saves asked for (a rewind's, a close's): id → {window, resolve, drop}. */
 const saves = new Map();
 
@@ -1489,7 +1509,16 @@ function dropSaves(window) {
  *  on Electron 44.5, 2026-10-06). */
 function closeIO(window) {
   return {
-    quietSave: () => askToSave(window, { reason: 'close', choose: false }),
+    // A refusal may change what the sheet should offer (a file found
+    // changed outside the app at the write is `none` now): the page sends
+    // that report before its `saved` (README), and one sent just after it
+    // is given a moment to arrive before the sheet is built from the
+    // latest report.
+    quietSave: async () => {
+      const answer = await askToSave(window, { reason: 'close', choose: false });
+      if (answer.answered && !answer.ok) await sleep(REPORT_GRACE);
+      return answer;
+    },
     ask: async (spec) => {
       if (window.isDestroyed()) return spec.cancelId;
       if (window.isMinimized()) window.restore();
@@ -1944,6 +1973,9 @@ async function answer(window, message) {
         void runUpdate(false);
         return { state: 'installing', current: updater.current };
       }
+      // Installed, its relaunch stopped: what is on offer is the relaunch,
+      // which the install now is (runUpdate), whatever the site says.
+      if (installedPending) return { state: 'available', installed: true, latest: installedPending.latest, current: installedPending.current };
       try {
         const result = await updater.check();
         if (result.state === 'available') latestKnown = { state: 'available', latest: result.latest, current: result.current };
@@ -2014,8 +2046,21 @@ function choosePython() {
 const when = (build) => (build?.built ? `, built ${build.built.slice(0, 10)}` : '');
 
 /** Check for Updates… in the menu: the answer in a dialog, and the offer
- *  to install when the site has a newer build. */
+ *  to install when the site has a newer build. An update already in place
+ *  whose relaunch was stopped is offered the relaunch instead. */
 async function checkForUpdates() {
+  if (installedPending) {
+    const { response } = await dialog.showMessageBox({
+      type: 'info',
+      message: `${NAME} has been updated`,
+      detail: `Build ${installedPending.latest.build}${when(installedPending.latest)} is in place and runs from the next launch. Relaunch now? Open documents are reopened; a window with unsaved work asks first.`,
+      buttons: ['Relaunch', 'Not Now'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (response === 0) void runUpdate(false);
+    return;
+  }
   let result;
   try {
     result = await updater.check();
@@ -2058,10 +2103,13 @@ function runUpdate(fromMenu) {
   if (updateRun) return updateRun;
   updateRun = (async () => {
     try {
-      const result = await updater.install((step) => {
-        log(`update: ${step.text}`);
-        broadcast('update', { ...step, current: updater.current });
-      });
+      // Installed already, its relaunch stopped: only the relaunch is left.
+      const result =
+        installedPending ??
+        (await updater.install((step) => {
+          log(`update: ${step.text}`);
+          broadcast('update', { ...step, current: updater.current });
+        }));
       if (result.state !== 'ready') {
         broadcast('update', { ...result });
         return result;
@@ -2070,7 +2118,7 @@ function runUpdate(fromMenu) {
       broadcast('update', { state: 'ready', text: detail, latest: result.latest, current: result.current });
       if (fromMenu) await dialog.showMessageBox({ type: 'info', message: `${NAME} has been updated`, detail, buttons: ['Relaunch'] });
       else await sleep(1500);
-      relaunch();
+      relaunch(result);
       return result;
     } catch (error) {
       log(`update failed: ${error.message}`);
@@ -2091,10 +2139,23 @@ function runUpdate(fromMenu) {
  *  new one's, once `quit` has stopped the engine. A window holding unsaved
  *  work is asked first, as the quit asks; a Cancel leaves the app running
  *  on the old build (the new one is in place for the next launch), and no
- *  relaunch armed. */
-function relaunch() {
+ *  relaunch armed. The pages were told it relaunches now: they are told it
+ *  did not, as `failed` (today's pages put their update item back and say
+ *  the text on it), and the next install, from a page or the menu, is the
+ *  relaunch (installedPending). */
+function relaunch(result) {
   void quitAfterAsking({ relaunch: true }).then((went) => {
-    if (!went) log('update: the relaunch was stopped: a window kept its unsaved work; the new build runs from the next launch');
+    if (went) return;
+    log('update: the relaunch was stopped: a window kept its unsaved work; the new build runs from the next launch');
+    installedPending = result;
+    latestKnown = { state: 'available', latest: result.latest, current: result.current };
+    broadcast('update', {
+      state: 'failed',
+      stopped: true,
+      text: `the relaunch was stopped to keep unsaved work open. Build ${result.latest.build} is installed: it runs from the next launch, or update again to relaunch into it now.`,
+      latest: result.latest,
+      current: result.current,
+    });
   });
 }
 
@@ -2420,7 +2481,7 @@ if (!app.requestSingleInstanceLock()) {
         updater
           .check()
           .then((result) => {
-            if (result.state !== 'available') return;
+            if (result.state !== 'available' || installedPending) return;
             latestKnown = { state: 'available', latest: result.latest, current: result.current };
             log(`update available: build ${result.latest.build} (this is ${result.current.build ?? 'unknown'})`);
             broadcast('update', latestKnown);

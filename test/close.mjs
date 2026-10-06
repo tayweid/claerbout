@@ -23,6 +23,7 @@
 import { _electron as electron } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -82,8 +83,13 @@ async function until(test, ms = 10_000) {
 
 // The sheet, replaced: each call recorded (the window it is on, its text and
 // buttons) and answered with the next press, by label, after its delay;
-// with no press left, Cancel.
-await app.evaluate(({ dialog }) => {
+// with no press left, Cancel. The browser too: a link out is recorded,
+// not opened.
+await app.evaluate(({ dialog, shell }) => {
+  globalThis.__external = [];
+  shell.openExternal = async (url) => {
+    globalThis.__external.push(url);
+  };
   globalThis.__sheets = [];
   globalThis.__presses = [];
   dialog.showMessageBox = async (window, options) => {
@@ -282,6 +288,111 @@ await close(reloading);
 await check(await closes(reloading), 'a reloaded page that had not reported again did not close');
 await check((await sheets()).length === 0, 'a reloaded page that had not reported again showed a sheet');
 said('a reload forgets the report');
+
+// A page that reports as early as it can after a reload (at document
+// start) is guarded: the reload's own navigation, which forgot the old
+// page's report, never forgets the new page's.
+await clearSheets();
+const early = await open('early.txt');
+await early.addInitScript(() => {
+  void window.claerbout.request({ type: 'unsaved', unsaved: true, name: 'early.txt', save: 'choose' });
+});
+for (let round = 1; round <= 3; round++) {
+  await early.reload();
+  await ready(early);
+  await press('Cancel');
+  await close(early);
+  await check(await until(async () => (await sheets()).length === round), `a page that reported at document start after reload ${round} closed with no sheet`);
+  await check(await stays(early), `Cancel closed the window after reload ${round}`);
+}
+await press(DONT);
+await close(early);
+await check(await closes(early), "Don't Save left the early-reporting window open");
+said('a page reporting at document start after a reload is guarded (3 reloads)');
+
+// Links out of the page: a link, a page script sending its window to
+// another site, a mailto:. Each starts a navigation that will-navigate
+// hands to the browser, so none commits: the page stays, still unsaved,
+// and its close still asks.
+await clearSheets();
+const linking = await open('linking.txt');
+await answer(linking, { quiet: { ok: true }, choose: { ok: true } });
+await report(linking, { unsaved: true, name: 'linking.txt', save: 'choose' });
+await linking.evaluate(() => {
+  window.__marker = 'still here';
+});
+const linkingURL = linking.url();
+const external = () => app.evaluate(() => globalThis.__external.length);
+const clickOut = (href) =>
+  linking.evaluate((target) => {
+    const link = document.createElement('a');
+    link.href = target;
+    document.body.appendChild(link);
+    link.click();
+  }, href);
+await clickOut('https://example.invalid/docs');
+await check(await until(async () => (await external()) === 1), 'a link out did not go to the browser');
+await linking.evaluate(() => {
+  window.location.href = 'https://example.invalid/other';
+});
+await check(await until(async () => (await external()) === 2), 'a page sending its window to another site did not go to the browser');
+await clickOut('mailto:someone@example.invalid');
+await check(await until(async () => (await external()) === 3), 'a mailto: link did not go to the browser');
+await wait(500);
+await check(linking.url() === linkingURL && (await linking.evaluate(() => window.__marker)) === 'still here', 'a link out took the page away');
+await press(DONT);
+await close(linking);
+await check(await closes(linking), "Don't Save left the window open after the links out");
+const linkSheets = await sheets();
+await check(linkSheets.length === 1 && linkSheets[0].message.includes('“linking.txt”'), `after three links out the close showed ${JSON.stringify(linkSheets)} (the report was forgotten)`);
+said('links out (a link, location.href, mailto:) go to the browser; the page stays and its close still asks');
+
+// A navigation that fails commits an error page: the page that reported
+// is gone, and so is its report.
+await clearSheets();
+const failing = await open('failing.txt');
+await report(failing, { unsaved: true, name: 'failing.txt', save: 'choose' });
+const refused = await new Promise((resolve) => {
+  const server = net.createServer();
+  server.listen(0, '127.0.0.1', () => {
+    const { port } = server.address();
+    server.close(() => resolve(`http://127.0.0.1:${port}/`));
+  });
+});
+const failingURL = failing.url();
+await failing.evaluate((target) => {
+  window.location.href = target;
+}, refused);
+// An error page's URL is the one that failed, or Chromium's own.
+await check(await until(() => failing.url() !== failingURL), `the window did not leave its page for ${refused}`);
+await wait(500);
+await close(failing);
+await check(await closes(failing), 'a window whose page failed to load (an error page) did not close');
+await check((await sheets()).length === 0, 'a window showing an error page asked about the page it replaced');
+said('a navigation that fails (an error page) forgets the report');
+
+// A page that crashes: a Save it never answers holds the window (a second
+// close waits on it) until the page goes; then the save counts as not
+// saved, the window stays, and its next close asks nothing (a gone page
+// can neither save nor lose more).
+await clearSheets();
+const crashing = await open('crashing.txt');
+await answer(crashing, { choose: 'silent' });
+await report(crashing, { unsaved: true, name: 'crashing.txt', save: 'choose' });
+await press('Save…');
+const crashingId = await close(crashing);
+await check(await until(async () => (await asks(crashing)).length === 1), 'Save did not ask the page that will crash');
+await close(crashing);
+const windowOpen = () => app.evaluate(({ BrowserWindow }, id) => Boolean(BrowserWindow.fromId(id)), crashingId);
+await wait(800);
+await check(await windowOpen(), 'a window whose page had not answered Save closed');
+await app.evaluate(({ BrowserWindow }, id) => BrowserWindow.fromId(id).webContents.forcefullyCrashRenderer(), crashingId);
+await wait(1000);
+await check(await windowOpen(), 'a crash during Save closed the window by itself');
+await app.evaluate(({ BrowserWindow }, id) => BrowserWindow.fromId(id).close(), crashingId);
+await check(await until(async () => !(await windowOpen()), 5000), 'the window of a crashed page did not close');
+await check((await sheets()).length === 1, `the crashed page's close showed ${(await sheets()).length} sheets, not just the first`);
+said('a crash: a Save never answered holds the window until the page goes; then the close asks nothing');
 
 // The quit: two unsaved windows and a clean one. A record that a quit would
 // close (the document changed on disk), and the quit Cancelled on the second.

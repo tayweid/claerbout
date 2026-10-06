@@ -162,6 +162,17 @@ page request the install and checks that the bundle on disk becomes the
 site's build, that the app relaunches into it, and that the old bundle is
 cleaned up.
 
+When a window holding unsaved work answers Cancel at the relaunch (see
+"Closing a window that holds unsaved work"), the app keeps running on
+the build it started with, and the new bundle stays in place for the next
+launch. The pages, told it relaunches now, are told it did not: an
+`update {state: 'failed', stopped: true, text, latest, current}` event
+(today's pages put their update item back and show the text). From then
+on an `update` check answers `{state: 'available', installed: true,
+latest, current}`, the next `update {action: 'install'}` is the relaunch
+alone (nothing downloaded again), and Check for Updates… in the menu
+offers Relaunch.
+
 A site build that is not newer than the installed one is left alone and said in the log, not offered: both `latest.json` and the bundle's `package.json` carry `built`, so a build installed from a checkout (an app's `npm run install:local`) stays until the site passes it.
 
 ## The autosave record
@@ -868,9 +879,12 @@ answers `{guarded: true}`. An older shell answers `null`: the page then
 stops sending, and must not register `beforeunload` inside the shell
 (Electron would silently refuse to close the window, and cancel ⌘Q). A
 report with `unsaved: false` is forgotten, and so is every report when
-the window's page navigates (a reloaded page reports again), crashes, or
-the window closes; a page that never reports (an older one) closes as it
-always did. In a browser tab, outside the shell, a page shows Chrome's own
+the window's page is replaced (a reload or another page of the app
+committed, or an error page from a navigation that failed: a reloaded
+page reports again), crashes, or the window closes; a navigation that
+never commits leaves the page and its report as they were (a link out,
+which the shell hands to the browser; a `mailto:`; a download). A page
+that never reports (an older one) closes as it always did. In a browser tab, outside the shell, a page shows Chrome's own
 "Leave site?" prompt from `beforeunload` while unsaved, skipping its own
 deliberate reloads.
 
@@ -880,7 +894,12 @@ second close while it is being settled does nothing more):
 
 1. `save: 'quiet'`: the page hears `save {id, reason: 'close', choose:
    false}` and has 3 seconds to answer `saved`. `ok` closes the window,
-   with no sheet.
+   with no sheet. A page that refuses because what Save can do has
+   changed (the file turned out to be changed outside the app: `none`;
+   moved or deleted: `choose`) sends its new `unsaved` report first and
+   then answers `saved` with `ok: false`: the sheet is built from the
+   latest report (a report sent just after the answer is waited for
+   100 ms, no longer).
 2. Otherwise, or when the quiet save failed (`ok: false`), the window is
    brought forward and the standard sheet is shown on it: "Do you want to
    save the changes you made to “<name>”?", the page's `detail` or "Your
@@ -895,7 +914,12 @@ second close while it is being settled does nothing more):
    `showDirectoryPicker` throws "Must be handling a user gesture"), then
    hears `save {id, reason: 'close', choose: true}`, with no time limit (a
    picker stays open as long as the user needs). `ok` closes the window;
-   anything else keeps it open, and the page says why itself. A page that
+   anything else keeps it open, and the page says why itself. The page
+   must answer this save, always: `ok: false` when its picker is
+   cancelled or the write fails, as much as `ok: true` once saved. Until
+   it answers, the window is held (a second ⌘W or the red button waits on
+   it, and says so in the log) and a quit joins it; a page that never
+   answers keeps its window until the page reloads or crashes. A page that
    goes meanwhile (a reload, a crash) counts as not saved, and one that
    has not taken the activation within 3 seconds (hung) is not asked at
    all and its window stays open, so the next close offers Don’t Save
@@ -909,7 +933,8 @@ the focused one first, exactly as its close would be (a quiet save, else
 its sheet); a window that reports during the quit is asked too. A Cancel
 on any stops the whole quit or relaunch: every window stays open, the
 engine runs and the record goes on as before, and no relaunch is left
-armed (an update already in place runs from the next launch). Don’t Save
+armed (an update already in place runs from the next launch; see
+"Updating"). Don’t Save
 on a window is for that quit: if the quit is stopped, the window is
 asked again at its next close. When every window is settled, the quit
 goes on as it always has, and every window closes as it is told. A
@@ -1019,9 +1044,20 @@ nothing more, Don’t Save closes it; a quiet report is written with no
 sheet; Save asks with user activation and closes once saved, and keeps the
 window when it is not; `unsaved: false` and a reload forget the report; a
 page that does not answer the quiet save gets the sheet without Save, and
-`none` never offers it; the quit with two unsaved windows asks twice, a
+`none` never offers it; a page reporting at document start after each of
+three reloads is guarded; links out (a link, `location.href` to another
+site, a `mailto:`), handed to the browser (`shell.openExternal`
+replaced), leave the page and its report, so the close still asks; a
+navigation that fails (an error page) forgets the report; a Save the page
+never answers holds the window, a second close waiting on it, until the
+page crashes, after which the close asks nothing; the quit with two unsaved windows asks twice, a
 second ⌘Q joining it, and a Cancel stops it with every window open and the
 record untouched and still recording; Don’t Save twice and the app exits,
 the record closing its session), and then the update test: the fixture built twice under two build ids
 (`CLAERBOUT_BUILD`), the first installed and updating itself to the second
-from a site folder. `npm run fixture:build` packages it. All need macOS.
+from a site folder (`smoke.mjs … update --unsaved`): first with a window
+holding unsaved work whose sheet answers Cancel, so the relaunch is
+stopped after the install (one sheet, `app.relaunch` never called, the app
+still running, the page told `stopped`, the new bundle in place, and a
+check answering `installed`), then, nothing unsaved, the install asked
+again relaunches into it. `npm run fixture:build` packages it. All need macOS.
