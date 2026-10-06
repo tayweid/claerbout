@@ -141,6 +141,12 @@ const updater = require('./update.js')({ app, net, config, env, log });
 /** The last check that found a new build, told to every window opened
  *  since, so a page can show its update button. */
 let latestKnown = null;
+/** An update installed whose relaunch was stopped (a window kept its
+ *  unsaved work at the sheet): the install's answer, {state: 'ready',
+ *  latest, current}. The new bundle is in
+ *  place and runs from the next launch; until then the next install, from
+ *  a page or the menu, relaunches into it instead of installing again. */
+let installedPending = null;
 
 // MARK: - The autosave record
 
@@ -149,6 +155,13 @@ let latestKnown = null;
  *  runner, since it knows each window's document; a page only says when
  *  something happened. Off, this is an object that does nothing. */
 const autosave = require('./autosave.js').attach({ config, env, log, stateDir });
+
+// MARK: - Closing unsaved work
+
+/** What closing a window, quitting or relaunching would lose, as each page
+ *  last said (`unsaved`), and what the shell does about it (close-guard.js:
+ *  the decisions; askToClose and closeIO below: the sheet and the saves). */
+const guard = new (require('./close-guard.js').Guard)({ log });
 
 function broadcast(name, detail) {
   for (const window of BrowserWindow.getAllWindows()) {
@@ -787,12 +800,43 @@ function openWindow(url, document = null) {
   contents.on('did-finish-load', () => {
     if (latestKnown) contents.send('claerbout:event', 'update', latestKnown);
   });
-  window.on('close', () => {
+  // What the page said was unsaved goes with the page: a reloaded page
+  // reports again, and a page that is gone can neither save nor answer.
+  // Only a navigation that has happened takes the page away: one that
+  // merely starts may never commit (a link out, which will-navigate above
+  // hands to the browser; a mailto:; a download), and the page that
+  // started it is still there, still unsaved, with no reason to report
+  // again. `did-navigate` is a committed main-frame document; a failed one
+  // commits an error page instead, said by `did-fail-load` (ERR_ABORTED,
+  // -3, is a load stopped or a navigation cancelled: the page stays).
+  const pageGone = () => {
+    guard.forget(window);
+    dropSaves(window);
+  };
+  contents.on('did-navigate', pageGone);
+  contents.on('did-fail-load', (_event, code, _description, _url, isMainFrame) => {
+    if (isMainFrame && code !== -3) pageGone();
+  });
+  contents.on('render-process-gone', pageGone);
+  window.on('close', (event) => {
     if (!window.isMaximized() && !window.isFullScreen()) writePreference('windowSize', window.getSize());
+    // ⌘W, the red button, File › Close, and the quit's own closing: a
+    // window whose page said closing would lose work is held and settled
+    // (askToClose); once settled it closes for real.
+    const decision = guard.onClose(window);
+    if (decision === 'pass') return;
+    event.preventDefault();
+    if (decision === 'hold') void askToClose(window);
+    // Its sheet is up, or its page is saving after Save (no time limit: a
+    // picker may be open). A page must answer that save, cancelled picker
+    // and errors included (README); one that never does keeps its window
+    // until it reloads or goes, and this says where the close went.
+    else log(`close: “${guard.reports.get(window)?.name ?? 'a window'}” is still being settled (its sheet, or a save the page has not answered); this close waits for it`);
   });
   window.on('closed', () => {
     documents.delete(window);
     origins.delete(window);
+    pageGone();
     void autosave.closed(window).then(syncPresence);
   });
   load(window, url);
@@ -970,9 +1014,13 @@ const historyViews = new Map();
  *  Graphs). */
 const graphs = new history.Graphs();
 /** How long a document page has to answer `save` before a rewind goes on
- *  without it (the apps' pages do not answer yet). */
+ *  without it (the apps' pages do not answer yet), and before a close
+ *  that asked for a quiet save shows the sheet. */
 const SAVE_WAIT = 3000;
-/** Saves a rewind asked for: id → {window, resolve}. */
+/** How long a close waits, after a page refused the quiet save, for a
+ *  report it sent just after its answer (see closeIO). */
+const REPORT_GRACE = 100;
+/** Saves asked for (a rewind's, a close's): id → {window, resolve, drop}. */
 const saves = new Map();
 
 const tilde = (file) => (file === home || file.startsWith(home + path.sep) ? `~${file.slice(home.length)}` : file);
@@ -1417,29 +1465,126 @@ async function historyGraph(entry, message) {
   };
 }
 
-/** Ask a document window to write its open document, for a rewind:
- *  `save {id, reason}`, answered `{type: 'saved', id, ok?, error?}`.
- *  {answered: false} after SAVE_WAIT. */
-function askToSave(target) {
+/** Ask a document window to write its open document: `save {id, reason}`
+ *  for a rewind, `save {id, reason: 'close', choose}` for a close (see
+ *  closeIO), answered `{type: 'saved', id, ok?, error?}`. {answered:
+ *  false} after `wait` ms (none: `null`, for a save that may open a
+ *  picker), or as soon as the page goes (dropSaves). */
+function askToSave(target, { reason = 'rewind', choose = null, wait = SAVE_WAIT } = {}) {
   return new Promise((resolve) => {
     if (target.isDestroyed()) {
       resolve({ answered: false });
       return;
     }
     const id = randomUUID();
-    const timer = setTimeout(() => {
+    let timer = null;
+    const finish = (answer) => {
+      if (timer !== null) clearTimeout(timer);
       saves.delete(id);
-      resolve({ answered: false });
-    }, SAVE_WAIT);
+      resolve(answer);
+    };
+    if (wait !== null) timer = setTimeout(() => finish({ answered: false }), wait);
     saves.set(id, {
       window: target,
-      resolve: (answer) => {
-        clearTimeout(timer);
-        saves.delete(id);
-        resolve({ answered: true, ...answer });
-      },
+      resolve: (answer) => finish({ answered: true, ...answer }),
+      drop: () => finish({ answered: false }),
     });
-    target.webContents.send('claerbout:event', 'save', { id, reason: 'rewind' });
+    target.webContents.send('claerbout:event', 'save', { id, reason, ...(choose === null ? {} : { choose }) });
+  });
+}
+
+/** The window's page went (closed, crashed, navigated): the saves it was
+ *  asked for are answered for it, unanswered. */
+function dropSaves(window) {
+  for (const pending of [...saves.values()]) if (pending.window === window) pending.drop();
+}
+
+/** A window's close, as the close guard settles it (close-guard.js,
+ *  settle): written quietly where the page can (`save {reason: 'close',
+ *  choose: false}`, SAVE_WAIT), else the standard sheet on the window, its
+ *  Save asking `save {reason: 'close', choose: true}` with no wait once the
+ *  page has user activation (a page reacting to the shell's event may then
+ *  open a picker: without it, showDirectoryPicker throws "Must be handling
+ *  a user gesture"; executeJavaScript with userGesture grants it, measured
+ *  on Electron 44.5, 2026-10-06). */
+function closeIO(window) {
+  return {
+    // A refusal may change what the sheet should offer (a file found
+    // changed outside the app at the write is `none` now): the page sends
+    // that report before its `saved` (README), and one sent just after it
+    // is given a moment to arrive before the sheet is built from the
+    // latest report.
+    quietSave: async () => {
+      const answer = await askToSave(window, { reason: 'close', choose: false });
+      if (answer.answered && !answer.ok) await sleep(REPORT_GRACE);
+      return answer;
+    },
+    ask: async (spec) => {
+      if (window.isDestroyed()) return spec.cancelId;
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+      if (isMac) app.focus({ steal: true });
+      const { response } = await dialog.showMessageBox(window, {
+        message: spec.message,
+        detail: spec.detail,
+        buttons: spec.buttons,
+        defaultId: spec.defaultId,
+        cancelId: spec.cancelId,
+        noLink: true,
+      });
+      return response;
+    },
+    // Bounded: a hung page never runs it, and is then not asked to save.
+    activate: async () => {
+      if (window.isDestroyed()) return false;
+      try {
+        return await Promise.race([
+          window.webContents.executeJavaScript('0', true).then(() => true),
+          sleep(SAVE_WAIT).then(() => false),
+        ]);
+      } catch (error) {
+        log(`close: could not give the page activation: ${error.message}`);
+        return false;
+      }
+    },
+    chooseSave: () => askToSave(window, { reason: 'close', choose: true, wait: null }),
+    log,
+  };
+}
+
+/** A window held at its close: settled, and closed if that is the answer.
+ *  Kept open otherwise; the page says why where it needs to. */
+async function askToClose(window) {
+  const outcome = await guard.settle(window, closeIO(window));
+  if (outcome !== 'close' || window.isDestroyed()) return;
+  guard.release(window);
+  window.close();
+}
+
+/** The open document windows in the order the quit asks them: the focused
+ *  one first. */
+function windowsToAsk() {
+  const focused = BrowserWindow.getFocusedWindow();
+  const open = guard.waiting().filter((window) => !window.isDestroyed());
+  return focused && open.includes(focused) ? [focused, ...open.filter((window) => window !== focused)] : open;
+}
+
+/** Quit, or relaunch into an update, once every window holding unsaved
+ *  work is settled in turn (close-guard.js, quit): a Cancel on any stops
+ *  it, and everything (the engine, the record, the windows) goes on as it
+ *  was. A quit asked for while one is asking joins it; a relaunch asked for
+ *  then makes it one. */
+function quitAfterAsking({ relaunch = false } = {}) {
+  return guard.quit({
+    windows: windowsToAsk,
+    ioFor: closeIO,
+    gone: (window) => window.isDestroyed(),
+    relaunch,
+    proceed: ({ relaunch: again }) => {
+      if (again) app.relaunch({ args: [...documents.values()].filter(Boolean) });
+      app.quit();
+    },
   });
 }
 
@@ -1451,7 +1596,7 @@ function askToSave(target) {
  *  page: not saved first, and, a page that does not answer save being one
  *  that does not reload either, to be reopened after the rewind. */
 async function saveAll(windows) {
-  const answers = await Promise.all(windows.map(askToSave));
+  const answers = await Promise.all(windows.map((window) => askToSave(window)));
   for (const [i, answer] of answers.entries()) {
     if (answer.answered && answer.ok === false) return { unsaved: { path: documents.get(windows[i]) ?? null, ...(answer.error ? { error: answer.error } : {}) } };
   }
@@ -1801,9 +1946,22 @@ async function answer(window, message) {
           return null;
       }
     }
+    case 'unsaved':
+      // What closing this window now would lose (close-guard.js): {unsaved,
+      // name, save: 'quiet' | 'choose' | 'none', label?, detail?}, sent by
+      // the page whenever any of it changes and once after load. While
+      // unsaved, a close is held and settled: written quietly where `save`
+      // is quiet, else the sheet (Save, Don't Save, Cancel; no Save for
+      // `none`), and the quit asks for each such window in turn. A blank
+      // never-saved document is not unsaved. Since 0.2.8; an older shell
+      // answers null, and the page then stops sending (and must not use
+      // beforeunload in the shell: Electron silently refuses the close).
+      guard.report(window, message);
+      return { guarded: true };
     case 'saved': {
       // A page's answer to `save` (a rewind asked it to write its open
-      // document first): {id, ok?, error?}; ok: false refuses the rewind.
+      // document first, or a close): {id, ok?, error?}; ok: false refuses
+      // the rewind, and keeps the closing window open.
       const pending = saves.get(message.id);
       if (pending && pending.window === window) pending.resolve({ ok: message.ok !== false, ...(typeof message.error === 'string' ? { error: message.error } : {}) });
       return null;
@@ -1815,6 +1973,9 @@ async function answer(window, message) {
         void runUpdate(false);
         return { state: 'installing', current: updater.current };
       }
+      // Installed, its relaunch stopped: what is on offer is the relaunch,
+      // which the install now is (runUpdate), whatever the site says.
+      if (installedPending) return { state: 'available', installed: true, latest: installedPending.latest, current: installedPending.current };
       try {
         const result = await updater.check();
         if (result.state === 'available') latestKnown = { state: 'available', latest: result.latest, current: result.current };
@@ -1885,8 +2046,21 @@ function choosePython() {
 const when = (build) => (build?.built ? `, built ${build.built.slice(0, 10)}` : '');
 
 /** Check for Updates… in the menu: the answer in a dialog, and the offer
- *  to install when the site has a newer build. */
+ *  to install when the site has a newer build. An update already in place
+ *  whose relaunch was stopped is offered the relaunch instead. */
 async function checkForUpdates() {
+  if (installedPending) {
+    const { response } = await dialog.showMessageBox({
+      type: 'info',
+      message: `${NAME} has been updated`,
+      detail: `Build ${installedPending.latest.build}${when(installedPending.latest)} is in place and runs from the next launch. Relaunch now? Open documents are reopened; a window with unsaved work asks first.`,
+      buttons: ['Relaunch', 'Not Now'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (response === 0) void runUpdate(false);
+    return;
+  }
   let result;
   try {
     result = await updater.check();
@@ -1929,10 +2103,13 @@ function runUpdate(fromMenu) {
   if (updateRun) return updateRun;
   updateRun = (async () => {
     try {
-      const result = await updater.install((step) => {
-        log(`update: ${step.text}`);
-        broadcast('update', { ...step, current: updater.current });
-      });
+      // Installed already, its relaunch stopped: only the relaunch is left.
+      const result =
+        installedPending ??
+        (await updater.install((step) => {
+          log(`update: ${step.text}`);
+          broadcast('update', { ...step, current: updater.current });
+        }));
       if (result.state !== 'ready') {
         broadcast('update', { ...result });
         return result;
@@ -1941,7 +2118,7 @@ function runUpdate(fromMenu) {
       broadcast('update', { state: 'ready', text: detail, latest: result.latest, current: result.current });
       if (fromMenu) await dialog.showMessageBox({ type: 'info', message: `${NAME} has been updated`, detail, buttons: ['Relaunch'] });
       else await sleep(1500);
-      relaunch();
+      relaunch(result);
       return result;
     } catch (error) {
       log(`update failed: ${error.message}`);
@@ -1959,10 +2136,27 @@ function runUpdate(fromMenu) {
 
 /** The new bundle, with this instance's documents reopened: `relaunch`
  *  starts the executable at this process's path, which the swap made the
- *  new one's, once `quit` has stopped the engine. */
-function relaunch() {
-  app.relaunch({ args: [...documents.values()].filter(Boolean) });
-  app.quit();
+ *  new one's, once `quit` has stopped the engine. A window holding unsaved
+ *  work is asked first, as the quit asks; a Cancel leaves the app running
+ *  on the old build (the new one is in place for the next launch), and no
+ *  relaunch armed. The pages were told it relaunches now: they are told it
+ *  did not, as `failed` (today's pages put their update item back and say
+ *  the text on it), and the next install, from a page or the menu, is the
+ *  relaunch (installedPending). */
+function relaunch(result) {
+  void quitAfterAsking({ relaunch: true }).then((went) => {
+    if (went) return;
+    log('update: the relaunch was stopped: a window kept its unsaved work; the new build runs from the next launch');
+    installedPending = result;
+    latestKnown = { state: 'available', latest: result.latest, current: result.current };
+    broadcast('update', {
+      state: 'failed',
+      stopped: true,
+      text: `the relaunch was stopped to keep unsaved work open. Build ${result.latest.build} is installed: it runs from the next launch, or update again to relaunch into it now.`,
+      latest: result.latest,
+      current: result.current,
+    });
+  });
 }
 
 /** The View menu's zoom, with the window following when the config says so
@@ -2249,11 +2443,24 @@ if (!app.requestSingleInstanceLock()) {
     if (!isMac) app.quit();
   });
 
-  // Quitting flushes the autosave record (every open session closes) and
-  // stops the engine, then quits for real. A second quit while that is
-  // under way goes through at once.
+  // Quitting first asks each window holding unsaved work, in turn, as its
+  // close would (quitAfterAsking): a Cancel stops the quit before anything
+  // else has happened, and a second quit while it asks joins it. Then the
+  // quit flushes the autosave record (every open session closes) and stops
+  // the engine, and quits for real. A second quit while that is under way
+  // goes through at once.
   let stopped = false;
   app.on('before-quit', (event) => {
+    if (!guard.quitAllowed) {
+      if (guard.quitRun || guard.waiting().some((window) => !window.isDestroyed())) {
+        event.preventDefault();
+        void quitAfterAsking();
+        return;
+      }
+      // Nothing to ask: decided, so a report arriving while the windows
+      // close does not stop the quit halfway.
+      guard.quitAllowed = true;
+    }
     clearPresence();
     if (stopped || (!engine.isRunning && !autosave.enabled)) return;
     event.preventDefault();
@@ -2274,7 +2481,7 @@ if (!app.requestSingleInstanceLock()) {
         updater
           .check()
           .then((result) => {
-            if (result.state !== 'available') return;
+            if (result.state !== 'available' || installedPending) return;
             latestKnown = { state: 'available', latest: result.latest, current: result.current };
             log(`update available: build ${result.latest.build} (this is ${result.current.build ?? 'unknown'})`);
             broadcast('update', latestKnown);

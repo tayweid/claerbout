@@ -11,6 +11,10 @@
 //   node smoke.mjs --config app/knuth.json update path/to/Knuth.app path/to/site
 //                                               # an installed app updating itself from a
 //                                               # site folder (app/latest.json and the zips)
+//   node smoke.mjs --config … update --unsaved App.app site
+//                                               # the same, a window first holding unsaved
+//                                               # work that Cancels the relaunch (the
+//                                               # shell's own fixture: test/update.mjs)
 //
 // With one Python in the config, the mode may be left out. The uv run
 // installs Python into the throwaway folder (and uv itself into
@@ -27,6 +31,10 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const at = args.indexOf('--config');
 const configPath = at !== -1 ? args.splice(at, 2)[1] : null;
+// The update test, first with a window holding unsaved work whose sheet
+// answers Cancel: the relaunch stops, then goes on once nothing is unsaved.
+const unsavedAt = args.indexOf('--unsaved');
+const unsavedFirst = unsavedAt !== -1 && args.splice(unsavedAt, 1).length === 1;
 if (!configPath) {
   console.error('usage: node smoke.mjs --config app.json [browser|uv] [App.app]');
   process.exit(2);
@@ -319,15 +327,63 @@ if (updating) {
     window.claerbout.on('update', (detail) => { window.__update = detail; });
   });
   const exited = new Promise((resolve) => app.process().once('exit', resolve));
-  await page.evaluate(() => window.claerbout.request({ type: 'update', action: 'install' }));
-  let last = null;
-  const until = Date.now() + 600_000;
-  while (Date.now() < until) {
-    const seen = await page.evaluate(() => window.__update).catch(() => ({ state: 'gone' }));
-    if (seen) last = seen;
-    if (last?.state === 'ready' || last?.state === 'failed' || last?.state === 'gone') break;
-    await new Promise((resolve) => setTimeout(resolve, 500));
+  /** The page's last `update` event, once `done(it)` (or 'gone' with the
+   *  page), for at most ten minutes. */
+  async function follow(done) {
+    let last = null;
+    const until = Date.now() + 600_000;
+    while (Date.now() < until) {
+      const seen = await page.evaluate(() => window.__update).catch(() => ({ state: 'gone' }));
+      if (seen) last = seen;
+      if (last?.state === 'gone' || done(last)) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    return last;
   }
+  if (unsavedFirst) {
+    // The window holds unsaved work, and its sheet is answered Cancel: the
+    // relaunch is stopped after the install, with no relaunch armed, the
+    // app running and the pages told; the new bundle is in place, and the
+    // next install is the relaunch.
+    let gone = false;
+    void exited.then(() => {
+      gone = true;
+    });
+    await app.evaluate(({ app: electronApp, dialog }) => {
+      globalThis.__sheets = [];
+      globalThis.__relaunches = [];
+      const relaunch = electronApp.relaunch.bind(electronApp);
+      electronApp.relaunch = (...options) => {
+        globalThis.__relaunches.push(options);
+        return relaunch(...options);
+      };
+      dialog.showMessageBox = async (_window, options) => {
+        globalThis.__sheets.push({ message: options.message, buttons: options.buttons });
+        return { response: options.cancelId, checkboxChecked: false };
+      };
+    });
+    const guarded = await page.evaluate(() => window.claerbout.request({ type: 'unsaved', unsaved: true, name: 'smoke.txt', save: 'choose' }));
+    if (guarded?.guarded !== true) await fail(`the unsaved report was answered ${JSON.stringify(guarded)}`);
+    await page.evaluate(() => window.claerbout.request({ type: 'update', action: 'install' }));
+    const stopped = await follow((step) => step?.state === 'failed');
+    if (stopped?.stopped !== true) await fail(`the relaunch over unsaved work was not stopped (last: ${JSON.stringify(stopped)})`);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    if (gone) await fail('the app quit although the relaunch was cancelled');
+    const shown = await app.evaluate(() => globalThis.__sheets);
+    if (shown.length !== 1 || !shown[0].message.includes('“smoke.txt”')) await fail(`the stopped relaunch showed ${JSON.stringify(shown)}`);
+    const armed = await app.evaluate(() => globalThis.__relaunches.length);
+    if (armed !== 0) await fail(`the stopped relaunch armed app.relaunch ${armed} times`);
+    if (stampOf(bundle) !== wanted) await fail(`after the stopped relaunch the bundle is build ${stampOf(bundle)}, not the installed ${wanted}`);
+    const offered = await page.evaluate(() => window.claerbout.request({ type: 'update' }));
+    if (offered?.state !== 'available' || offered.installed !== true || offered.latest?.build !== wanted) await fail(`after the stopped relaunch the check answered ${JSON.stringify(offered)}`);
+    console.log(`smoke (${NAME}, update, ${path.basename(bundle)}): a window with unsaved work was asked first; Cancel stopped the relaunch (none armed, the app running, the page told), build ${wanted} in place`);
+    await page.evaluate(() => {
+      window.__update = null;
+      return window.claerbout.request({ type: 'unsaved', unsaved: false, name: 'smoke.txt', save: 'quiet' });
+    });
+  }
+  await page.evaluate(() => window.claerbout.request({ type: 'update', action: 'install' }));
+  const last = await follow((step) => step?.state === 'ready' || step?.state === 'failed');
   if (last?.state === 'failed') await fail(`the update failed: ${last.text}`);
   if (!last || last.state === 'gone' && stampOf(bundle) !== wanted) await fail(`no update event arrived (last: ${JSON.stringify(last)})`);
   // The app relaunches itself into the new bundle: the process goes, and a
