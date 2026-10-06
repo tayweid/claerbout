@@ -152,7 +152,7 @@ rmSync(stage, { recursive: true, force: true });
 // The shell, with the app's config beside it as app.json.
 const appDir = path.join(stage, 'app');
 mkdirSync(appDir, { recursive: true });
-for (const file of ['main.js', 'preload.js', 'update.js', 'autosave.js', 'history.js']) cpSync(path.join(here, file), path.join(appDir, file));
+for (const file of ['main.js', 'preload.js', 'update.js', 'autosave.js', 'history.js', 'close-guard.js']) cpSync(path.join(here, file), path.join(appDir, file));
 // The shell's own pages (the history view), served under /_claerbout/.
 cpSync(path.join(here, 'history'), path.join(appDir, 'history'), { recursive: true });
 cpSync(configPath, path.join(appDir, 'app.json'));

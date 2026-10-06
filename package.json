@@ -11,6 +11,7 @@
     "preload.js",
     "update.js",
     "autosave.js",
+    "close-guard.js",
     "history.js",
     "history/",
     "complete.sh",
@@ -21,9 +22,10 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test test/autosave.test.mjs && node --test test/history.test.mjs && node smoke.mjs --config test/fixture/app.json browser && node test/update.mjs",
+    "test": "node --test test/autosave.test.mjs && node --test test/history.test.mjs && node --test test/close-guard.test.mjs && node smoke.mjs --config test/fixture/app.json browser && node test/close.mjs && node test/update.mjs",
     "test:autosave": "node --test test/autosave.test.mjs",
     "test:history": "node --test test/history.test.mjs",
+    "test:close": "node --test test/close-guard.test.mjs && node test/close.mjs",
     "test:update": "node test/update.mjs",
     "fixture": "CLAERBOUT_APP=test/fixture/app.json electron .",
     "fixture:build": "node package.mjs --config test/fixture/app.json --install /tmp/Fixture.app"
