@@ -85,7 +85,7 @@ copies it into the bundle as `app.json`.
 | `defaultDocument` | The Save As… panel's suggested name. |
 | `openBy` | `"path"` (default): a document opens as `?open=<absolute path>`. `"drop"`: additionally, once the page sends `ready`, the document is dropped on it, so a page that keeps files by handle (File System Access API) gets a real handle. |
 | `permissions` | Chromium permissions granted to the app's own pages beyond the defaults (`fileSystem`, `fullscreen`, `clipboard-sanitized-write`): Electron's names, `"clipboard-read"`, `"media"`, `"notifications"`. Everything else is refused. |
-| `window` | `width`, `height`, `minWidth`, `minHeight` of a new window; the last size is remembered. `titleBarStyle`: `"default"` (the native title bar), or `"hiddenInset"` / `"hidden"`: no title bar; the page reaches the top of the window and draws the bar itself, with the traffic lights over it. Such a page marks its bar `-webkit-app-region: drag` (with `no-drag` on its controls) so the window still moves by it, and learns where the lights are from the Window Controls Overlay, `navigator.windowControlsOverlay` and CSS `env(titlebar-area-x/y/width/height)`, which the shell publishes whenever the title bar is not native and which is unset (`visible` false, the `env()` fallbacks) when it is — so one page is right under either. `trafficLightPosition`: `{x, y}` (macOS) moves the lights; the overlay's area is 2·y plus the lights tall (14 px on macOS 26, 16 on macOS 15), so a page sets its bar's height from `env(titlebar-area-height)` with the number it wants as the fallback, and y so the band comes out right on the Mac it runs on (y 15 gives 44 or 46). Since 0.2.1; the setup page gets the same bar. `followZoom`: `true` makes the window grow and shrink with View → Zoom In / Out / Actual Size (in one step, on its display; a maximized or fullscreen window is left alone), for a page laid out as a fixed-width paper with a margin (Plass); the page's layout then never changes with the zoom. Since 0.2.1. `scrollBounce`: macOS's rubber band at the end of a scroll, on unless set `false` (Electron leaves it off; a page that stops dead at its edge feels cramped). Since 0.2.1. |
+| `window` | `width`, `height`, `minWidth`, `minHeight` of a new window; the last size is remembered. `titleBarStyle`: `"default"` (the native title bar), or `"hiddenInset"` / `"hidden"`: no title bar; the page reaches the top of the window and draws the bar itself, with the traffic lights over it. Such a page marks its bar `-webkit-app-region: drag` (with `no-drag` on its controls) so the window still moves by it, and learns where the lights are from the Window Controls Overlay, `navigator.windowControlsOverlay` and CSS `env(titlebar-area-x/y/width/height)`, which the shell publishes whenever the title bar is not native and which is unset (`visible` false, the `env()` fallbacks) when it is — so one page is right under either. `trafficLightPosition`: `{x, y}` (macOS) moves the lights; the overlay's area is 2·y plus the lights tall (14 px on macOS 26, 16 on macOS 15), so a page sets its bar's height from `env(titlebar-area-height)` with the number it wants as the fallback, and y so the band comes out right on the Mac it runs on (y 15 gives 44 or 46). Since 0.2.1; the setup page gets the same bar. `zoom`: `"page"` gives the View menu Zoom In / Zoom Out / Actual Size (⌘+, ⌘−, ⌘0), and each tells the page a `zoom` event rather than zooming anything (below, Zoom). Absent, the app has no zoom. Since 0.2.11, which also retired `followZoom` (0.2.1–0.2.10: the window grew with a Chromium zoom); it is ignored. `scrollBounce`: macOS's rubber band at the end of a scroll, on unless set `false` (Electron leaves it off; a page that stops dead at its edge feels cramped). Since 0.2.1. |
 | `icon` | A PNG, 512 px or larger, relative to the config. |
 | `copyright` | For the bundle's Info.plist. |
 | `documentTypes` | Finder's Open With: `name`, `role`, `rank` (`Alternate` unless you mean to take the type), and `contentTypes` (UTIs) or `extensions`. |
@@ -412,7 +412,7 @@ node again, or the card's button, to rewind.
   window of its own: the shell lays it over the room's box as a
   `WebContentsView` with the document windows' own preferences
   (`win.contentView.addChildView`), at the box the page sends in CSS px
-  times the page's zoom factor, rounded, in DIP, and loads
+  (which are DIP: no page is zoomed), rounded, and loads
   `history.html?inline=1` for that window's project. The document stays
   loaded underneath, so a rewind's `save` and `reload` reach it as they
   reach any window on the project; the app's bar stays above. The view's
@@ -859,6 +859,22 @@ name, save, label?, detail?}` (what closing this window now would lose;
 below), `saved {id, ok?, error?}` (the answer to a `save` event). A
 History page has requests of its own (above).
 
+Zoom (since 0.2.11). Every page runs at Chromium's zoom 1, always: a
+page zoom scales the whole window, the page's bar and sidebars with its
+content, and no Mac app zooms that way (Pages, Preview and Xcode zoom the
+document and leave the window as it is). No menu role zooms, a pinch does
+nothing, and a level Chromium kept for the origin is put back at every
+load, so a page's CSS px are always DIP. An app whose content zooms sets
+`window.zoom: "page"`; its View menu then has Actual Size (⌘0), Zoom In
+(⌘+ and ⌘=) and Zoom Out (⌘−), and each sends the focused window's page
+
+```js
+claerbout.on('zoom', ({ step }) => { /* 1 in, -1 out, 0 actual size */ });
+```
+
+What a step means (Plass draws its paper larger, Knuth sets its type
+larger) and whether it is remembered are the page's own.
+
 Closing a window that holds unsaved work (since 0.2.8):
 
 `unsaved {unsaved, name, save, label?, detail?}`: the page says whether
@@ -947,8 +963,8 @@ view"):
 `history {action: 'open', inline: {x, y, width, height}, at?}`: the room's
 box in the page's CSS px (its `getBoundingClientRect()`). The shell lays
 the History page for this window's project over that box of the same
-window, as a view, at the box times the page's zoom factor, rounded, in
-DIP, and answers `{opened: true, inline: true}`; where there is no record
+window, as a view, at the box rounded (CSS px are DIP: no page is
+zoomed), and answers `{opened: true, inline: true}`; where there is no record
 it opens all the same and its page says why, as the window does. A second
 `open` while it is up answers the same and changes nothing (`at` still
 selects a commit, by `history {kind: 'focus', at}` to the view). A box

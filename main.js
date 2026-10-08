@@ -763,6 +763,20 @@ function pagePreferences() {
   };
 }
 
+/** Every page runs at Chromium's zoom 1, always: a page zoom scales the
+ *  whole window, the page's bar and sidebars with the content, which no
+ *  Mac app does (Pages, Preview and Xcode zoom the document and leave the
+ *  window as it is). So no menu role zooms, a pinch does nothing, and a
+ *  level Chromium kept for the origin is put back at every load. An app
+ *  whose content zooms says so (`window.zoom: "page"`) and its page zooms
+ *  itself, told by the View menu (zoomBy). Since 0.2.11. */
+function holdZoom(contents) {
+  contents.on('did-finish-load', () => {
+    contents.setZoomLevel(0);
+    void contents.setVisualZoomLevelLimits(1, 1);
+  });
+}
+
 function openWindow(url, document = null) {
   const last = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows().at(-1);
   const size = readPreferences().windowSize;
@@ -782,6 +796,7 @@ function openWindow(url, document = null) {
   }
   setDocument(window, document);
   const contents = window.webContents;
+  holdZoom(contents);
   // window.open from the page ("New" opens a fresh session) becomes one of
   // our windows; links out of the page (the docs, GitHub) go to the default
   // browser. Only the app's own origins render here.
@@ -1127,6 +1142,7 @@ async function openHistory(source, at = null) {
   }
   historyWindows.set(window, { ...target, key });
   const contents = window.webContents;
+  holdZoom(contents);
   // The page goes nowhere: links out open in the default browser.
   contents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/i.test(url)) void shell.openExternal(url);
@@ -1174,17 +1190,17 @@ function roomBox(box) {
   return { x, y, width, height };
 }
 
-/** The view over the room: the page's CSS px times its zoom, in DIP. A
- *  resize of the window moves nothing by itself; the page's `bounds`
- *  does, from its ResizeObserver on the room. */
+/** The view over the room: the page's CSS px, which are DIP (the shell
+ *  holds every page at zoom 1, holdZoom). A resize of the window moves
+ *  nothing by itself; the page's `bounds` does, from its ResizeObserver
+ *  on the room. */
 function placeInline(host, entry, css) {
   entry.css = css;
-  const zoom = host.webContents.getZoomFactor() || 1;
   entry.view.setBounds({
-    x: Math.round(css.x * zoom),
-    y: Math.round(css.y * zoom),
-    width: Math.round(css.width * zoom),
-    height: Math.round(css.height * zoom),
+    x: Math.round(css.x),
+    y: Math.round(css.y),
+    width: Math.round(css.width),
+    height: Math.round(css.height),
   });
 }
 
@@ -1208,6 +1224,7 @@ async function openInline(host, css, at = null) {
   const view = new WebContentsView({ webPreferences: pagePreferences() });
   view.setBackgroundColor('#00000000');
   const contents = view.webContents;
+  holdZoom(contents);
   const entry = { view, contents, origin: appOrigin, host, css, hidden: false, root: null, reason: null, detail: null, document: null, known: null, attach: () => {}, detach: () => {}, release: () => {} };
   historyViews.set(host, entry);
   // The page goes nowhere: links out open in the default browser.
@@ -1885,9 +1902,8 @@ async function answer(window, message) {
       // height would not fit the display), so the room fills from this
       // moment and not from the next drag; a maximized or full-screen
       // window is left as it is (the shape holds for when it comes back).
-      // The page's px are zoomed px, so the extra is scaled by the zoom
-      // here and again when the zoom changes (zoomTo). Since 0.2.7; an
-      // older shell answers null.
+      // The page's px are DIP (holdZoom). Since 0.2.7; an older shell
+      // answers null.
       const ratio = Number.isFinite(message.ratio) && message.ratio > 0 ? message.ratio : 0;
       const extra = {
         width: Math.max(0, Math.round(Number(message.extra?.width) || 0)),
@@ -2165,52 +2181,14 @@ function relaunch(result) {
   });
 }
 
-/** The View menu's zoom, with the window following when the config says so
- *  (`window.followZoom`; Plass): a page laid out as a fixed-width paper with
- *  a margin wants the window to grow and shrink with the zoom, so the paper
- *  keeps its room — scaled here, in screen pixels, in one step, never by
- *  the page measuring itself (a page's px are zoomed px, and a page that
- *  resized the window after every resize walked it there in several steps).
- *  The window stays on its display; maximized and fullscreen windows are
- *  left alone. Chromium's zoom levels: each is ×1.2, half-steps as the
- *  menu roles use. */
-function zoomTo(window, level) {
-  if (!window || window.isDestroyed()) return;
-  const contents = window.webContents;
-  const before = contents.getZoomFactor();
-  contents.setZoomLevel(level);
-  const after = contents.getZoomFactor();
-  // The History view over the room, at the new zoom until the page's own
-  // `bounds` (a window that follows the zoom keeps the room's CSS box).
-  const inline = historyViews.get(window);
-  if (inline && after !== before) placeInline(window, inline, inline.css);
-  if (!config.window?.followZoom || window.isFullScreen() || window.isMaximized() || after === before) return;
-  const ratio = after / before;
-  const bounds = window.getBounds();
-  const [contentWidth, contentHeight] = window.getContentSize();
-  const area = screen.getDisplayMatching(bounds).workArea;
-  const chrome = { x: bounds.width - contentWidth, y: bounds.height - contentHeight };
-  const width = Math.min(Math.round(contentWidth * ratio), area.width - chrome.x);
-  const height = Math.min(Math.round(contentHeight * ratio), area.height - chrome.y);
-  window.setContentSize(width, height);
-  // Still on the display: nudge back in if the growth ran past its edge.
-  const grown = window.getBounds();
-  const x = Math.max(area.x, Math.min(grown.x, area.x + area.width - grown.width));
-  const y = Math.max(area.y, Math.min(grown.y, area.y + area.height - grown.height));
-  if (x !== grown.x || y !== grown.y) window.setPosition(x, y);
-  // The extra is in the page's px: at the new zoom it is a new size.
-  keepShape(window, null);
-}
-
 /** The shape a window keeps (the `shape` request): its room's ratio and
  *  the chrome's extra, in the page's px. */
 const shapes = new WeakMap();
 const shapeHooked = new WeakSet();
 
-/** The shape's extra in DIP: the page's px times the zoom. */
-function shapeExtra(window, shape) {
-  const zoom = window.webContents.getZoomFactor();
-  return { width: Math.round(shape.extra.width * zoom), height: Math.round(shape.extra.height * zoom) };
+/** The shape's extra in DIP, which the page's px are (holdZoom). */
+function shapeExtra(_window, shape) {
+  return { width: shape.extra.width, height: shape.extra.height };
 }
 
 /** A drag of the window's edge, held to the shape: the dimension the
@@ -2257,8 +2235,7 @@ function shapeResize(window, event, bounds, details) {
  *  changed (a console opening beside the picture widens the window and
  *  leaves the picture as it was, rather than squeezing it to keep the
  *  window); otherwise the width, or the height where the width's height
- *  runs past the display's work area. Nudged back onto the display, as
- *  zoomTo does. */
+ *  runs past the display's work area. Nudged back onto the display. */
 function keepShape(window, fit) {
   if (!window || window.isDestroyed()) return;
   const shape = shapes.get(window);
@@ -2291,18 +2268,24 @@ function keepShape(window, fit) {
   if (x !== grown.x || y !== grown.y) window.setPosition(x, y);
 }
 
-/** The window a menu item acts on: the one the menu passes, else the
- *  focused one (an item clicked programmatically passes none). */
+/** View → Zoom In / Out / Actual Size, for an app whose page zooms its
+ *  own content (`window.zoom: "page"`): the shell zooms nothing
+ *  (holdZoom) and tells the window's page a `zoom` event, {step: 1, -1,
+ *  or 0 for Actual Size}; what a step means (a paper drawn larger, a
+ *  larger type size) and whether it is remembered are the page's. The
+ *  window a menu item acts on: the one the menu passes, else the focused
+ *  one (an item clicked programmatically passes none). Since 0.2.11. */
 const zoomBy = (window, step) => {
   const target = window ?? BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
-  if (target) zoomTo(target, step === 0 ? 0 : target.webContents.getZoomLevel() + step);
+  if (target && !target.isDestroyed()) target.webContents.send('claerbout:event', 'zoom', { step });
 };
 const zoomItems = [
   { label: 'Actual Size', accelerator: 'CmdOrCtrl+0', click: (_item, window) => zoomBy(window, 0) },
-  { label: 'Zoom In', accelerator: 'CmdOrCtrl+Plus', click: (_item, window) => zoomBy(window, 0.5) },
-  // ⌘= is what the key says without shift; the role registers both.
-  { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', visible: false, acceleratorWorksWhenHidden: true, click: (_item, window) => zoomBy(window, 0.5) },
-  { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: (_item, window) => zoomBy(window, -0.5) },
+  { label: 'Zoom In', accelerator: 'CmdOrCtrl+Plus', click: (_item, window) => zoomBy(window, 1) },
+  // ⌘= is what the key says without shift.
+  { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', visible: false, acceleratorWorksWhenHidden: true, click: (_item, window) => zoomBy(window, 1) },
+  { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: (_item, window) => zoomBy(window, -1) },
+  { type: 'separator' },
 ];
 
 function buildMenu() {
@@ -2353,8 +2336,7 @@ function buildMenu() {
         { role: 'reload' },
         { role: 'toggleDevTools' },
         { type: 'separator' },
-        ...(config.window?.followZoom ? zoomItems : [{ role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }]),
-        { type: 'separator' },
+        ...(config.window?.zoom === 'page' ? zoomItems : []),
         { role: 'togglefullscreen' },
       ],
     },
