@@ -1894,14 +1894,16 @@ async function answer(window, message) {
       // full width of its panel by sizing the window to the paper rather
       // than the paper to the window. Held to the window's minimum and to
       // its display's work area, and nudged back onto the display;
-      // answered with the content size it got. A maximized or full-screen
-      // window is left as it is: {resized: false, reason}. Since 0.2.11;
-      // an older shell answers null.
+      // answered with the content size it got. A full-screen window is
+      // left as it is: {resized: false, reason}. A maximized one is not:
+      // on macOS a window grown to its display's work area (as a zoom
+      // step grows it) reads as maximized, and a zoom that stopped there
+      // could never come back. Since 0.2.11; an older shell answers null.
       const width = Math.round(Number(message.width));
       const height = Math.round(Number(message.height));
       if (!(width > 0) || !(height > 0)) return { resized: false, reason: 'size' };
       if (window.isFullScreen()) return { resized: false, reason: 'fullscreen' };
-      if (window.isMaximized()) return { resized: false, reason: 'maximized' };
+      if (window.isMaximized()) window.unmaximize();
       const bounds = window.getBounds();
       const [contentWidth, contentHeight] = window.getContentSize();
       const chrome = { x: bounds.width - contentWidth, y: bounds.height - contentHeight };

@@ -855,8 +855,10 @@ window round it. `{ratio: null}` lifts it. Since 0.2.7; an older shell
 answers `null`), `resize {width, height}` (the window's content made that size, in
 the page's px, which are DIP: held to the window's minimum and its
 display's work area and kept on the display, answered `{resized: true,
-width, height}` with the size it got; a maximized or full-screen window
-is left alone, `{resized: false, reason}`. Plass's zoom: its paper is
+width, height}` with the size it got; a full-screen window is left
+alone, `{resized: false, reason}`, and a maximized one is resized all
+the same (on macOS a window at its display's work area reads as
+maximized). Plass's zoom: its paper is
 always the full width of its panel, so a zoom step sizes the window to
 the paper. Since 0.2.11; an older shell answers `null`), `history` and `history {action: 'open', at?}` without `inline`
 (the History window for this window's project, made or brought forward;

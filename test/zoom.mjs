@@ -106,6 +106,9 @@ await run('page', { zoom: 'page' }, async (app, page) => {
   const bounds = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds());
   check(big?.resized === true && big.width <= area.width && big.height <= area.height, `a resize past the display was answered ${JSON.stringify(big)} in ${JSON.stringify(area)}`);
   check(bounds.x >= area.x && bounds.y >= area.y && bounds.x + bounds.width <= area.x + area.width && bounds.y + bounds.height <= area.y + area.height, `the grown window ${JSON.stringify(bounds)} left the display ${JSON.stringify(area)}`);
+  // Grown to the display (macOS calls that maximized), it still comes back.
+  const back = await page.evaluate(() => window.claerbout.request({ type: 'resize', width: 700, height: 500 }));
+  check(JSON.stringify(back) === '{"resized":true,"width":700,"height":500}', `a resize from the display's full size was answered ${JSON.stringify(back)}`);
   const bad = await page.evaluate(() => window.claerbout.request({ type: 'resize', width: 'wide' }));
   check(bad?.resized === false, `a resize without a size was answered ${JSON.stringify(bad)}`);
   console.log('zoom: resize sizes the content in DIP, held to the display');
