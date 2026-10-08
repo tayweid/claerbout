@@ -2030,10 +2030,16 @@ function newWindow() {
   if (mode) openWindow(pageURL(null));
 }
 
-/** File → Open…: a document app opens each file in its own window. */
-async function openFromMenu() {
+/** File → Open…: a document app opens each file in its own window. The
+ *  panel starts in the folder of the file the front window holds, as the
+ *  page's own open request does; with none, macOS's last folder. */
+async function openFromMenu(window) {
   if (!mode) return;
-  const { canceled, filePaths } = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections'] });
+  const start = window ? documents.get(window) : null;
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    properties: ['openFile', 'multiSelections'],
+    defaultPath: start ? path.dirname(start) : undefined,
+  });
   if (!canceled) for (const file of filePaths) openDocument(file);
 }
 
@@ -2329,7 +2335,7 @@ function buildMenu() {
       label: 'File',
       submenu: [
         { label: 'New Window', accelerator: 'CmdOrCtrl+N', click: newWindow },
-        { label: 'Open…', accelerator: 'CmdOrCtrl+O', click: () => void openFromMenu() },
+        { label: 'Open…', accelerator: 'CmdOrCtrl+O', click: (_item, window) => void openFromMenu(window ?? BrowserWindow.getFocusedWindow() ?? null) },
         { type: 'separator' },
         ...(isMac ? [] : [...appItems, { type: 'separator' }]),
         { role: 'close' },
