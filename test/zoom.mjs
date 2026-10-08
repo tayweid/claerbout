@@ -94,6 +94,21 @@ await run('page', { zoom: 'page' }, async (app, page) => {
   check(JSON.stringify(heard) === '[1,1,-1,0]', `the page heard ${JSON.stringify(heard)}, not [1,1,-1,0]`);
   check((await zoomFactor(app)) === 1, `the menu zoomed the page to ${await zoomFactor(app)}`);
   console.log('zoom: with window.zoom "page", the View menu tells the page {step} and zooms nothing');
+
+  // `resize`: the window's content made the size asked, in DIP; held to
+  // the display's work area when it asks for more.
+  const contentSize = () => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getContentSize());
+  const asked = await page.evaluate(() => window.claerbout.request({ type: 'resize', width: 700, height: 500 }));
+  check(JSON.stringify(asked) === '{"resized":true,"width":700,"height":500}', `resize 700×500 was answered ${JSON.stringify(asked)}`);
+  check(JSON.stringify(await contentSize()) === '[700,500]', `after resize 700×500 the content is ${JSON.stringify(await contentSize())}`);
+  const area = await app.evaluate(({ screen, BrowserWindow }) => screen.getDisplayMatching(BrowserWindow.getAllWindows()[0].getBounds()).workArea);
+  const big = await page.evaluate(() => window.claerbout.request({ type: 'resize', width: 99999, height: 99999 }));
+  const bounds = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getBounds());
+  check(big?.resized === true && big.width <= area.width && big.height <= area.height, `a resize past the display was answered ${JSON.stringify(big)} in ${JSON.stringify(area)}`);
+  check(bounds.x >= area.x && bounds.y >= area.y && bounds.x + bounds.width <= area.x + area.width && bounds.y + bounds.height <= area.y + area.height, `the grown window ${JSON.stringify(bounds)} left the display ${JSON.stringify(area)}`);
+  const bad = await page.evaluate(() => window.claerbout.request({ type: 'resize', width: 'wide' }));
+  check(bad?.resized === false, `a resize without a size was answered ${JSON.stringify(bad)}`);
+  console.log('zoom: resize sizes the content in DIP, held to the display');
 });
 
 fs.rmSync(work, { recursive: true, force: true });

@@ -852,7 +852,13 @@ stay put), not by `setAspectRatio`, whose macOS rule with an extra size
 fights AppKit's and jumps. A later `shape` with the same ratio and a changed
 `extra` (a panel opening beside the room) keeps the room and resizes the
 window round it. `{ratio: null}` lifts it. Since 0.2.7; an older shell
-answers `null`), `history` and `history {action: 'open', at?}` without `inline`
+answers `null`), `resize {width, height}` (the window's content made that size, in
+the page's px, which are DIP: held to the window's minimum and its
+display's work area and kept on the display, answered `{resized: true,
+width, height}` with the size it got; a maximized or full-screen window
+is left alone, `{resized: false, reason}`. Plass's zoom: its paper is
+always the full width of its panel, so a zoom step sizes the window to
+the paper. Since 0.2.11; an older shell answers `null`), `history` and `history {action: 'open', at?}` without `inline`
 (the History window for this window's project, made or brought forward;
 answered `{opened: true}`; see "The history view"), `unsaved {unsaved,
 name, save, label?, detail?}` (what closing this window now would lose;
@@ -872,8 +878,10 @@ load, so a page's CSS px are always DIP. An app whose content zooms sets
 claerbout.on('zoom', ({ step }) => { /* 1 in, -1 out, 0 actual size */ });
 ```
 
-What a step means (Plass draws its paper larger, Knuth sets its type
-larger) and whether it is remembered are the page's own.
+What a step means and whether it is remembered are the page's own:
+Knuth sets its column larger in a wider measure; Plass, whose paper
+always fills its panel, sizes the window to the paper with a `resize`
+request.
 
 Closing a window that holds unsaved work (since 0.2.8):
 

@@ -1888,6 +1888,34 @@ async function answer(window, message) {
       setDocument(window, file);
       return { path: file };
     }
+    case 'resize': {
+      // The page asks for its window's content to be {width, height}, in
+      // its px (DIP: holdZoom): Plass's zoom, which keeps its paper the
+      // full width of its panel by sizing the window to the paper rather
+      // than the paper to the window. Held to the window's minimum and to
+      // its display's work area, and nudged back onto the display;
+      // answered with the content size it got. A maximized or full-screen
+      // window is left as it is: {resized: false, reason}. Since 0.2.11;
+      // an older shell answers null.
+      const width = Math.round(Number(message.width));
+      const height = Math.round(Number(message.height));
+      if (!(width > 0) || !(height > 0)) return { resized: false, reason: 'size' };
+      if (window.isFullScreen()) return { resized: false, reason: 'fullscreen' };
+      if (window.isMaximized()) return { resized: false, reason: 'maximized' };
+      const bounds = window.getBounds();
+      const [contentWidth, contentHeight] = window.getContentSize();
+      const chrome = { x: bounds.width - contentWidth, y: bounds.height - contentHeight };
+      const area = screen.getDisplayMatching(bounds).workArea;
+      const [minWidth, minHeight] = window.getMinimumSize();
+      const fit = (want, min, room) => Math.max(Math.min(want, room), Math.min(min, room));
+      window.setContentSize(fit(width, minWidth - chrome.x, area.width - chrome.x), fit(height, minHeight - chrome.y, area.height - chrome.y));
+      const grown = window.getBounds();
+      const x = Math.max(area.x, Math.min(grown.x, area.x + area.width - grown.width));
+      const y = Math.max(area.y, Math.min(grown.y, area.y + area.height - grown.height));
+      if (x !== grown.x || y !== grown.y) window.setPosition(x, y);
+      const [gotWidth, gotHeight] = window.getContentSize();
+      return { resized: true, width: gotWidth, height: gotHeight };
+    }
     case 'shape': {
       // The page asks its window to keep the shape of what it shows
       // (ManimLive: the scene's picture, which has a shape of its own —
