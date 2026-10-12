@@ -983,8 +983,11 @@ async function dropDocument(window, file) {
     return;
   }
   try {
-    // Any point over the page: the page's listener is on the window.
-    const data = { items: [], files: [file], dragOperationsMask: 1 };
+    // Any point over the page: the page's listener is on the window. The
+    // document's folder rides along (0.2.12): the page holds the project
+    // folder as well and never asks for it. The file goes first, which is
+    // all a page older than that looks at.
+    const data = { items: [], files: [file, path.dirname(file)], dragOperationsMask: 1 };
     for (const type of ['dragEnter', 'dragOver', 'drop']) {
       await debug.sendCommand('Input.dispatchDragEvent', { type, x: 300, y: 300, data });
     }
