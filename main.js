@@ -758,7 +758,12 @@ function pagePreferences() {
     contextIsolation: true,
     sandbox: true,
     nodeIntegration: false,
-    spellcheck: false,
+    // Chromium's spellchecker, as in a browser tab: the page's own
+    // `spellcheck` attribute decides what is checked (Plass's paper says
+    // yes, Knuth's code cells say no). Off from 0.2.0 to 0.2.12, which
+    // left Plass.app's prose unchecked; the right-click menu that
+    // Electron lacks is spellingMenu below. Since 0.2.13.
+    spellcheck: true,
     scrollBounce: scrollBounce(),
   };
 }
@@ -774,6 +779,39 @@ function holdZoom(contents) {
   contents.on('did-finish-load', () => {
     contents.setZoomLevel(0);
     void contents.setVisualZoomLevelLimits(1, 1);
+  });
+}
+
+/** The right-click menu of a document window's page, which Electron
+ *  leaves empty. On a word the spellchecker marked: Chromium's
+ *  suggestions, each replacing the word, and Add to Dictionary (macOS's
+ *  own custom dictionary, so the word is learned for every app); in
+ *  editable text, Cut, Copy and Paste besides; on a selection elsewhere,
+ *  Copy. Any other right-click shows nothing, as before, and a page that
+ *  handles contextmenu itself keeps its own menu (Chromium then never
+ *  asks). Since 0.2.13. */
+function spellingMenu(contents) {
+  contents.on('context-menu', (_event, params) => {
+    const items = [];
+    if (params.misspelledWord) {
+      for (const word of params.dictionarySuggestions) {
+        items.push({ label: word, click: () => contents.replaceMisspelling(word) });
+      }
+      if (items.length === 0) items.push({ label: 'No Guesses Found', enabled: false });
+      items.push({ type: 'separator' });
+      items.push({
+        label: 'Add to Dictionary',
+        click: () => contents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
+      });
+    }
+    if (params.isEditable) {
+      if (items.length > 0) items.push({ type: 'separator' });
+      items.push({ role: 'cut' }, { role: 'copy' }, { role: 'paste' });
+    } else if (params.selectionText.trim()) {
+      items.push({ role: 'copy' });
+    }
+    if (items.length === 0) return;
+    Menu.buildFromTemplate(items).popup({ window: BrowserWindow.fromWebContents(contents) ?? undefined });
   });
 }
 
@@ -797,6 +835,7 @@ function openWindow(url, document = null) {
   setDocument(window, document);
   const contents = window.webContents;
   holdZoom(contents);
+  spellingMenu(contents);
   // window.open from the page ("New" opens a fresh session) becomes one of
   // our windows; links out of the page (the docs, GitHub) go to the default
   // browser. Only the app's own origins render here.

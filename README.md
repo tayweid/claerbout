@@ -885,6 +885,18 @@ Knuth sets its column larger in a wider measure; Plass, whose paper
 always fills its panel, sizes the window to the paper with a `resize`
 request.
 
+Spelling (since 0.2.13). Chromium's spellchecker runs in every window,
+as in a browser tab: the page's own `spellcheck` attribute decides what
+is checked (Plass's paper says yes; Knuth's code cells, CodeMirror's, say
+no), and a word the checker marks gets the right-click menu Electron
+leaves empty: Chromium's suggestions, each replacing the word, and Add to
+Dictionary (macOS's custom dictionary, so the word is learned for every
+app). In editable text the menu has Cut, Copy and Paste besides; on a
+selection elsewhere, Copy (on a Mac a right-click selects the word under
+it, as in Chrome); any other right-click shows nothing. A page that
+handles `contextmenu` itself keeps its own menu. From 0.2.0 to 0.2.12 the
+checker was off, so Plass.app's prose went unmarked.
+
 Closing a window that holds unsaved work (since 0.2.8):
 
 `unsaved {unsaved, name, save, label?, detail?}`: the page says whether
@@ -1079,7 +1091,12 @@ never answers holds the window, a second close waiting on it, until the
 page crashes, after which the close asks nothing; the quit with two unsaved windows asks twice, a
 second ⌘Q joining it, and a Cancel stops it with every window open and the
 record untouched and still recording; Don’t Save twice and the app exits,
-the record closing its session), and then the update test: the fixture built twice under two build ids
+the record closing its session), then the spellchecker (`test/spellcheck.mjs`,
+on the fixture's editable line: a misspelling typed is marked, the
+right-click menu on it, caught in the main process instead of shown, leads
+with Chromium's suggestion, which replaces the word when pressed, then Add
+to Dictionary, Cut, Copy and Paste; a correct word gets the three alone,
+plain text Copy, the empty room nothing), and then the update test: the fixture built twice under two build ids
 (`CLAERBOUT_BUILD`), the first installed and updating itself to the second
 from a site folder (`smoke.mjs … update --unsaved`): first with a window
 holding unsaved work whose sheet answers Cancel, so the relaunch is
