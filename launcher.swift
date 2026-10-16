@@ -15,8 +15,12 @@
 //
 // Built by app/package.mjs with swiftc; Electron's own executable sits
 // beside this one as "<name> Electron".
+//
+// Run with --claerbout-default-for, it does one thing more and never
+// becomes Electron (below, "The default app for file types").
 
 import AppKit
+import UniformTypeIdentifiers
 
 let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
 let name = executable.lastPathComponent
@@ -25,6 +29,103 @@ let bundle = contents.deletingLastPathComponent()
 let electron = contents.appendingPathComponent("MacOS/\(name) Electron").path
 let framework = contents.appendingPathComponent(
     "Frameworks/Electron Framework.framework/Versions/A/Electron Framework").path
+
+// MARK: - The default app for file types
+
+// The app menu's "Make <Name> the Default Editor…" (main.js, default-for.js)
+// runs the bundle's executable as
+//
+//   <Name> --claerbout-default-for [--check] <extension>...
+//
+// and gets back, as JSON on stdout, each extension's type and the app that
+// opens it now. Without --check it first makes this bundle the default for
+// each of those types, as the Finder's Get Info › Open with › Change All
+// does. Compiled, because a script cannot reach Launch Services' setter
+// (JXA's $.LSCopyDefaultRoleHandlerForContentType comes back an untyped
+// function), and the deprecated LSSetDefaultRoleHandlerForContentType
+// answers noErr on macOS 26 and saves nothing. Since macOS 26.4 the
+// system confirms each change in a prompt of its own, one type at a time,
+// even for an app making itself the default ("Do you want all documents
+// with the extension ".x" to open with A, or to keep using B?"; Get Info
+// alone is spared it): so the menu passes only the types another app
+// opens now, and a prompt declined comes back as that type's error.
+
+struct Holder: Codable {
+    let name: String
+    let path: String
+    let id: String?
+    /// This app (by bundle identifier, so any copy of it).
+    let own: Bool
+}
+
+struct Kind: Codable {
+    let `extension`: String
+    let type: String?
+    /// The app that opens it now: after the setting, without --check.
+    let holder: Holder?
+    let error: String?
+}
+
+struct Report: Codable {
+    let app: String
+    let id: String?
+    let kinds: [Kind]
+}
+
+func defaultFor(_ arguments: [String]) -> Never {
+    let check = arguments.contains("--check")
+    let extensions = arguments.filter { $0 != "--check" }
+    guard !extensions.isEmpty else {
+        fputs("\(name): --claerbout-default-for [--check] <extension>...\n", stderr)
+        exit(2)
+    }
+    let ownID = Bundle(url: bundle)?.bundleIdentifier
+    let types = extensions.map { UTType(filenameExtension: $0) }
+    var errors: [String: String] = [:]
+
+    func holder(_ type: UTType) -> Holder? {
+        guard let app = NSWorkspace.shared.urlForApplication(toOpen: type) else { return nil }
+        let id = Bundle(url: app)?.bundleIdentifier
+        let own = id != nil ? id == ownID : app.standardizedFileURL == bundle.standardizedFileURL
+        return Holder(name: FileManager.default.displayName(atPath: app.path), path: app.path, id: id, own: own)
+    }
+
+    func report() -> Never {
+        let kinds = zip(extensions, types).map { ext, type -> Kind in
+            guard let type else { return Kind(extension: ext, type: nil, holder: nil, error: "no type for .\(ext)") }
+            return Kind(extension: ext, type: type.identifier, holder: holder(type), error: errors[type.identifier])
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(Report(app: bundle.path, id: ownID, kinds: kinds))) ?? Data("{}".utf8)
+        FileHandle.standardOutput.write(data + Data("\n".utf8))
+        exit(kinds.contains { $0.error != nil } ? 1 : 0)
+    }
+
+    if check { report() }
+    // One type at a time (.yml and .yaml are one), in the order given, so
+    // the prompts come one after another as the user answers them.
+    var pending: [UTType] = []
+    for type in types.compactMap({ $0 }) where !pending.contains(type) { pending.append(type) }
+    func next() {
+        guard !pending.isEmpty else { report() }
+        let type = pending.removeFirst()
+        NSWorkspace.shared.setDefaultApplication(at: bundle, toOpen: type) { error in
+            DispatchQueue.main.async {
+                if let error = error as NSError? {
+                    errors[type.identifier] = "\(error.localizedDescription) (\(error.domain) \(error.code))"
+                }
+                next()
+            }
+        }
+    }
+    next()
+    dispatchMain()
+}
+
+if let at = CommandLine.arguments.firstIndex(of: "--claerbout-default-for") {
+    defaultFor(Array(CommandLine.arguments[(at + 1)...]))
+}
 
 func become(_ documents: [String] = []) -> Never {
     let args = [electron] + CommandLine.arguments.dropFirst() + documents

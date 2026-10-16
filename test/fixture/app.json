@@ -15,6 +15,7 @@
   "documentTypes": [
     { "name": "Text file", "role": "Editor", "rank": "Alternate", "contentTypes": ["public.plain-text"], "extensions": ["txt"] }
   ],
+  "defaultFor": { "name": "probe files", "extensions": ["claerboutprobe"] },
   "smoke": {
     "document": "note.txt",
     "text": "hello from the fixture\n",

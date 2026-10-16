@@ -89,6 +89,7 @@ copies it into the bundle as `app.json`.
 | `icon` | A PNG, 512 px or larger, relative to the config. |
 | `copyright` | For the bundle's Info.plist. |
 | `documentTypes` | Finder's Open With: `name`, `role`, `rank` (`Alternate` unless you mean to take the type), and `contentTypes` (UTIs) or `extensions`. |
+| `defaultFor` | `{name, extensions}`: the app menu's Make `<Name>` the Default Editor… (below), for these extensions (`["rs", "go", …]`, dots optional; each should be one `documentTypes` claims). `name` (`"code"`) is what the ask calls them. Absent, no item; a checkout never has one. Since 0.2.14. |
 | `site` | The URL the install line downloads from (`https://knuth.tayweid.io`); the zips and `latest.json` live at `<site>/app/`, and the app checks there for updates. |
 | `elsewhere` | A sentence the install line adds when run off macOS. |
 | `autosave` | `true` keeps the autosave record of every project a window is on (below). Knuth and Plass set it; ManimLive does not. |
@@ -123,6 +124,43 @@ copies it into the bundle as `app.json`.
   the bundle, on `PYTHONPATH`, and changes with the app.
 - It runs with `PYTHONPATH` set to the bundle's `python/` folder, and
   `PYTHONDONTWRITEBYTECODE=1`: the bundle is not the engine's to write.
+
+## The default editor
+
+An app never takes a file type on install: every type it declares is
+ranked `Alternate`, so double-clicking a file still opens whatever opened
+it before. With `defaultFor` in its config, the app menu of the built app
+has **Make `<Name>` the Default Editor…**, the user's way to promote it for
+all of those extensions at once rather than through the Finder's Get Info ›
+Open with › Change All once per extension (`default-for.js`).
+
+The item first looks, without changing anything, at which app opens each
+extension now; then it asks, Cancel the default: how many kinds of file,
+which of them open in another app (by app), and that macOS will ask about
+each change. With nothing to change, it says so and stops. Otherwise it
+makes the app the default for those types alone, one type at a time, and
+says afterwards which, if any, were left as they were.
+
+The work is the bundle's executable's (`launcher.swift`), which Launch
+Services' setter needs (a script cannot reach it): `<Name>
+--claerbout-default-for [--check] <extension>...` prints, as JSON, each
+extension's type and the app that opens it (`own` when it is this app, by
+bundle identifier); without `--check` it first calls
+`NSWorkspace.setDefaultApplication(at:toOpen:)` for each type, and a
+change refused comes back as that type's `error`. It never becomes
+Electron.
+
+Since macOS 26.4, every change of a file type's default app is confirmed
+by the user in a prompt of the system's own, one per type, even for an
+app making itself the default: "Do you want all documents with the
+extension ".x" to open with A, or to keep using B?" Only the Finder's Get
+Info is spared it (Scripting OS X, "macOS 26.4 brings more default app
+confirmation prompts", 2026-03), and the deprecated
+`LSSetDefaultRoleHandlerForContentType` answers `noErr` and saves nothing.
+That is why the item changes only what another app opens, one type at a
+time, and says the prompts are coming. Measured 2026-10-16 on macOS 26.6:
+a run for 87 of Knuth's types put up 87 prompts, and a call whose prompt is not
+accepted comes back as `NSCocoaErrorDomain 256`.
 
 ## Updating
 
@@ -1043,7 +1081,11 @@ likewise), the close guard's decisions (`test/close-guard.test.mjs`, its
 I/O faked: the report, the sheet for each kind of save, a close settled
 every way, the window's close event, one settle per window, and the quit
 asking each window in turn, stopped by a Cancel, joined by a second quit,
-made a relaunch), the smoke test on `test/fixture`, a page with no Python that
+made a relaunch), Make `<Name>` the Default Editor… (`test/default-for.test.mjs`:
+the config's `defaultFor` as read, when the menu has the item, the ask and
+what is said after; and `launcher.swift` compiled into a bundle of its own
+and asked with `--check` about made-up extensions — never a change, which is
+a prompt for the user since macOS 26.4), the smoke test on `test/fixture`, a page with no Python that
 reads its document through the shell and writes a copy beside it (and, the
 fixture keeping the record, checks its `session open` commit and that
 the record wrote nothing into the document's folder by itself, then

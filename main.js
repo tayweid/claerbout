@@ -2137,6 +2137,38 @@ function choosePython() {
   if (!installing) showSetup(null);
 }
 
+/** Make <Name> the Default Editor… (default-for.js): a look at which app
+ *  opens each extension the config's `defaultFor` lists, the ask, then
+ *  the change for those another app opens, through the bundle's
+ *  executable (launcher.swift). One run at a time: macOS's own prompts,
+ *  one per type, may keep it waiting on the user. */
+const DefaultFor = require('./default-for.js');
+const defaultFor = DefaultFor.read(config);
+let defaultForRun = null;
+function makeDefault() {
+  defaultForRun ??= (async () => {
+    const launcher = DefaultFor.launcherOf(process.execPath, NAME);
+    try {
+      const look = await DefaultFor.ask(launcher, defaultFor.extensions);
+      const { change, options } = DefaultFor.confirmation(NAME, defaultFor, look);
+      const { response } = await dialog.showMessageBox(options);
+      if (change.length === 0 || response !== 1) return;
+      log(`default editor: asking for ${change.map((extension) => `.${extension}`).join(' ')}`);
+      const after = await DefaultFor.ask(launcher, change, { set: true });
+      for (const kind of after.kinds) if (kind.error) log(`default editor: .${kind.extension}: ${kind.error}`);
+      const left = DefaultFor.outcome(NAME, after);
+      log(`default editor: ${left ? left.message.toLowerCase() : 'done'}`);
+      if (left) await dialog.showMessageBox(left);
+    } catch (error) {
+      log(`default editor: ${error.message}`);
+      await dialog.showMessageBox({ type: 'warning', message: `${NAME} could not be made the default editor`, detail: `${error.message}\n\nLog: ${logPath}`, buttons: ['OK'] });
+    } finally {
+      defaultForRun = null;
+    }
+  })();
+  return defaultForRun;
+}
+
 const when = (build) => (build?.built ? `, built ${build.built.slice(0, 10)}` : '');
 
 /** Check for Updates… in the menu: the answer in a dialog, and the offer
@@ -2364,6 +2396,7 @@ function buildMenu() {
   const appItems = [
     // A choice only where there is one.
     ...(pythons.length > 1 ? [{ label: 'Choose Python…', click: choosePython }] : []),
+    ...(DefaultFor.offered({ defaultFor, isPackaged: app.isPackaged, isMac }) ? [{ label: DefaultFor.label(NAME), click: () => void makeDefault() }] : []),
     { label: 'Check for Updates…', click: () => void checkForUpdates() },
     { label: 'Show Log', click: () => void shell.openPath(logPath) },
   ];

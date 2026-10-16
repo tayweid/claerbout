@@ -27,6 +27,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { packager } from '@electron/packager';
+import { compileLauncher } from './launcher.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -152,7 +153,7 @@ rmSync(stage, { recursive: true, force: true });
 // The shell, with the app's config beside it as app.json.
 const appDir = path.join(stage, 'app');
 mkdirSync(appDir, { recursive: true });
-for (const file of ['main.js', 'preload.js', 'update.js', 'autosave.js', 'history.js', 'close-guard.js']) cpSync(path.join(here, file), path.join(appDir, file));
+for (const file of ['main.js', 'preload.js', 'update.js', 'autosave.js', 'history.js', 'close-guard.js', 'default-for.js']) cpSync(path.join(here, file), path.join(appDir, file));
 // The shell's own pages (the history view), served under /_claerbout/.
 cpSync(path.join(here, 'history'), path.join(appDir, 'history'), { recursive: true });
 cpSync(configPath, path.join(appDir, 'app.json'));
@@ -212,34 +213,6 @@ const documentTypes = (config.documentTypes ?? []).map((type) => ({
   LSHandlerRank: type.rank ?? 'Alternate',
   ...(type.contentTypes ? { LSItemContentTypes: type.contentTypes } : { CFBundleTypeExtensions: type.extensions }),
 }));
-
-// The command-line tools can ship an SDK newer than their own compiler,
-// which swiftc refuses: take the newest SDK it accepts, else the default
-// one (Xcode's, on the deploy's Mac).
-let chosenSDK = null;
-function sdk() {
-  if (chosenSDK) return chosenSDK;
-  const tools = '/Library/Developer/CommandLineTools/SDKs';
-  const probe = path.join(build, 'probe.swift');
-  writeFileSync(probe, 'import Foundation\n');
-  const candidates = existsSync(tools)
-    ? readdirSync(tools)
-        .filter((entry) => /^MacOSX\d+\.\d+\.sdk$/.test(entry))
-        .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))
-        .map((entry) => path.join(tools, entry))
-    : [];
-  for (const candidate of candidates) {
-    try {
-      execFileSync('swiftc', ['-sdk', candidate, '-swift-version', '5', '-typecheck', probe], { stdio: 'ignore' });
-      chosenSDK = candidate;
-      break;
-    } catch {
-      // Too new for this compiler.
-    }
-  }
-  chosenSDK ??= execFileSync('xcrun', ['--show-sdk-path'], { encoding: 'utf8' }).trim();
-  return chosenSDK;
-}
 
 const frameworkName = 'Electron Framework.framework';
 // What the zips are, for an installed app checking for an update
@@ -304,14 +277,7 @@ for (const arch of archs) {
   }
   writeFileSync(path.join(contents, 'Resources', 'framework.sha256'), `${manifest.sort((a, b) => a.slice(66).localeCompare(b.slice(66))).join('\n')}\n`);
   renameSync(path.join(contents, 'MacOS', config.name), path.join(contents, 'MacOS', `${config.name} Electron`));
-  execFileSync('swiftc', [
-    '-O',
-    '-swift-version', '5',
-    '-sdk', sdk(),
-    '-target', `${arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macos13.0`,
-    '-o', path.join(contents, 'MacOS', config.name),
-    path.join(here, 'launcher.swift'),
-  ]);
+  compileLauncher({ arch, out: path.join(contents, 'MacOS', config.name), scratch: build });
   cpSync(path.join(here, 'complete.sh'), path.join(contents, 'Resources', 'complete.sh'));
   // Ad-hoc signatures for what the packager renamed (the helper apps) and
   // the outer bundle, as it ships: without the framework, which keeps
