@@ -826,6 +826,10 @@ function openWindow(url, document = null) {
     ...titleBar(),
     title: document ? path.basename(document) : NAME,
     show: false,
+    // A click on a window in the back acts as well as bringing it forward:
+    // macOS otherwise spends it on the activation, and a button pressed
+    // while coming back from another app took two clicks.
+    acceptFirstMouse: true,
     webPreferences: pagePreferences(),
   });
   if (last) {
@@ -1176,6 +1180,7 @@ async function openHistory(source, at = null) {
     ...(isMac ? { titleBarStyle: 'hiddenInset', titleBarOverlay: true, trafficLightPosition: { x: 16, y: 15 } } : {}),
     title: target.root ? `History — ${path.basename(target.root)}` : 'History',
     show: false,
+    acceptFirstMouse: true,
     webPreferences: pagePreferences(),
   });
   if (source && !source.isDestroyed()) {
