@@ -633,6 +633,8 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
       }, view.id);
       if (!focused) await page.waitForTimeout(100);
     }
+    // What the page hears, for the failure below.
+    await inView(view.id, "window.__keys = []; addEventListener('keydown', (e) => window.__keys.push(e.key + (e.defaultPrevented ? '!' : '')), true); addEventListener('keydown', (e) => window.__keys.push('after:' + e.key + (e.defaultPrevented ? '!' : ''))); true").catch(() => null);
     await app.evaluate(({ webContents }, id) => {
       const contents = webContents.fromId(id);
       contents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
@@ -642,9 +644,18 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
     if (left) {
       const seen = await inView(
         view.id,
-        "({ focus: document.hasFocus(), busy: document.body.classList.contains('busy'), toast: !document.getElementById('toast').hidden, active: document.activeElement && document.activeElement.tagName })",
+        "({ focus: document.hasFocus(), busy: document.body.classList.contains('busy'), toast: !document.getElementById('toast').hidden, card: !!document.getElementById('card') && !document.getElementById('card').hidden && document.getElementById('card').childElementCount > 0, keys: window.__keys || null, active: document.activeElement && document.activeElement.tagName, inline: location.search })",
       ).catch((error) => ({ error: String(error) }));
-      await fail(`Escape left a view over the room (${left.url}; the view ${focused ? 'had' : 'never took'} the focus; ${JSON.stringify(seen)})`);
+      // A second Escape tells a first one spent elsewhere (a selection, a
+      // card) from a put-away that never happens.
+      await app.evaluate(({ webContents }, id) => {
+        const contents = webContents.fromId(id);
+        contents.focus();
+        contents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+        contents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+      }, view.id);
+      const second = (await historyView(false)) ? 'a second Escape left it too' : 'a second Escape put it away';
+      await fail(`Escape left a view over the room (${left.url}; the view ${focused ? 'had' : 'never took'} the focus; ${JSON.stringify(seen)}; ${second})`);
     }
     for (let i = 0; i < 20 && (await inlineStates()).at(-1) !== 'closed'; i++) await page.waitForTimeout(100);
     if ((await inlineStates()).at(-1) !== 'closed') await fail(`after Escape the page heard ${JSON.stringify(await inlineStates())}, not {kind: 'inline', state: 'closed'}`);
