@@ -615,15 +615,37 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
     }, smoke.room);
     if (again?.opened !== true || again.inline !== true || (await views()).length !== 1) await fail(`a second open was answered ${JSON.stringify(again)} with ${(await views()).length} views`);
 
-    // Escape in the view puts it away.
+    // Escape in the view puts it away. The window comes forward and the view
+    // holds the keyboard before the key is sent: on a CI runner the window
+    // need not be the key window, and a key sent to a view without focus
+    // reaches nothing (Knuth's deploy, 2026-10-17, passing on every Mac
+    // here). If the view stays, the failure says what it saw.
+    await host.evaluate((win) => {
+      win.show();
+      win.focus();
+    });
+    let focused = false;
+    for (let i = 0; i < 40 && !focused; i++) {
+      focused = await app.evaluate(({ webContents }, id) => {
+        const contents = webContents.fromId(id);
+        contents.focus();
+        return contents.isFocused();
+      }, view.id);
+      if (!focused) await page.waitForTimeout(100);
+    }
     await app.evaluate(({ webContents }, id) => {
       const contents = webContents.fromId(id);
-      contents.focus();
       contents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
       contents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
     }, view.id);
     const left = await historyView(false);
-    if (left) await fail(`Escape left a view over the room (${left.url})`);
+    if (left) {
+      const seen = await inView(
+        view.id,
+        "({ focus: document.hasFocus(), busy: document.body.classList.contains('busy'), toast: !document.getElementById('toast').hidden, active: document.activeElement && document.activeElement.tagName })",
+      ).catch((error) => ({ error: String(error) }));
+      await fail(`Escape left a view over the room (${left.url}; the view ${focused ? 'had' : 'never took'} the focus; ${JSON.stringify(seen)})`);
+    }
     for (let i = 0; i < 20 && (await inlineStates()).at(-1) !== 'closed'; i++) await page.waitForTimeout(100);
     if ((await inlineStates()).at(-1) !== 'closed') await fail(`after Escape the page heard ${JSON.stringify(await inlineStates())}, not {kind: 'inline', state: 'closed'}`);
     // Put away, the page is kept for the next open: one, never a second.
