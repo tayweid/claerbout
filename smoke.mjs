@@ -516,11 +516,16 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
           .filter((view) => view.webContents && view.webContents !== win.webContents && !view.webContents.isDestroyed())
           .map((view) => ({ id: view.webContents.id, url: view.webContents.getURL(), bounds: view.getBounds(), visible: view.getVisible() })),
       );
-    // The History view up (want) or put away (not want: none visible).
+    // The History view up (want) or put away (not want: none visible; null
+    // then). One look per try: two, a put-away landing between them read
+    // the first's view as still up, and Escape as failing (the runner's
+    // "Escape left a view over the room", 2026-10-17).
     const historyView = async (want = true) => {
       for (let i = 0; i < 60; i++) {
-        const found = (await views()).find((view) => view.visible && view.url.includes('/_claerbout/history.html?inline=1')) ?? null;
-        if (want ? found : !(await views()).some((view) => view.visible)) return found;
+        const all = await views();
+        const found = all.find((view) => view.visible && view.url.includes('/_claerbout/history.html?inline=1')) ?? null;
+        if (want && found) return found;
+        if (!want && !all.some((view) => view.visible)) return null;
         await page.waitForTimeout(250);
       }
       return want ? null : (await views()).find((view) => view.visible) ?? { url: '?' };
@@ -635,16 +640,18 @@ if (config.autosave === true && Array.isArray(smoke.autosave) && smoke.autosave.
     }
     // What the page hears, for the failure below.
     await inView(view.id, "window.__keys = []; addEventListener('keydown', (e) => window.__keys.push(e.key + (e.defaultPrevented ? '!' : '')), true); addEventListener('keydown', (e) => window.__keys.push('after:' + e.key + (e.defaultPrevented ? '!' : ''))); true").catch(() => null);
-    await app.evaluate(({ webContents }, id) => {
-      const contents = webContents.fromId(id);
-      contents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
-      contents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
-    }, view.id);
+    const escape = () =>
+      app.evaluate(({ webContents }, id) => {
+        const contents = webContents.fromId(id);
+        contents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+        contents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+      }, view.id);
+    await escape();
     const left = await historyView(false);
     if (left) {
       const seen = await inView(
         view.id,
-        "({ focus: document.hasFocus(), busy: document.body.classList.contains('busy'), toast: !document.getElementById('toast').hidden, card: !!document.getElementById('card') && !document.getElementById('card').hidden && document.getElementById('card').childElementCount > 0, keys: window.__keys || null, active: document.activeElement && document.activeElement.tagName, inline: location.search })",
+        "({ focus: document.hasFocus(), busy: document.body.classList.contains('busy'), toast: !document.getElementById('toast').hidden, selected: !!document.querySelector('#rows .row.sel'), card: !!document.getElementById('card') && !document.getElementById('card').hidden && document.getElementById('card').childElementCount > 0, keys: window.__keys || null, active: document.activeElement && document.activeElement.tagName, inline: location.search })",
       ).catch((error) => ({ error: String(error) }));
       // A second Escape tells a first one spent elsewhere (a selection, a
       // card) from a put-away that never happens.
