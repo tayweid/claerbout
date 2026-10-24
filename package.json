@@ -1,6 +1,6 @@
 {
   "name": "claerbout",
-  "version": "0.2.19",
+  "version": "0.2.20",
   "description": "The Claerbout shell: one Electron shell, built once per app (Knuth, Plass, ManimLive) from a config, shipping without Electron's framework and completing itself.",
   "license": "MIT",
   "repository": "github:tayweid/claerbout",
@@ -38,7 +38,7 @@
   "dependencies": {
     "@electron/packager": "^20.3.0",
     "@playwright/test": "^1.62.1",
-    "electron": "44.5.0"
+    "electron": "44.9.3"
   },
   "engines": {
     "node": ">=22"
