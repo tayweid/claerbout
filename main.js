@@ -1867,12 +1867,18 @@ async function answer(window, message) {
   const start = documents.get(window);
   switch (type) {
     case 'open': {
+      // {folder: true} asks for a folder instead of a file (Keller's class
+      // folder), with `prompt`, if given, as the panel's line. A folder is
+      // no document: the window's file stays as it was. An older shell
+      // ignores both and answers with a file.
+      const folder = message.folder === true;
       const { canceled, filePaths } = await dialog.showOpenDialog(window, {
-        properties: ['openFile'],
+        properties: [folder ? 'openDirectory' : 'openFile'],
         defaultPath: start ? path.dirname(start) : undefined,
+        ...(typeof message.prompt === 'string' && message.prompt ? { message: message.prompt } : {}),
       });
       const chosen = canceled ? null : (filePaths[0] ?? null);
-      if (chosen) setDocument(window, chosen);
+      if (chosen && !folder) setDocument(window, chosen);
       return { path: chosen };
     }
     case 'saveAs': {

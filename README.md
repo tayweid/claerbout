@@ -850,7 +850,9 @@ holds, from a handle's `getFile()`, a picker or a drop: Electron's
 answered only from the origin the shell loaded into that window.
 
 Requests: `open` and `saveAs {name}` (the native panels; `{path}` or
-`{path: null}`), `read {path}`, `write {path, text}`, `stat {path}`,
+`{path: null}`; `open {folder: true, prompt?}` chooses a folder, which
+is not taken as the window's document. Since 0.2.19; an older shell
+answers with a file), `read {path}`, `write {path, text}`, `stat {path}`,
 `rename {path, name}`, `remove {path}` (files by absolute path, replies
 shaped like Knuth's engine's), `choose {python}` (the setup page's
 answer), `status {state}` and `error {message}` (logged), `ready` (the
