@@ -279,25 +279,32 @@ for (const arch of archs) {
   renameSync(path.join(contents, 'MacOS', config.name), path.join(contents, 'MacOS', `${config.name} Electron`));
   compileLauncher({ arch, out: path.join(contents, 'MacOS', config.name), scratch: build });
   cpSync(path.join(here, 'complete.sh'), path.join(contents, 'Resources', 'complete.sh'));
-  // Ad-hoc signatures for what the packager renamed (the helper apps) and
-  // the outer bundle, as it ships: without the framework, which keeps
+  // Signatures for what the packager renamed (the helper apps) and the
+  // outer bundle, as it ships: without the framework, which keeps
   // Electron's own signature wherever it comes from. Only on Apple
   // silicon, which refuses unsigned code: Electron's x64 release ships
   // unsigned, and an Intel Mac runs it so.
+  //
+  // Ad hoc unless CLAERBOUT_SIGN names a code-signing certificate in the
+  // keychain (a self-signed one will do). An ad-hoc app is known to macOS
+  // by its hash, so each build is a new app to its privacy settings and
+  // loses what the last one was allowed (a OneDrive folder, say); signed
+  // with one certificate, every build is the same app.
   if (arch === 'arm64') {
+    const sign = process.env.CLAERBOUT_SIGN || '-';
     const frameworks = path.join(contents, 'Frameworks');
     // Electron's three small frameworks (Mantle, ReactiveObjC, Squirrel)
     // ship with signatures that fail a deep check, which a browser
     // download's Gatekeeper makes: it calls the app "damaged", with no
     // Open Anyway. They are never shared, so they are signed afresh too.
     for (const entry of readdirSync(frameworks).filter((name) => name.endsWith('.app') || name.endsWith('.framework'))) {
-      execFileSync('codesign', ['--force', '--sign', '-', path.join(frameworks, entry)]);
+      execFileSync('codesign', ['--force', '--sign', sign, path.join(frameworks, entry)]);
     }
-    execFileSync('codesign', ['--force', '--sign', '-', bundle]);
+    execFileSync('codesign', ['--force', '--sign', sign, bundle]);
     // Deep, as Gatekeeper checks a download.
     execFileSync('codesign', ['--verify', '--deep', '--strict', bundle]);
   }
-  console.log(`built ${bundle} (Electron ${electronVersion}, ${arch}, without its framework)`);
+  console.log(`built ${bundle} (Electron ${electronVersion}, ${arch}, without its framework${arch === 'arm64' && process.env.CLAERBOUT_SIGN ? `, signed by ${process.env.CLAERBOUT_SIGN}` : ''})`);
 
   if (zipTo) {
     mkdirSync(zipTo, { recursive: true });

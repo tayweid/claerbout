@@ -55,6 +55,11 @@ Scripts an app typically has:
   (`<Name>-<arch>.zip`, and `<Name>.app.zip` for a page's download
   button); `--web dist` takes the page from a site build. Needs macOS with
   Apple's command-line tools (`swiftc`, `sips`, `iconutil`, `codesign`).
+  On Apple silicon the bundle is signed ad hoc, unless `CLAERBOUT_SIGN`
+  names a code-signing certificate in the keychain (a self-signed one
+  will do): macOS knows an ad-hoc app by its hash, so each build loses
+  the privacy permissions the last one had (a OneDrive folder, say), and
+  builds signed with one certificate keep them.
 - `--install-script <file>` renders `install.template` for the app: the
   `curl … | bash` line users run. Commit the output (Knuth's
   `public/install`) so the site serves it.
